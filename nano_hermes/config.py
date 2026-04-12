@@ -62,10 +62,16 @@ class ReflectionConfig(BaseModel):
     recent_limit: int = 5   # max reflections injected per iteration
 
 
+class SkillStatsConfig(BaseModel):
+    """Config for skill usage stat tracking."""
+    min_uses_for_success_rate: int = 3  # Don't display rate below this threshold
+
+
 class NanoHermesConfig(BaseModel):
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     memory: MemoryBudgets = Field(default_factory=MemoryBudgets)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
+    skill_stats: SkillStatsConfig = Field(default_factory=SkillStatsConfig)
     trajectory_retention_days: int = 45
     reflection_scope: Literal["session", "global"] = "session"

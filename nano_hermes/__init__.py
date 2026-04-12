@@ -24,6 +24,7 @@ from .hook import NanoHermesHook
 from .memory.tool import MemoryPatchTool
 from .reflect.tool import ReflectTool
 from .session.search import SessionSearchTool
+from .skills.stats_tool import SkillStatsTool
 from .skills.tool import SkillSearchTool
 
 if TYPE_CHECKING:
@@ -37,6 +38,7 @@ __all__ = [
     "MemoryPatchTool",
     "SessionSearchTool",
     "SkillSearchTool",
+    "SkillStatsTool",
     "ReflectTool",
     "__version__",
 ]
@@ -64,5 +66,6 @@ def install(
     loop.tools.register(MemoryPatchTool(hook=hook))
     loop.tools.register(SessionSearchTool(hook=hook))
     loop.tools.register(SkillSearchTool(hook=hook))
+    loop.tools.register(SkillStatsTool(hook=hook))
     loop.tools.register(ReflectTool(hook=hook))
     return hook

@@ -823,3 +823,354 @@ class TestSalienceNudge:
         await hook.before_iteration(ctx)
         await hook.after_iteration(ctx)
         assert hook._nudge_pending is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: skill usage tracking → skill_stats
+# ---------------------------------------------------------------------------
+
+from nanobot.providers.base import ToolCallRequest  # noqa: E402
+
+
+class TestSkillUsageTracking:
+    """skill_search candidates credited to skill_stats after tool work."""
+
+    async def test_use_count_increments_after_tool_calls(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _copy_bundled_skill("duckduckgo-search", tmp_path)
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        messages: list[dict] = [{"role": "user", "content": "find me something"}]
+        ctx0 = AgentHookContext(iteration=0, messages=messages)
+        await hook.before_iteration(ctx0)
+
+        # Simulate skill_search returning duckduckgo-search
+        await hook.skill_indexer.refresh()
+        hook.record_skill_candidates(["duckduckgo-search"])
+
+        # Simulate the agent making a tool call this iteration
+        tc = MagicMock(spec=ToolCallRequest)
+        ctx0 = AgentHookContext(
+            iteration=0, messages=messages, tool_calls=[tc]
+        )
+        await hook.after_iteration(ctx0)
+
+        row = hook.db.execute(
+            "SELECT use_count, success_count FROM skill_stats WHERE name = ?",
+            ("duckduckgo-search",),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 1   # use_count
+        assert row[1] == 1   # success_count (no error)
+
+    async def test_error_iteration_does_not_increment_success_count(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _copy_bundled_skill("duckduckgo-search", tmp_path)
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        messages: list[dict] = [{"role": "user", "content": "find me something"}]
+        ctx = AgentHookContext(iteration=0, messages=messages)
+        await hook.before_iteration(ctx)
+
+        await hook.skill_indexer.refresh()
+        hook.record_skill_candidates(["duckduckgo-search"])
+
+        tc = MagicMock(spec=ToolCallRequest)
+        ctx_err = AgentHookContext(
+            iteration=0, messages=messages, tool_calls=[tc], error="network timeout"
+        )
+        await hook.after_iteration(ctx_err)
+
+        row = hook.db.execute(
+            "SELECT use_count, success_count FROM skill_stats WHERE name = ?",
+            ("duckduckgo-search",),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 1   # use_count incremented
+        assert row[1] == 0   # success_count NOT incremented
+
+    async def test_no_tool_calls_skips_credit(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _copy_bundled_skill("duckduckgo-search", tmp_path)
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        messages: list[dict] = [{"role": "user", "content": "hi"}]
+        ctx = AgentHookContext(iteration=0, messages=messages)
+        await hook.before_iteration(ctx)
+
+        await hook.skill_indexer.refresh()
+        hook.record_skill_candidates(["duckduckgo-search"])
+
+        # No tool_calls in context — agent just replied with text
+        await hook.after_iteration(ctx)
+
+        row = hook.db.execute(
+            "SELECT use_count FROM skill_stats WHERE name = ?",
+            ("duckduckgo-search",),
+        ).fetchone()
+        assert row is None or row[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: skill_stats tool
+# ---------------------------------------------------------------------------
+
+from nano_hermes.skills.stats_tool import SkillStatsTool  # noqa: E402
+
+
+class TestSkillStatsQuery:
+    def test_tool_registered(self, loop: AgentLoop) -> None:
+        nano_hermes.install(loop)
+        assert "skill_stats" in loop.tools
+        assert isinstance(loop.tools.get("skill_stats"), SkillStatsTool)
+
+    async def test_no_usage_returns_empty_message(
+        self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _unset_embedding_keys(monkeypatch)
+        nano_hermes.install(loop)
+        tool = loop.tools.get("skill_stats")
+        out = await tool.execute()
+        assert "No skill usage" in out
+
+    async def test_shows_usage_after_tracking(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _copy_bundled_skill("duckduckgo-search", tmp_path)
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        # Seed one successful use
+        messages: list[dict] = [{"role": "user", "content": "search something"}]
+        ctx = AgentHookContext(iteration=0, messages=messages)
+        await hook.before_iteration(ctx)
+        await hook.skill_indexer.refresh()
+        hook.record_skill_candidates(["duckduckgo-search"])
+        tc = MagicMock(spec=ToolCallRequest)
+        await hook.after_iteration(
+            AgentHookContext(iteration=0, messages=messages, tool_calls=[tc])
+        )
+
+        tool = loop.tools.get("skill_stats")
+        out = await tool.execute()
+        assert "duckduckgo-search" in out
+        assert "uses: 1" in out
+
+    async def test_single_skill_query(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _copy_bundled_skill("duckduckgo-search", tmp_path)
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        await hook.skill_indexer.refresh()
+        hook.record_skill_candidates(["duckduckgo-search"])
+        tc = MagicMock(spec=ToolCallRequest)
+        messages: list[dict] = [{"role": "user", "content": "q"}]
+        ctx = AgentHookContext(iteration=0, messages=messages)
+        await hook.before_iteration(ctx)
+        await hook.after_iteration(
+            AgentHookContext(iteration=0, messages=messages, tool_calls=[tc])
+        )
+
+        tool = loop.tools.get("skill_stats")
+        out = await tool.execute(name="duckduckgo-search")
+        assert "duckduckgo-search" in out
+
+        out_missing = await tool.execute(name="no-such-skill")
+        assert "No stats" in out_missing
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: trajectory writing on session boundary
+# ---------------------------------------------------------------------------
+
+class TestTrajectoryWrite:
+    async def test_trajectory_written_on_session_boundary(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        # Session A
+        msgs_a: list[dict] = [
+            {"role": "user", "content": "write me a haiku about pandas"},
+            {"role": "assistant", "content": "Bears of bamboo dreams..."},
+        ]
+        ctx_a = AgentHookContext(iteration=0, messages=msgs_a)
+        await hook.before_iteration(ctx_a)
+        await hook.after_iteration(ctx_a)
+        session_a = hook.current_session_id
+        assert session_a is not None
+
+        # Starting session B causes _finalize_trajectory for A
+        msgs_b: list[dict] = [{"role": "user", "content": "new task"}]
+        ctx_b = AgentHookContext(iteration=0, messages=msgs_b)
+        await hook.before_iteration(ctx_b)
+
+        rows = hook.db.execute(
+            "SELECT session_id, task, outcome FROM trajectories"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == session_a
+        assert "haiku" in rows[0][1]
+        assert rows[0][2] == "ok"  # no errors
+
+    async def test_trajectory_outcome_fail_on_short_error_session(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        msgs_a: list[dict] = [{"role": "user", "content": "do the impossible"}]
+        ctx_a = AgentHookContext(iteration=0, messages=msgs_a, error="crashed")
+        await hook.before_iteration(ctx_a)
+        await hook.after_iteration(ctx_a)
+
+        msgs_b: list[dict] = [{"role": "user", "content": "new task"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs_b))
+
+        row = hook.db.execute(
+            "SELECT outcome FROM trajectories"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "fail"
+
+    async def test_trajectory_includes_skills_used(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _copy_bundled_skill("duckduckgo-search", tmp_path)
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        msgs_a: list[dict] = [{"role": "user", "content": "search for something"}]
+        ctx_a = AgentHookContext(iteration=0, messages=msgs_a)
+        await hook.before_iteration(ctx_a)
+        await hook.skill_indexer.refresh()
+        hook.record_skill_candidates(["duckduckgo-search"])
+        tc = MagicMock(spec=ToolCallRequest)
+        await hook.after_iteration(
+            AgentHookContext(iteration=0, messages=msgs_a, tool_calls=[tc])
+        )
+
+        msgs_b: list[dict] = [{"role": "user", "content": "next task"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs_b))
+
+        import json as _json
+        row = hook.db.execute(
+            "SELECT skills_used FROM trajectories"
+        ).fetchone()
+        assert row is not None
+        skills = _json.loads(row[0])
+        assert "duckduckgo-search" in skills
+
+    async def test_no_trajectory_for_system_only_session(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sessions with no user message produce no trajectory row."""
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        msgs_a: list[dict] = [{"role": "system", "content": "initializing"}]
+        ctx_a = AgentHookContext(iteration=0, messages=msgs_a)
+        await hook.before_iteration(ctx_a)
+        await hook.after_iteration(ctx_a)
+
+        msgs_b: list[dict] = [{"role": "user", "content": "next task"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs_b))
+
+        count = hook.db.execute("SELECT COUNT(*) FROM trajectories").fetchone()[0]
+        assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: purge_older_than runs on session start
+# ---------------------------------------------------------------------------
+
+class TestPurgeOnStartup:
+    async def test_old_trajectories_purged_at_iteration_zero(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import time as _time
+
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop, config={"trajectory_retention_days": 30})
+
+        # Seed an old trajectory (60 days ago)
+        old_ts = _time.time() - 60 * 86400
+        hook.db.execute(
+            "INSERT INTO trajectories (task, outcome, created_at) VALUES (?, ?, ?)",
+            ("old task", "ok", old_ts),
+        )
+        hook.db.commit()
+
+        assert hook.db.execute(
+            "SELECT COUNT(*) FROM trajectories"
+        ).fetchone()[0] == 1
+
+        # Trigger iteration 0 — purge should fire
+        messages: list[dict] = [{"role": "user", "content": "new session"}]
+        ctx = AgentHookContext(iteration=0, messages=messages)
+        await hook.before_iteration(ctx)
+
+        assert hook.db.execute(
+            "SELECT COUNT(*) FROM trajectories"
+        ).fetchone()[0] == 0
+
+    async def test_recent_trajectories_are_kept(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import time as _time
+
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop, config={"trajectory_retention_days": 30})
+
+        # Seed a recent trajectory (5 days ago)
+        recent_ts = _time.time() - 5 * 86400
+        hook.db.execute(
+            "INSERT INTO trajectories (task, outcome, created_at) VALUES (?, ?, ?)",
+            ("recent task", "ok", recent_ts),
+        )
+        hook.db.commit()
+
+        messages: list[dict] = [{"role": "user", "content": "new session"}]
+        ctx = AgentHookContext(iteration=0, messages=messages)
+        await hook.before_iteration(ctx)
+
+        assert hook.db.execute(
+            "SELECT COUNT(*) FROM trajectories"
+        ).fetchone()[0] == 1

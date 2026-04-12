@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from typing import TYPE_CHECKING
 
 from nanobot.agent.hook import AgentHook, AgentHookContext
@@ -39,7 +40,8 @@ from .reflect.salience import (
     tool_burst_score,
 )
 from .session.archiver import SessionArchiver
-from .session.db import open_db
+from .session.db import open_db, purge_older_than
+from .session.trajectory import TrajectoryWriter
 from .skills.indexer import SkillIndexer
 
 if TYPE_CHECKING:
@@ -85,6 +87,7 @@ class NanoHermesHook(AgentHook):
             skills_loader=loop.context.skills,
             embedder_factory=self.embedder,
         )
+        self.trajectory_writer = TrajectoryWriter(db=self.db)
         # Reflexion state
         self.current_session_id: int | None = None
         self._salience_score: float = 0.0
@@ -95,9 +98,18 @@ class NanoHermesHook(AgentHook):
         # Per-iteration counters
         self._tool_calls = 0
         self._errors = 0
+        # Phase 2: skill candidate tracking (reset each iteration)
+        self._candidate_skills: list[str] = []
+        # Phase 2: session-level accumulators (reset at session boundary)
+        self._session_skills_used: set[str] = set()
+        self._session_had_errors: bool = False
 
     def embedder(self) -> EmbeddingChain:
         return EmbeddingChain(self.config.embedding)
+
+    def record_skill_candidates(self, names: list[str]) -> None:
+        """Called by SkillSearchTool to register skills returned this iteration."""
+        self._candidate_skills = list(names)
 
     # ------------------------------------------------------------------
     # AgentHook lifecycle
@@ -106,6 +118,14 @@ class NanoHermesHook(AgentHook):
     async def before_iteration(self, context: AgentHookContext) -> None:
         self._tool_calls = 0
         self._errors = 0
+        self._candidate_skills = []
+
+        # Run retention purge once per session (first iteration only)
+        if context.iteration == 0:
+            try:
+                purge_older_than(self.db, self.config.trajectory_retention_days)
+            except Exception:
+                log.exception("nano-hermes purge failed")
 
         # Keep current_session_id in sync with the archiver, and
         # lazy-bootstrap a session row on the very first iteration of a
@@ -145,11 +165,15 @@ class NanoHermesHook(AgentHook):
     async def after_iteration(self, context: AgentHookContext) -> None:
         if context.error:
             self._errors += 1
+            self._session_had_errors = True
         try:
             self.archiver.archive_and_embed(context.messages)
         except Exception:
             log.exception("nano-hermes archive failed")
         self._sync_session_id(context.messages)
+
+        # Phase 2: credit candidate skills with usage if tool work happened
+        self._update_skill_stats(context)
 
         # Salience from errors and user corrections this iteration.
         self._salience_score += error_score(context.error is not None)
@@ -181,7 +205,67 @@ class NanoHermesHook(AgentHook):
                 existing = self.archiver.current_session_id(messages)
             except Exception:
                 log.exception("nano-hermes session bootstrap failed")
+
+        prev_session = self.current_session_id
+        # Session boundary: finalize the previous session's trajectory
+        if existing is not None and existing != prev_session and prev_session is not None:
+            self._finalize_trajectory(prev_session)
+
         self.current_session_id = existing
+
+    def _update_skill_stats(self, context: AgentHookContext) -> None:
+        """Credit candidate skills with a use if the agent made tool calls."""
+        if not self._candidate_skills or not context.tool_calls:
+            return
+        had_error = context.error is not None or any(
+            ev.get("status") == "error" for ev in (context.tool_events or [])
+        )
+        now = time.time()
+        session_id = self.current_session_id
+        try:
+            with self.db:
+                for name in self._candidate_skills:
+                    self.db.execute(
+                        "UPDATE skill_stats SET "
+                        "use_count = use_count + 1, "
+                        "success_count = success_count + CASE WHEN ? THEN 1 ELSE 0 END, "
+                        "last_used_at = ?, "
+                        "provenance = json_insert(COALESCE(provenance, '[]'), '$[#]', ?) "
+                        "WHERE name = ?",
+                        (not had_error, now, session_id, name),
+                    )
+        except Exception:
+            log.exception("skill_stats update failed")
+        # Accumulate for the session-level trajectory
+        self._session_skills_used.update(self._candidate_skills)
+
+    def _finalize_trajectory(self, session_id: int) -> None:
+        """Write a trajectory row for a completed session and reset accumulators."""
+        try:
+            reflections = [
+                r[1]
+                for r in self.db.execute(
+                    "SELECT id, content FROM reflections WHERE session_id = ? ORDER BY id",
+                    (session_id,),
+                ).fetchall()
+            ]
+            chunks = self.db.execute(
+                "SELECT role, content FROM chunks WHERE session_id = ? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+            messages = [{"role": r, "content": c} for r, c in chunks]
+            self.trajectory_writer.write(
+                session_id=session_id,
+                messages=messages,
+                skills_used=list(self._session_skills_used),
+                reflections=reflections,
+                had_errors=self._session_had_errors,
+            )
+        except Exception:
+            log.exception("trajectory finalization failed for session %d", session_id)
+        finally:
+            self._session_skills_used = set()
+            self._session_had_errors = False
 
     def _unseen_reflections(self, session_id: int) -> list[tuple[int, str]]:
         last_seen = self._last_injected_reflection_id.get(session_id, 0)

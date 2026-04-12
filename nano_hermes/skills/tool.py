@@ -78,6 +78,7 @@ class SkillSearchTool(Tool):
             )
         if not hits:
             return "no indexed skills (none have a description?)"
+        self._hook.record_skill_candidates([h.name for h in hits])
         return "\n".join(
             f"[{h.distance:.3f}] {h.name} — {h.description[:160]} ({h.location})"
             for h in hits
