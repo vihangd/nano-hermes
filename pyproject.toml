@@ -1,0 +1,39 @@
+[project]
+name = "nano-hermes"
+version = "0.1.0"
+description = "Self-evolving memory and skill extensions for HKUDS nanobot"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.6",
+  "aiohttp>=3.9",
+  "numpy>=1.26",
+  "sqlite-vec>=0.1.6",
+]
+
+# ``nanobot`` itself is a peer dependency: users install it themselves
+# (and can pin any version) — importing it at runtime is enough.
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.4",
+  "nanobot-ai",
+]
+
+# Wrapper CLI. Delegates to nanobot's Typer app after monkey-patching
+# AgentLoop.__init__ to auto-install us — see nano_hermes/cli.py.
+[project.scripts]
+nano-hermes = "nano_hermes.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+testpaths = ["tests"]

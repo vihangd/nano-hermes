@@ -1,0 +1,148 @@
+"""Session archive schema, workspace-relative.
+
+The whole archive lives in one SQLite file at
+``<workspace>/nano_hermes/state.db``. Core concerns:
+
+    sessions       — session metadata (rolling retention lives here)
+    chunks         — turn-level content rows
+    chunks_fts     — FTS5 mirror for keyword search (external content)
+    chunks_vec     — sqlite-vec vec0 for embedding search
+
+Phase 2 tables (declared up-front so the schema stays stable):
+
+    skill_stats    — mutable skill state (use_count, status, provenance…)
+    trajectories   — replay buffer for similar-task retrieval
+    reflections    — session-scoped Reflexion entries
+
+External-content FTS5 keeps ``chunks`` canonical and mirrors insertions /
+deletions via triggers. Rolling retention (default 45 days) is applied by
+``purge_older_than``, which should run from the nanobot dream cycle — not
+per turn.
+"""
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+import sqlite_vec
+
+from ..paths import state_db
+
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS sessions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_key  TEXT NOT NULL,
+    started_at   REAL NOT NULL,
+    ended_at     REAL,
+    summary      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_key      ON sessions(session_key);
+CREATE INDEX IF NOT EXISTS idx_sessions_ended_at ON sessions(ended_at);
+
+CREATE TABLE IF NOT EXISTS chunks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    turn_index  INTEGER NOT NULL,
+    role        TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    created_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chunks_session ON chunks(session_id);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+    content,
+    content='chunks',
+    content_rowid='id',
+    tokenize='porter'
+);
+
+CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+    INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+    INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES ('delete', old.id, old.content);
+END;
+
+-- Phase 2 tables ---------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS skill_stats (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT, -- stable rowid for skill_vec
+    name            TEXT NOT NULL UNIQUE,
+    status          TEXT NOT NULL DEFAULT 'active',   -- provisional | active | retired
+    use_count       INTEGER NOT NULL DEFAULT 0,
+    success_count   INTEGER NOT NULL DEFAULT 0,
+    last_used_at    REAL,
+    provenance      TEXT,                              -- JSON list of session ids
+    content_hash    TEXT,                              -- sha1 of (name + description)
+    indexed_at      REAL                               -- last time we embedded this skill
+);
+
+CREATE TABLE IF NOT EXISTS trajectories (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
+    task            TEXT NOT NULL,
+    skills_used     TEXT,                              -- JSON list
+    outcome         TEXT NOT NULL,                     -- ok | fail | partial
+    reflection      TEXT,
+    created_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trajectories_created ON trajectories(created_at);
+
+CREATE TABLE IF NOT EXISTS reflections (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
+    content         TEXT NOT NULL,
+    created_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reflections_session ON reflections(session_id);
+"""
+
+# vec0 takes dims as a literal at CREATE time, so it has to be formatted
+# separately and executed after sqlite_vec.load().
+_VEC_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
+    chunk_id  INTEGER PRIMARY KEY,
+    embedding FLOAT[{dims}]
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS skill_vec USING vec0(
+    skill_id  INTEGER PRIMARY KEY,
+    embedding FLOAT[{dims}]
+);
+"""
+
+
+def open_db(workspace: Path, target_dims: int) -> sqlite3.Connection:
+    path = state_db(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    conn.executescript(_SCHEMA)
+    conn.executescript(_VEC_SCHEMA.format(dims=target_dims))
+    conn.commit()
+    return conn
+
+
+def purge_older_than(conn: sqlite3.Connection, days: int) -> dict[str, int]:
+    """Drop sessions and trajectories older than N days.
+
+    Chunks, reflections, and vec rows follow sessions via ``ON DELETE
+    CASCADE``. Trajectories age independently — a trajectory may outlive
+    the session it came from if compaction ran.
+
+    Returns ``{"sessions": n, "trajectories": n}`` for logging.
+    """
+    cutoff = f"strftime('%s','now') - {days * 86400}"
+    sess = conn.execute(
+        f"DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < {cutoff}"
+    ).rowcount
+    traj = conn.execute(
+        f"DELETE FROM trajectories WHERE created_at < {cutoff}"
+    ).rowcount
+    conn.commit()
+    return {"sessions": sess, "trajectories": traj}
