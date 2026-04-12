@@ -269,11 +269,13 @@ class NanoHermesHook(AgentHook):
 
     def _unseen_reflections(self, session_id: int) -> list[tuple[int, str]]:
         last_seen = self._last_injected_reflection_id.get(session_id, 0)
+        limit = self.config.reflection.recent_limit
         rows = self.db.execute(
             "SELECT id, content FROM reflections "
             "WHERE session_id = ? AND id > ? "
-            "ORDER BY id",
-            (session_id, last_seen),
+            "ORDER BY id "
+            "LIMIT ?",
+            (session_id, last_seen, limit),
         ).fetchall()
         return [(int(r[0]), r[1]) for r in rows]
 

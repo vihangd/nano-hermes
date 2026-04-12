@@ -11,7 +11,6 @@ a Pi at ~7k chunks is ~14 MB — fits SD cards comfortably.
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 from dataclasses import dataclass, field
@@ -98,16 +97,3 @@ class EmbeddingChain:
         return v
 
 
-def embed_cache_key(text: str, model: str, dims: int) -> str:
-    """Stable cache key for the on-disk embedding cache.
-
-    Keyed on (model, dims, text) so a future reindex (e.g. back to 1024 dims)
-    can be detected by the `dims` component without invalidating every row.
-    """
-    h = hashlib.sha1()
-    h.update(model.encode())
-    h.update(b"|")
-    h.update(str(dims).encode())
-    h.update(b"|")
-    h.update(text.encode())
-    return h.hexdigest()

@@ -16,9 +16,3 @@ def state_db(workspace: Path) -> Path:
     return plugin_root(workspace) / "state.db"
 
 
-def reflections_dir(workspace: Path) -> Path:
-    return plugin_root(workspace) / "reflections"
-
-
-def embed_cache_db(workspace: Path) -> Path:
-    return plugin_root(workspace) / "embed_cache.db"

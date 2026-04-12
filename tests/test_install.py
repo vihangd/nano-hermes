@@ -1174,3 +1174,418 @@ class TestPurgeOnStartup:
         assert hook.db.execute(
             "SELECT COUNT(*) FROM trajectories"
         ).fetchone()[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5: integration paths end-to-end
+# ---------------------------------------------------------------------------
+
+class TestSkillSearchIntegration:
+    """SkillSearchTool.execute() → record_skill_candidates → after_iteration → skill_stats."""
+
+    async def test_skill_search_to_stats_end_to_end(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Full path: tool.execute() sets candidates → after_iteration credits them."""
+        _copy_bundled_skill("duckduckgo-search", tmp_path)
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        messages: list[dict] = [{"role": "user", "content": "search the web"}]
+        ctx = AgentHookContext(iteration=0, messages=messages)
+        await hook.before_iteration(ctx)
+
+        # Call through the tool (not record_skill_candidates directly)
+        skill_tool = loop.tools.get("skill_search")
+        await skill_tool.execute(query="I want to search the web")
+        assert "duckduckgo-search" in hook._candidate_skills
+
+        tc = MagicMock(spec=ToolCallRequest)
+        await hook.after_iteration(
+            AgentHookContext(iteration=0, messages=messages, tool_calls=[tc])
+        )
+
+        stats_tool = loop.tools.get("skill_stats")
+        out = await stats_tool.execute()
+        assert "duckduckgo-search" in out
+        assert "uses: 1" in out
+
+    async def test_candidates_reset_between_iterations(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _copy_bundled_skill("duckduckgo-search", tmp_path)
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        messages: list[dict] = [{"role": "user", "content": "iter 0"}]
+        await hook.before_iteration(AgentHockContext := AgentHookContext(iteration=0, messages=messages))
+        hook.record_skill_candidates(["duckduckgo-search"])
+        assert hook._candidate_skills == ["duckduckgo-search"]
+
+        # before_iteration for iter 1 should clear candidates
+        messages.append({"role": "assistant", "content": "reply"})
+        await hook.before_iteration(AgentHookContext(iteration=1, messages=messages))
+        assert hook._candidate_skills == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5: trajectory edge cases
+# ---------------------------------------------------------------------------
+
+class TestTrajectoryEdgeCases:
+    async def test_partial_outcome_with_errors_and_substantial_messages(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Error session with >4 substantive messages → outcome='partial'."""
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        msgs_a: list[dict] = [
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": "step 1"},
+            {"role": "user", "content": "continue"},
+            {"role": "assistant", "content": "step 2"},
+            {"role": "user", "content": "still going"},
+            {"role": "assistant", "content": "step 3"},
+        ]
+        ctx = AgentHookContext(iteration=0, messages=msgs_a, error="something failed")
+        await hook.before_iteration(ctx)
+        await hook.after_iteration(ctx)
+
+        msgs_b: list[dict] = [{"role": "user", "content": "next"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs_b))
+
+        row = hook.db.execute("SELECT outcome FROM trajectories").fetchone()
+        assert row is not None
+        assert row[0] == "partial"
+
+    async def test_trajectory_includes_reflection_text(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        msgs_a: list[dict] = [{"role": "user", "content": "do something"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs_a))
+
+        reflect = loop.tools.get("reflect")
+        await reflect.execute(content="Always check the output format first.")
+
+        await hook.after_iteration(AgentHookContext(iteration=0, messages=msgs_a))
+
+        msgs_b: list[dict] = [{"role": "user", "content": "new task"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs_b))
+
+        row = hook.db.execute("SELECT reflection FROM trajectories").fetchone()
+        assert row is not None
+        assert "output format" in row[0]
+
+    async def test_trajectory_task_truncated_at_500_chars(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        long_content = "x" * 800
+        msgs_a: list[dict] = [{"role": "user", "content": long_content}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs_a))
+        await hook.after_iteration(AgentHookContext(iteration=0, messages=msgs_a))
+
+        msgs_b: list[dict] = [{"role": "user", "content": "next"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs_b))
+
+        row = hook.db.execute("SELECT task FROM trajectories").fetchone()
+        assert row is not None
+        assert len(row[0]) == 500
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5: skill stats accumulation edge cases
+# ---------------------------------------------------------------------------
+
+import json as _json  # noqa: E402
+
+
+class TestSkillStatsAccumulation:
+    async def test_provenance_accumulates_across_uses(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _copy_bundled_skill("duckduckgo-search", tmp_path)
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+        await hook.skill_indexer.refresh()
+
+        tc = MagicMock(spec=ToolCallRequest)
+
+        # Use 1 in session A
+        msgs_a: list[dict] = [{"role": "user", "content": "search 1"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs_a))
+        hook.record_skill_candidates(["duckduckgo-search"])
+        await hook.after_iteration(
+            AgentHookContext(iteration=0, messages=msgs_a, tool_calls=[tc])
+        )
+        session_a = hook.current_session_id
+
+        # Use 2 in session B
+        msgs_b: list[dict] = [{"role": "user", "content": "search 2"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs_b))
+        hook.record_skill_candidates(["duckduckgo-search"])
+        await hook.after_iteration(
+            AgentHookContext(iteration=0, messages=msgs_b, tool_calls=[tc])
+        )
+        session_b = hook.current_session_id
+
+        assert session_a != session_b
+        row = hook.db.execute(
+            "SELECT use_count, provenance FROM skill_stats WHERE name = ?",
+            ("duckduckgo-search",),
+        ).fetchone()
+        assert row[0] == 2
+        provenance = _json.loads(row[1])
+        assert session_a in provenance
+        assert session_b in provenance
+
+    async def test_multiple_candidates_credited_in_one_iteration(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _copy_bundled_skill("duckduckgo-search", tmp_path)
+        skill2_dir = tmp_path / "skills" / "my-tool"
+        skill2_dir.mkdir(parents=True)
+        (skill2_dir / "SKILL.md").write_text(
+            "---\nname: my-tool\ndescription: A custom tool\n---\nBody.\n"
+        )
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+        await hook.skill_indexer.refresh()
+
+        msgs: list[dict] = [{"role": "user", "content": "do stuff"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
+        hook.record_skill_candidates(["duckduckgo-search", "my-tool"])
+
+        tc = MagicMock(spec=ToolCallRequest)
+        await hook.after_iteration(
+            AgentHookContext(iteration=0, messages=msgs, tool_calls=[tc])
+        )
+
+        for name in ("duckduckgo-search", "my-tool"):
+            row = hook.db.execute(
+                "SELECT use_count FROM skill_stats WHERE name = ?", (name,)
+            ).fetchone()
+            assert row is not None and row[0] == 1, f"{name} use_count expected 1"
+
+    async def test_tool_events_error_prevents_success_increment(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """tool_events with status=error suppresses success_count even without context.error."""
+        _copy_bundled_skill("duckduckgo-search", tmp_path)
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+        await hook.skill_indexer.refresh()
+
+        msgs: list[dict] = [{"role": "user", "content": "search"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
+        hook.record_skill_candidates(["duckduckgo-search"])
+
+        tc = MagicMock(spec=ToolCallRequest)
+        ctx = AgentHookContext(
+            iteration=0,
+            messages=msgs,
+            tool_calls=[tc],
+            tool_events=[{"name": "read_file", "status": "error", "detail": "not found"}],
+        )
+        await hook.after_iteration(ctx)
+
+        row = hook.db.execute(
+            "SELECT use_count, success_count FROM skill_stats WHERE name = ?",
+            ("duckduckgo-search",),
+        ).fetchone()
+        assert row[0] == 1
+        assert row[1] == 0
+
+    async def test_success_rate_display_above_min_uses(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _copy_bundled_skill("duckduckgo-search", tmp_path)
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+        await hook.skill_indexer.refresh()
+
+        hook.db.execute(
+            "UPDATE skill_stats SET use_count = 5, success_count = 4 WHERE name = ?",
+            ("duckduckgo-search",),
+        )
+        hook.db.commit()
+
+        stats_tool = loop.tools.get("skill_stats")
+        out = await stats_tool.execute(name="duckduckgo-search")
+        assert "80%" in out
+        assert "n/a" not in out
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5: before_execute_tools salience path
+# ---------------------------------------------------------------------------
+
+class TestBeforeExecuteTools:
+    async def test_tool_burst_contributes_to_salience_and_triggers_nudge(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """5+ tool calls in before_execute_tools should contribute +2.0 to salience."""
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop, config={"reflection": {"threshold": 2.0}})
+
+        messages: list[dict] = [{"role": "user", "content": "do lots of things"}]
+        ctx = AgentHookContext(iteration=0, messages=messages)
+        await hook.before_iteration(ctx)
+
+        tcs = [MagicMock(spec=ToolCallRequest) for _ in range(5)]
+        burst_ctx = AgentHookContext(iteration=0, messages=messages, tool_calls=tcs)
+        await hook.before_execute_tools(burst_ctx)
+
+        await hook.after_iteration(AgentHookContext(iteration=0, messages=messages))
+        assert hook._nudge_pending is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5: skill indexer edge cases
+# ---------------------------------------------------------------------------
+
+class TestSkillIndexerEdgeCases:
+    async def test_changed_description_triggers_reindex(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        skill_path = _copy_bundled_skill("duckduckgo-search", tmp_path)
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        await hook.skill_indexer.refresh()
+        first_ts = hook.db.execute(
+            "SELECT indexed_at FROM skill_stats WHERE name = ?",
+            ("duckduckgo-search",),
+        ).fetchone()[0]
+        assert first_ts is not None
+
+        skill_path.write_text(
+            "---\nname: duckduckgo-search\ndescription: Updated description\n---\nBody.\n"
+        )
+
+        report = await hook.skill_indexer.refresh()
+        assert report["reindexed"] >= 1
+
+        second_ts = hook.db.execute(
+            "SELECT indexed_at FROM skill_stats WHERE name = ?",
+            ("duckduckgo-search",),
+        ).fetchone()[0]
+        assert second_ts > first_ts
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5: purge cascades to sessions and chunks
+# ---------------------------------------------------------------------------
+
+class TestPurgeSessionsCascade:
+    async def test_old_sessions_purged_with_chunks(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import time as _time
+
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop, config={"trajectory_retention_days": 30})
+
+        old_ts = _time.time() - 60 * 86400
+        cur = hook.db.execute(
+            "INSERT INTO sessions (session_key, started_at, ended_at) VALUES (?, ?, ?)",
+            ("old:1", old_ts, old_ts),
+        )
+        old_session_id = cur.lastrowid
+        hook.db.execute(
+            "INSERT INTO chunks (session_id, turn_index, role, content, created_at) "
+            "VALUES (?, 0, 'user', 'old content', ?)",
+            (old_session_id, old_ts),
+        )
+        hook.db.commit()
+
+        assert hook.db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+        assert hook.db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
+
+        messages: list[dict] = [{"role": "user", "content": "new session"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=messages))
+
+        assert hook.db.execute(
+            "SELECT COUNT(*) FROM sessions WHERE id = ?", (old_session_id,)
+        ).fetchone()[0] == 0
+        assert hook.db.execute(
+            "SELECT COUNT(*) FROM chunks WHERE session_id = ?", (old_session_id,)
+        ).fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5: recent_limit caps reflection injection
+# ---------------------------------------------------------------------------
+
+class TestRecentLimit:
+    async def test_recent_limit_caps_reflection_injection(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(
+            loop, config={"reflection": {"recent_limit": 3}}
+        )
+
+        messages: list[dict] = [{"role": "user", "content": "start"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=messages))
+        session_id = hook.current_session_id
+        assert session_id is not None
+
+        import time as _time
+        for i in range(6):
+            hook.db.execute(
+                "INSERT INTO reflections (session_id, content, created_at) VALUES (?, ?, ?)",
+                (session_id, f"Reflection number {i}", _time.time()),
+            )
+        hook.db.commit()
+
+        await hook.after_iteration(AgentHookContext(iteration=0, messages=messages))
+
+        messages.append({"role": "assistant", "content": "reply"})
+        before_len = len(messages)
+        await hook.before_iteration(AgentHookContext(iteration=1, messages=messages))
+
+        injected = [m for m in messages[before_len:] if m.get("role") == "system"]
+        assert len(injected) == 1
+        content = injected[0]["content"]
+        bullet_count = content.count("\n- ")
+        assert bullet_count == 3, f"expected 3 reflections, got {bullet_count}: {content}"
