@@ -60,7 +60,12 @@ class NanoHermesHook(AgentHook):
     def __init__(self, *, config: NanoHermesConfig, loop: "AgentLoop") -> None:
         # reraise=False so errors inside our hook are caught + logged by
         # nanobot's CompositeHook. Flip to True when debugging.
-        super().__init__(reraise=False)
+        # Guard against older nanobot versions where AgentHook.__init__
+        # doesn't accept reraise yet.
+        try:
+            super().__init__(reraise=False)
+        except TypeError:
+            super().__init__()
         self.config = config
         self.workspace = loop.workspace
         self.budgeted_memory = BudgetedMemory(

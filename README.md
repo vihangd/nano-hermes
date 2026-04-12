@@ -19,23 +19,24 @@ Designed for low-resource hosts (Raspberry Pi) — no local embedding model, one
 
 ## Install
 
-### On a Pi with `uv tool install nanobot-ai`
+### On a Pi with `uv tool`
 
-`uv tool` installs each CLI into its own isolated venv. nano-hermes has to live in the **same venv** as nanobot for the wrapper CLI to see it.
+`uv tool` installs each CLI into its own isolated venv. nano-hermes must be the **primary** package so its `nano-hermes` entry point lands on `PATH`. nanobot-ai is pulled in as a `--with` extra.
 
 ```bash
-# One-shot install + plugin injection
-uv tool install nanobot-ai --with-editable /path/to/nano-hermes
+# Install from a local clone (editable — changes take effect immediately):
+uv tool install --editable /path/to/nano-hermes --with nanobot-ai
 
-# Or if nanobot is already installed, reinstall with the plugin:
-uv tool install nanobot-ai --with-editable /path/to/nano-hermes --reinstall
+# Or if you don't need to edit nano-hermes locally:
+uv tool install nano-hermes --with nanobot-ai
 ```
 
-Swap `--with-editable` for `--with` if you don't plan to edit nano-hermes locally.
+If you previously had `nanobot-ai` installed as a standalone tool you can remove it to avoid accidentally using the plugin-free `nanobot` command:
+```bash
+uv tool uninstall nanobot-ai
+```
 
-After install you get **two** commands on `PATH`:
-- `nanobot` — unchanged, runs without nano-hermes.
-- `nano-hermes` — same nanobot CLI, with nano-hermes auto-wired into every `AgentLoop`.
+After install, `nano-hermes` is on `PATH`:
 
 **Use `nano-hermes` in place of `nanobot`** for any subcommand:
 ```bash
