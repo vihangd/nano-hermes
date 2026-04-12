@@ -19,20 +19,35 @@ away and the ``nanobot`` command picks us up via ``pip`` metadata.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 log = logging.getLogger(__name__)
 
 _PATCHED = False
 
 
+def _find_hermes_hook(hook: Any) -> Any | None:
+    """Return the ``NanoHermesHook`` inside a (possibly composite) hook, or None."""
+    from nano_hermes.hook import NanoHermesHook
+
+    if isinstance(hook, NanoHermesHook):
+        return hook
+    for h in getattr(hook, "_hooks", []):
+        if isinstance(h, NanoHermesHook):
+            return h
+    return None
+
+
 def _patch_agent_loop() -> None:
-    """Idempotently patch ``AgentLoop.__init__`` to auto-install us."""
+    """Idempotently patch ``AgentLoop.__init__`` and ``AgentRunner._request_model``."""
     global _PATCHED
     if _PATCHED:
         return
 
     from nanobot.agent.loop import AgentLoop
+    from nanobot.agent.runner import AgentRunner
 
+    # --- Patch 1: auto-install nano-hermes on every AgentLoop ---
     original_init = AgentLoop.__init__
 
     def patched_init(self: AgentLoop, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
@@ -47,6 +62,24 @@ def _patch_agent_loop() -> None:
             log.exception("nano-hermes auto-install failed; continuing without it")
 
     AgentLoop.__init__ = patched_init  # type: ignore[method-assign]
+
+    # --- Patch 2: drain pending injections into messages_for_model ---
+    # nanobot computes messages_for_model before calling before_iteration, so
+    # anything the hook appends to context.messages is one iteration late.
+    # NanoHermesHook._inject() queues injections in _pending_injections; we
+    # drain and append them here so they reach the LLM in the same turn.
+    original_request_model = AgentRunner._request_model
+
+    async def patched_request_model(self, spec, messages, hook, context):  # type: ignore[no-untyped-def]
+        hermes = _find_hermes_hook(hook)
+        if hermes is not None:
+            pending = hermes.drain_injections()
+            if pending:
+                messages = list(messages) + pending
+        return await original_request_model(self, spec, messages, hook, context)
+
+    AgentRunner._request_model = patched_request_model  # type: ignore[method-assign]
+
     _PATCHED = True
 
 

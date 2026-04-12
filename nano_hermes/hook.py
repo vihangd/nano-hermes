@@ -117,6 +117,30 @@ class NanoHermesHook(AgentHook):
         # Phase 5: track which global reflections we've already injected
         # (across all sessions) to avoid re-injecting on every iteration.
         self._last_injected_global_reflection_id: int = 0
+        # Injection timing fix: system messages queued for the current
+        # iteration so the patched _request_model can append them to
+        # messages_for_model (which nanobot freezes before before_iteration).
+        self._pending_injections: list[dict] = []
+
+    def _inject(self, messages: list, msg: dict) -> None:
+        """Append *msg* to the canonical messages list and queue it for the
+        current iteration's model call.
+
+        nanobot computes ``messages_for_model`` before firing
+        ``before_iteration``, so anything appended to ``context.messages``
+        during the hook misses the current turn. The patched
+        ``AgentRunner._request_model`` drains ``_pending_injections`` and
+        appends them to ``messages_for_model`` so the LLM sees them
+        immediately.
+        """
+        messages.append(msg)
+        self._pending_injections.append(msg)
+
+    def drain_injections(self) -> list[dict]:
+        """Return and clear pending injections for the current iteration."""
+        pending = self._pending_injections
+        self._pending_injections = []
+        return pending
 
     def embedder(self) -> EmbeddingChain:
         return EmbeddingChain(self.config.embedding)
@@ -142,6 +166,7 @@ class NanoHermesHook(AgentHook):
         self._errors = 0
         self._candidate_skills = []
         self._loaded_skills = {}
+        self._pending_injections = []  # clear any stale entries from a failed iteration
 
         # Run retention purge once per session (first iteration only)
         if context.iteration == 0:
@@ -175,13 +200,14 @@ class NanoHermesHook(AgentHook):
         if self.current_session_id is not None:
             new_reflections = self._unseen_reflections(self.current_session_id)
             if new_reflections:
-                context.messages.append(
+                self._inject(
+                    context.messages,
                     {
                         "role": "system",
                         "content": self._format_reflection_reminder(
                             [r[1] for r in new_reflections]
                         ),
-                    }
+                    },
                 )
                 self._last_injected_reflection_id[self.current_session_id] = (
                     max(r[0] for r in new_reflections)
@@ -190,9 +216,7 @@ class NanoHermesHook(AgentHook):
         # Deliver the Reflexion nudge if salience crossed the threshold
         # on the previous iteration.
         if self._nudge_pending:
-            context.messages.append(
-                {"role": "system", "content": _NUDGE_TEXT}
-            )
+            self._inject(context.messages, {"role": "system", "content": _NUDGE_TEXT})
             self._nudge_pending = False
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
@@ -288,7 +312,8 @@ class NanoHermesHook(AgentHook):
             if not fresh:
                 return
             context_contents = [content for _, content in fresh]
-            messages.append(
+            self._inject(
+                messages,
                 {
                     "role": "system",
                     "content": (
@@ -297,7 +322,7 @@ class NanoHermesHook(AgentHook):
                         "use them to avoid repeating known pitfalls:\n"
                         + "\n".join(f"- {c}" for c in context_contents)
                     ),
-                }
+                },
             )
             self._last_injected_global_reflection_id = max(rid for rid, _ in fresh)
             log.debug(
@@ -398,7 +423,7 @@ class NanoHermesHook(AgentHook):
             if reflection:
                 lines.append(f"Reflection: {reflection.splitlines()[0][:300]}")
 
-            messages.append({"role": "system", "content": "\n".join(lines)})
+            self._inject(messages, {"role": "system", "content": "\n".join(lines)})
             log.debug(
                 "trajectory context injected: id=%d similarity=%.3f", traj_id, similarity
             )
