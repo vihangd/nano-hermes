@@ -34,6 +34,7 @@ from typing import Any, Callable
 import numpy as np
 from nanobot.agent.skills import SkillsLoader as NanobotSkillsLoader
 
+from ..config import SkillStatsConfig
 from ..embedding.chain import AllProvidersFailed, EmbeddingChain
 
 log = logging.getLogger(__name__)
@@ -62,10 +63,12 @@ class SkillIndexer:
         db: sqlite3.Connection,
         skills_loader: NanobotSkillsLoader,
         embedder_factory: Callable[[], EmbeddingChain],
+        stats_config: SkillStatsConfig | None = None,
     ) -> None:
         self._db = db
         self._skills_loader = skills_loader
         self._embedder_factory = embedder_factory
+        self._stats_config = stats_config
 
     # ------------------------------------------------------------------
     # Public API
@@ -190,33 +193,57 @@ class SkillIndexer:
         description_by_name: dict[str, str],
         location_by_name: dict[str, str],
     ) -> list[SkillHit]:
+        # Fetch a wider pool when stat weighting is on so re-ranking has
+        # enough candidates — top-k might not survive after boost.
+        fetch_k = k * 3 if (self._stats_config and self._stats_config.use_stat_weighting) else k
         vec_blob = query_vec.astype(np.float32).tobytes()
         rows = self._db.execute(
             "SELECT skill_id, distance FROM skill_vec "
             "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-            (vec_blob, k),
+            (vec_blob, fetch_k),
         ).fetchall()
         if not rows:
             return []
 
         placeholders = ",".join("?" * len(rows))
-        name_rows = self._db.execute(
-            f"SELECT id, name FROM skill_stats WHERE id IN ({placeholders})",
+        stat_rows = self._db.execute(
+            f"SELECT id, name, use_count, success_count FROM skill_stats "
+            f"WHERE id IN ({placeholders})",
             [r[0] for r in rows],
         ).fetchall()
-        id_to_name = {r[0]: r[1] for r in name_rows}
+        id_to_name = {r[0]: r[1] for r in stat_rows}
+        id_to_stats = {r[0]: (r[2], r[3]) for r in stat_rows}  # id → (use_count, success_count)
+
+        cfg = self._stats_config
+        min_uses = cfg.min_uses_for_success_rate if cfg else 3
+        boost = cfg.success_rate_boost if cfg else 0.0
+        use_weighting = cfg.use_stat_weighting if cfg else False
 
         hits: list[SkillHit] = []
         for skill_id, distance in rows:
             name = id_to_name.get(skill_id)
             if not name:
                 continue
+            effective_distance = float(distance)
+            if use_weighting:
+                use_count, success_count = id_to_stats.get(skill_id, (0, 0))
+                if use_count >= min_uses:
+                    success_rate = success_count / use_count
+                    # Subtract a small success-rate bonus from distance so
+                    # highly reliable skills win ties and narrow races.
+                    # Using additive adjustment (not multiplicative) so the
+                    # bonus works even when raw distance is 0.
+                    # Default boost=0.3 → max adjustment of 0.003 at 100%
+                    # success rate — tiny vs typical L2 gaps (~0.1–1.4).
+                    effective_distance -= boost * success_rate * 0.01
             hits.append(
                 SkillHit(
                     name=name,
                     description=description_by_name.get(name, ""),
                     location=location_by_name.get(name, ""),
-                    distance=float(distance),
+                    distance=effective_distance,
                 )
             )
-        return hits
+
+        hits.sort(key=lambda h: h.distance)
+        return hits[:k]

@@ -111,6 +111,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS skill_vec USING vec0(
     skill_id  INTEGER PRIMARY KEY,
     embedding FLOAT[{dims}]
 );
+
+CREATE VIRTUAL TABLE IF NOT EXISTS trajectories_vec USING vec0(
+    trajectory_id  INTEGER PRIMARY KEY,
+    embedding      FLOAT[{dims}]
+);
 """
 
 
@@ -141,8 +146,17 @@ def purge_older_than(conn: sqlite3.Connection, days: int) -> dict[str, int]:
     sess = conn.execute(
         f"DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < {cutoff}"
     ).rowcount
+    # Collect trajectory IDs before deleting so we can clean up vec rows
+    old_traj_ids = [
+        r[0]
+        for r in conn.execute(
+            f"SELECT id FROM trajectories WHERE created_at < {cutoff}"
+        ).fetchall()
+    ]
     traj = conn.execute(
         f"DELETE FROM trajectories WHERE created_at < {cutoff}"
     ).rowcount
+    for tid in old_traj_ids:
+        conn.execute("DELETE FROM trajectories_vec WHERE trajectory_id = ?", (tid,))
     conn.commit()
     return {"sessions": sess, "trajectories": traj}

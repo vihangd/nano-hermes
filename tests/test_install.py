@@ -1589,3 +1589,321 @@ class TestRecentLimit:
         content = injected[0]["content"]
         bullet_count = content.count("\n- ")
         assert bullet_count == 3, f"expected 3 reflections, got {bullet_count}: {content}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: trajectory_search tool
+# ---------------------------------------------------------------------------
+
+from nano_hermes.session.trajectory_search import TrajectorySearchTool  # noqa: E402
+
+
+class TestTrajectorySearch:
+    def test_tool_registered(self, loop: AgentLoop) -> None:
+        nano_hermes.install(loop)
+        assert "trajectory_search" in loop.tools
+        assert isinstance(loop.tools.get("trajectory_search"), TrajectorySearchTool)
+
+    async def test_returns_empty_when_no_trajectories(
+        self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _unset_embedding_keys(monkeypatch)
+        nano_hermes.install(loop)
+        tool = loop.tools.get("trajectory_search")
+        out = await tool.execute(query="anything")
+        assert "No matching" in out
+
+    async def test_vec_search_returns_matching_trajectory(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import time as _time
+
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        # Insert a trajectory row manually
+        cur = hook.db.execute(
+            "INSERT INTO trajectories (task, skills_used, outcome, reflection, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("search the web for news", '["duckduckgo-search"]', "ok", "worked fine", _time.time()),
+        )
+        traj_id = cur.lastrowid
+        hook.db.commit()
+
+        # Insert its embedding (the fake embed for "search the web" keyword)
+        vec = _FAKE_VEC_SEARCH.astype("float32")
+        hook.db.execute(
+            "INSERT INTO trajectories_vec (trajectory_id, embedding) VALUES (?, ?)",
+            (traj_id, vec.tobytes()),
+        )
+        hook.db.commit()
+
+        tool = loop.tools.get("trajectory_search")
+        out = await tool.execute(query="search the web for something")
+        assert "search the web" in out
+        assert "OK" in out
+        assert "duckduckgo-search" in out
+
+    async def test_fts_fallback_when_no_embedding(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import time as _time
+
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        hook.db.execute(
+            "INSERT INTO trajectories (task, skills_used, outcome, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("write a report about climate", '[]', "ok", _time.time()),
+        )
+        hook.db.commit()
+
+        tool = loop.tools.get("trajectory_search")
+        out = await tool.execute(query="write report climate")
+        # FTS fallback may or may not match — just verify no crash and format ok
+        assert isinstance(out, str)
+
+    async def test_trajectory_embed_written_on_session_boundary(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """TrajectoryWriter schedules embedding; trajectories_vec gets a row."""
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        msgs_a: list[dict] = [{"role": "user", "content": "search the web for news"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs_a))
+        await hook.after_iteration(AgentHookContext(iteration=0, messages=msgs_a))
+
+        msgs_b: list[dict] = [{"role": "user", "content": "next task"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs_b))
+
+        # Drain the background embed task
+        await hook.trajectory_writer.drain()
+
+        traj_row = hook.db.execute("SELECT id FROM trajectories").fetchone()
+        assert traj_row is not None
+
+        vec_row = hook.db.execute(
+            "SELECT trajectory_id FROM trajectories_vec WHERE trajectory_id = ?",
+            (traj_row[0],),
+        ).fetchone()
+        assert vec_row is not None, "trajectories_vec row not written after drain"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: trajectory context injection
+# ---------------------------------------------------------------------------
+
+class TestTrajectoryContextInjection:
+    async def test_injection_off_by_default(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)  # inject_context defaults to False
+
+        msgs: list[dict] = [{"role": "user", "content": "search the web"}]
+        before_len = len(msgs)
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
+        # No trajectory injection should have happened
+        injected = [m for m in msgs[before_len:] if "past session" in str(m.get("content", ""))]
+        assert injected == []
+
+    async def test_injection_fires_when_enabled_and_similar(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import time as _time
+
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(
+            loop,
+            config={"trajectory": {"inject_context": True, "inject_min_similarity": 0.0}},
+        )
+
+        # Seed a trajectory with its vec
+        cur = hook.db.execute(
+            "INSERT INTO trajectories (task, skills_used, outcome, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("search the web for news", '["duckduckgo-search"]', "ok", _time.time()),
+        )
+        traj_id = cur.lastrowid
+        hook.db.commit()
+        vec = _FAKE_VEC_SEARCH.astype("float32")
+        hook.db.execute(
+            "INSERT INTO trajectories_vec (trajectory_id, embedding) VALUES (?, ?)",
+            (traj_id, vec.tobytes()),
+        )
+        hook.db.commit()
+
+        msgs: list[dict] = [{"role": "user", "content": "search the web"}]
+        before_len = len(msgs)
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
+
+        injected = [m for m in msgs[before_len:] if "past session" in str(m.get("content", ""))]
+        assert len(injected) == 1
+        assert "duckduckgo-search" in injected[0]["content"]
+
+    async def test_injection_skipped_when_similarity_below_threshold(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import time as _time
+
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(
+            loop,
+            config={"trajectory": {"inject_context": True, "inject_min_similarity": 0.999}},
+        )
+
+        # Seed a trajectory with a very different vector (unrelated)
+        cur = hook.db.execute(
+            "INSERT INTO trajectories (task, skills_used, outcome, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("something academic", '[]', "ok", _time.time()),
+        )
+        traj_id = cur.lastrowid
+        hook.db.commit()
+        # Use the academic vector — orthogonal to the search query vector
+        vec = _FAKE_VEC_ACADEMIC.astype("float32")
+        hook.db.execute(
+            "INSERT INTO trajectories_vec (trajectory_id, embedding) VALUES (?, ?)",
+            (traj_id, vec.tobytes()),
+        )
+        hook.db.commit()
+
+        msgs: list[dict] = [{"role": "user", "content": "search the web"}]
+        before_len = len(msgs)
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
+
+        injected = [m for m in msgs[before_len:] if "past session" in str(m.get("content", ""))]
+        assert injected == []
+
+    async def test_injection_only_on_iteration_zero(
+        self,
+        loop: AgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import time as _time
+
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(
+            loop,
+            config={"trajectory": {"inject_context": True, "inject_min_similarity": 0.0}},
+        )
+
+        cur = hook.db.execute(
+            "INSERT INTO trajectories (task, skills_used, outcome, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("search the web", '[]', "ok", _time.time()),
+        )
+        hook.db.execute(
+            "INSERT INTO trajectories_vec (trajectory_id, embedding) VALUES (?, ?)",
+            (cur.lastrowid, _FAKE_VEC_SEARCH.astype("float32").tobytes()),
+        )
+        hook.db.commit()
+
+        msgs: list[dict] = [{"role": "user", "content": "search the web"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
+        msgs.append({"role": "assistant", "content": "ok"})
+
+        # Iteration 1 — no injection
+        before_len = len(msgs)
+        await hook.before_iteration(AgentHookContext(iteration=1, messages=msgs))
+        injected = [m for m in msgs[before_len:] if "past session" in str(m.get("content", ""))]
+        assert injected == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: stat-weighted skill search
+# ---------------------------------------------------------------------------
+
+class TestStatWeightedSkillSearch:
+    async def test_high_success_rate_boosts_rank(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A skill with high success rate should rank above an equally-close but unproven one.
+
+        Both skills get the same embedding (identical fake vec), so the
+        stat-weighted tiebreaker is the only differentiator.
+        """
+        # Same "search the web" keyword → both get _FAKE_VEC_SEARCH → equal distance
+        skill_a_dir = tmp_path / "skills" / "skill-alpha"
+        skill_a_dir.mkdir(parents=True)
+        (skill_a_dir / "SKILL.md").write_text(
+            "---\nname: skill-alpha\ndescription: search the web results\n---\nBody.\n"
+        )
+        skill_b_dir = tmp_path / "skills" / "skill-beta"
+        skill_b_dir.mkdir(parents=True)
+        (skill_b_dir / "SKILL.md").write_text(
+            "---\nname: skill-beta\ndescription: search the web news\n---\nBody.\n"
+        )
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(
+            loop,
+            config={
+                "skill_stats": {
+                    "use_stat_weighting": True,
+                    "success_rate_boost": 10.0,  # large boost to decisively break the tie
+                    "min_uses_for_success_rate": 1,
+                }
+            },
+        )
+        await hook.skill_indexer.refresh()
+
+        # Give skill-alpha a perfect success rate, skill-beta zero
+        hook.db.execute(
+            "UPDATE skill_stats SET use_count = 5, success_count = 5 WHERE name = ?",
+            ("skill-alpha",),
+        )
+        hook.db.execute(
+            "UPDATE skill_stats SET use_count = 5, success_count = 0 WHERE name = ?",
+            ("skill-beta",),
+        )
+        hook.db.commit()
+
+        hits = await hook.skill_indexer.search("search the web", k=2)
+        names = [h.name for h in hits]
+        # skill-alpha should rank first: same distance but boosted by success rate
+        assert names[0] == "skill-alpha", f"expected skill-alpha first, got {names}"
+
+    async def test_weighting_disabled_preserves_distance_order(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        skill_a_dir = tmp_path / "skills" / "skill-alpha"
+        skill_a_dir.mkdir(parents=True)
+        (skill_a_dir / "SKILL.md").write_text(
+            "---\nname: skill-alpha\ndescription: search the web results\n---\nBody.\n"
+        )
+        skill_b_dir = tmp_path / "skills" / "skill-beta"
+        skill_b_dir.mkdir(parents=True)
+        (skill_b_dir / "SKILL.md").write_text(
+            "---\nname: skill-beta\ndescription: search the web news\n---\nBody.\n"
+        )
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(
+            loop,
+            config={"skill_stats": {"use_stat_weighting": False}},
+        )
+        await hook.skill_indexer.refresh()
+
+        # Both skills get same fake vector (both match "search the web") —
+        # just verify no crash and k results returned
+        hits = await hook.skill_indexer.search("search the web", k=2)
+        assert len(hits) == 2

@@ -65,6 +65,21 @@ class ReflectionConfig(BaseModel):
 class SkillStatsConfig(BaseModel):
     """Config for skill usage stat tracking."""
     min_uses_for_success_rate: int = 3  # Don't display rate below this threshold
+    # Phase 3: weight skill_search results by empirical success rate.
+    # score = (1 - distance) * (1 + success_rate_boost * success_rate)
+    # Only applied when use_count >= min_uses_for_success_rate.
+    use_stat_weighting: bool = True
+    success_rate_boost: float = 0.3  # max boost to similarity score
+
+
+class TrajectoryConfig(BaseModel):
+    """Config for Phase 3 trajectory replay."""
+    # Inject the top-1 matching trajectory into before_iteration context.
+    # Off by default — opt-in since it adds tokens on every turn.
+    inject_context: bool = False
+    # Minimum similarity (1 - distance) to inject a trajectory.
+    # Prevents injecting a vaguely-related trajectory as "relevant".
+    inject_min_similarity: float = 0.75
 
 
 class NanoHermesConfig(BaseModel):
@@ -73,5 +88,6 @@ class NanoHermesConfig(BaseModel):
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
     skill_stats: SkillStatsConfig = Field(default_factory=SkillStatsConfig)
+    trajectory: TrajectoryConfig = Field(default_factory=TrajectoryConfig)
     trajectory_retention_days: int = 45
     reflection_scope: Literal["session", "global"] = "session"

@@ -86,8 +86,12 @@ class NanoHermesHook(AgentHook):
             db=self.db,
             skills_loader=loop.context.skills,
             embedder_factory=self.embedder,
+            stats_config=config.skill_stats,
         )
-        self.trajectory_writer = TrajectoryWriter(db=self.db)
+        self.trajectory_writer = TrajectoryWriter(
+            db=self.db,
+            embedder_factory=self.embedder,
+        )
         # Reflexion state
         self.current_session_id: int | None = None
         self._salience_score: float = 0.0
@@ -132,6 +136,11 @@ class NanoHermesHook(AgentHook):
         # new messages list so the reflect tool has something to attach
         # to from iteration 0 onwards.
         self._sync_session_id(context.messages)
+
+        # Phase 3: inject a matching past trajectory on the first iteration
+        # of a new session (opt-in via config).
+        if context.iteration == 0 and self.config.trajectory.inject_context:
+            await self._maybe_inject_trajectory(context.messages)
 
         # Inject any new reflections written since the last iteration.
         if self.current_session_id is not None:
@@ -196,6 +205,67 @@ class NanoHermesHook(AgentHook):
     # ------------------------------------------------------------------
     # Internals — reflection retrieval / formatting
     # ------------------------------------------------------------------
+
+    async def _maybe_inject_trajectory(self, messages: list[dict]) -> None:
+        """Embed the first user message and inject the most similar past trajectory."""
+        from .session.archiver import _extract_text
+
+        task_text = next(
+            (
+                _extract_text(m)
+                for m in messages
+                if m.get("role") == "user" and _extract_text(m)
+            ),
+            None,
+        )
+        if not task_text:
+            return
+        try:
+            import numpy as np
+            async with self.embedder() as chain:
+                [vec] = await chain.embed([task_text])
+
+            vec_blob = vec.astype(np.float32).tobytes()
+            rows = self.db.execute(
+                "SELECT trajectory_id, distance FROM trajectories_vec "
+                "WHERE embedding MATCH ? AND k = 1 ORDER BY distance",
+                (vec_blob,),
+            ).fetchall()
+            if not rows:
+                return
+
+            traj_id, distance = rows[0]
+            similarity = 1.0 - float(distance)
+            if similarity < self.config.trajectory.inject_min_similarity:
+                return
+
+            row = self.db.execute(
+                "SELECT task, skills_used, outcome, reflection FROM trajectories WHERE id = ?",
+                (traj_id,),
+            ).fetchone()
+            if not row:
+                return
+
+            task, skills_used_json, outcome, reflection = row
+            import json as _json
+            skills = _json.loads(skills_used_json) if skills_used_json else []
+            skill_str = ", ".join(skills) if skills else "none"
+
+            lines = [
+                "## Relevant past session",
+                f"A similar task previously ended with outcome: {outcome}.",
+                f"Task: {task[:200]}",
+                f"Skills used: {skill_str}",
+            ]
+            if reflection:
+                lines.append(f"Reflection: {reflection.splitlines()[0][:300]}")
+
+            messages.append({"role": "system", "content": "\n".join(lines)})
+            log.debug(
+                "trajectory context injected: id=%d similarity=%.3f", traj_id, similarity
+            )
+        except Exception:
+            log.debug("trajectory context injection failed", exc_info=True)
 
     def _sync_session_id(self, messages: list[dict]) -> None:
         existing = self.archiver.current_session_id(messages)

@@ -24,6 +24,7 @@ from .hook import NanoHermesHook
 from .memory.tool import MemoryPatchTool
 from .reflect.tool import ReflectTool
 from .session.search import SessionSearchTool
+from .session.trajectory_search import TrajectorySearchTool
 from .skills.stats_tool import SkillStatsTool
 from .skills.tool import SkillSearchTool
 
@@ -37,6 +38,7 @@ __all__ = [
     "NanoHermesConfig",
     "MemoryPatchTool",
     "SessionSearchTool",
+    "TrajectorySearchTool",
     "SkillSearchTool",
     "SkillStatsTool",
     "ReflectTool",
@@ -65,6 +67,7 @@ def install(
     loop._extra_hooks.append(hook)
     loop.tools.register(MemoryPatchTool(hook=hook))
     loop.tools.register(SessionSearchTool(hook=hook))
+    loop.tools.register(TrajectorySearchTool(hook=hook))
     loop.tools.register(SkillSearchTool(hook=hook))
     loop.tools.register(SkillStatsTool(hook=hook))
     loop.tools.register(ReflectTool(hook=hook))
