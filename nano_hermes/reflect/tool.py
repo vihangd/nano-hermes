@@ -1,21 +1,32 @@
 """The ``reflect`` agent-facing Tool — stores a self-critique in the
 session-scoped ``reflections`` table.
 
-Reflections live with the current session only. Recent ones get injected
-into the system prompt on every ``before_iteration`` after they're
-written, so the agent "remembers" what it learned earlier in this
-conversation without polluting long-term memory. Cross-session learning
-happens via ``memory_patch`` (durable facts) and skills (procedures).
+In ``reflection_scope="session"`` mode (default), reflections live with
+the current session only. In ``reflection_scope="global"`` mode, they are
+also embedded asynchronously and searchable across all sessions — the most
+relevant past reflections are injected on the first iteration of each new
+session via cosine similarity to the current task.
+
+Cross-session learning also happens via ``memory_patch`` (durable facts)
+and skills (procedures).
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+
 from nanobot.agent.tools.base import Tool, tool_parameters
+
+from ..embedding.chain import AllProvidersFailed
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
+
+log = logging.getLogger(__name__)
 
 
 _SCHEMA: dict[str, Any] = {
@@ -65,6 +76,10 @@ class ReflectTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         content: str = kwargs["content"]
+        stripped = content.strip()
+        if not stripped:
+            return "Error: reflection content is empty after stripping whitespace."
+        content = stripped
         session_id = self._hook.current_session_id
         if session_id is None:
             return (
@@ -73,14 +88,48 @@ class ReflectTool(Tool):
                 "next iteration."
             )
         try:
-            self._hook.db.execute(
+            cur = self._hook.db.execute(
                 "INSERT INTO reflections (session_id, content, created_at) "
                 "VALUES (?, ?, ?)",
                 (session_id, content.strip(), time.time()),
             )
             self._hook.db.commit()
+            reflection_id = int(cur.lastrowid)
         except Exception as e:
             return f"Error: {e}"
-        return (
-            f"ok: reflection saved ({len(content)} chars, session {session_id})"
-        )
+
+        # In global scope mode, embed this reflection so it can be
+        # retrieved across sessions by cosine similarity.
+        if self._hook.config.reflection_scope == "global":
+            self._schedule_embed(reflection_id, content.strip())
+
+        return f"ok: reflection saved ({len(content)} chars, session {session_id})"
+
+    def _schedule_embed(self, reflection_id: int, text: str) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._embed_and_write(reflection_id, text))
+            # Keep a reference to avoid GC cancellation
+            self._hook._reflection_embed_tasks.add(task)
+            task.add_done_callback(self._hook._reflection_embed_tasks.discard)
+        except RuntimeError:
+            log.debug("no running loop — reflection embed skipped")
+
+    async def _embed_and_write(self, reflection_id: int, text: str) -> None:
+        try:
+            async with self._hook.embedder() as chain:
+                [vec] = await chain.embed([text])
+            # vec0 does not support UPSERT; delete first, then insert.
+            self._hook.db.execute(
+                "DELETE FROM reflections_vec WHERE reflection_id = ?",
+                (reflection_id,),
+            )
+            self._hook.db.execute(
+                "INSERT INTO reflections_vec (reflection_id, embedding) VALUES (?, ?)",
+                (reflection_id, vec.astype(np.float32).tobytes()),
+            )
+            self._hook.db.commit()
+        except AllProvidersFailed as e:
+            log.warning("reflection embed skipped: %s", e)
+        except Exception:
+            log.exception("reflection embed failed for id=%d", reflection_id)

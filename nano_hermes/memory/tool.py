@@ -78,8 +78,10 @@ class MemoryPatchTool(Tool):
             if action == "add":
                 if content is None:
                     return "Error: action=add requires `content`"
-                mem.add(slot, content)  # type: ignore[arg-type]
-                return f"ok: added {len(content)} chars to {slot}"
+                result = mem.add(slot, content)  # type: ignore[arg-type]
+                if result == "duplicate":
+                    return f"ok: entry already exists in {slot} (not re-added)"
+                return f"ok: added {len(content.strip())} chars to {slot}"
             if action == "replace":
                 if needle is None or replacement is None:
                     return "Error: action=replace requires `needle` and `replacement`"

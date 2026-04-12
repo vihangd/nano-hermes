@@ -67,6 +67,8 @@ class SkillSearchTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         query: str = kwargs["query"]
+        if not query.strip():
+            return "Error: query must not be empty."
         k = int(kwargs.get("k") or 5)
         try:
             hits = await self._hook.skill_indexer.search(query, k=k)

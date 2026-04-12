@@ -13,6 +13,7 @@ from typing import Literal
 from nanobot.agent.memory import MemoryStore as NanobotMemoryStore
 
 from ..config import MemoryBudgets
+from .guard import scan_memory_content
 
 Slot = Literal["memory", "user", "soul"]
 
@@ -73,12 +74,33 @@ class BudgetedMemory:
         else:
             raise ValueError(f"unknown slot {slot!r}")
 
-    def add(self, slot: Slot, entry: str) -> None:
+    def add(self, slot: Slot, entry: str) -> str | None:
+        """Add an entry to a memory slot.
+
+        Returns ``None`` on success, ``"duplicate"`` if the entry already
+        exists (so the caller can give a friendlier message without raising).
+        Raises ``ValueError`` on empty content or guard rejection.
+        Raises ``MemoryOverBudgetError`` on budget overflow.
+        """
+        stripped = entry.strip()
+        if not stripped:
+            raise ValueError("content must not be empty or whitespace-only")
+        err = scan_memory_content(stripped)
+        if err:
+            raise ValueError(err)
         cur = self.read(slot)
-        joined = (cur + "\n" + entry.strip()) if cur else entry.strip()
+        if stripped in cur:
+            return "duplicate"
+        joined = (cur + "\n" + stripped) if cur else stripped
         self.write(slot, joined.strip())
+        return None
 
     def replace(self, slot: Slot, needle: str, replacement: str) -> None:
+        if not replacement.strip():
+            raise ValueError("replacement must not be empty or whitespace-only — use remove() instead")
+        err = scan_memory_content(replacement)
+        if err:
+            raise ValueError(err)
         cur = self.read(slot)
         if needle not in cur:
             raise MemoryEntryNotFoundError(slot, needle)

@@ -70,7 +70,7 @@ END;
 CREATE TABLE IF NOT EXISTS skill_stats (
     id              INTEGER PRIMARY KEY AUTOINCREMENT, -- stable rowid for skill_vec
     name            TEXT NOT NULL UNIQUE,
-    status          TEXT NOT NULL DEFAULT 'active',   -- provisional | active | retired
+    status          TEXT NOT NULL DEFAULT 'active',   -- draft | active | deprecated
     use_count       INTEGER NOT NULL DEFAULT 0,
     success_count   INTEGER NOT NULL DEFAULT 0,
     last_used_at    REAL,
@@ -116,6 +116,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS trajectories_vec USING vec0(
     trajectory_id  INTEGER PRIMARY KEY,
     embedding      FLOAT[{dims}]
 );
+
+CREATE VIRTUAL TABLE IF NOT EXISTS reflections_vec USING vec0(
+    reflection_id  INTEGER PRIMARY KEY,
+    embedding      FLOAT[{dims}]
+);
 """
 
 
@@ -136,16 +141,52 @@ def open_db(workspace: Path, target_dims: int) -> sqlite3.Connection:
 def purge_older_than(conn: sqlite3.Connection, days: int) -> dict[str, int]:
     """Drop sessions and trajectories older than N days.
 
-    Chunks, reflections, and vec rows follow sessions via ``ON DELETE
-    CASCADE``. Trajectories age independently — a trajectory may outlive
-    the session it came from if compaction ran.
+    Chunks and reflections follow sessions via ``ON DELETE CASCADE``,
+    but vec0 virtual tables do NOT participate in cascades — we must
+    collect IDs and clean up ``chunks_vec``, ``reflections_vec``, and
+    ``trajectories_vec`` manually before the parent rows disappear.
 
     Returns ``{"sessions": n, "trajectories": n}`` for logging.
     """
     cutoff = f"strftime('%s','now') - {days * 86400}"
+
+    # Collect vec IDs BEFORE cascade deletes remove the parent rows.
+    old_session_ids = [
+        r[0]
+        for r in conn.execute(
+            f"SELECT id FROM sessions WHERE ended_at IS NOT NULL AND ended_at < {cutoff}"
+        ).fetchall()
+    ]
+    if old_session_ids:
+        ph = ",".join("?" * len(old_session_ids))
+        old_chunk_ids = [
+            r[0]
+            for r in conn.execute(
+                f"SELECT id FROM chunks WHERE session_id IN ({ph})",
+                old_session_ids,
+            ).fetchall()
+        ]
+        old_ref_ids = [
+            r[0]
+            for r in conn.execute(
+                f"SELECT id FROM reflections WHERE session_id IN ({ph})",
+                old_session_ids,
+            ).fetchall()
+        ]
+    else:
+        old_chunk_ids = []
+        old_ref_ids = []
+
     sess = conn.execute(
         f"DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < {cutoff}"
     ).rowcount
+
+    # Clean up orphaned vec0 rows for chunks and reflections.
+    for cid in old_chunk_ids:
+        conn.execute("DELETE FROM chunks_vec WHERE chunk_id = ?", (cid,))
+    for rid in old_ref_ids:
+        conn.execute("DELETE FROM reflections_vec WHERE reflection_id = ?", (rid,))
+
     # Collect trajectory IDs before deleting so we can clean up vec rows
     old_traj_ids = [
         r[0]

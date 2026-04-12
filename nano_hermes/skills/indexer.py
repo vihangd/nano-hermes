@@ -35,7 +35,7 @@ import numpy as np
 from nanobot.agent.skills import SkillsLoader as NanobotSkillsLoader
 
 from ..config import SkillStatsConfig
-from ..embedding.chain import AllProvidersFailed, EmbeddingChain
+from ..embedding.chain import EmbeddingChain
 
 log = logging.getLogger(__name__)
 
@@ -208,7 +208,7 @@ class SkillIndexer:
         placeholders = ",".join("?" * len(rows))
         stat_rows = self._db.execute(
             f"SELECT id, name, use_count, success_count FROM skill_stats "
-            f"WHERE id IN ({placeholders})",
+            f"WHERE id IN ({placeholders}) AND status != 'deprecated'",
             [r[0] for r in rows],
         ).fetchall()
         id_to_name = {r[0]: r[1] for r in stat_rows}

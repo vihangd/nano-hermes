@@ -125,6 +125,8 @@ class SessionSearchTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         query: str = kwargs["query"]
+        if not query.strip():
+            return "Error: query must not be empty."
         k = int(kwargs.get("k") or 8)
         cfg = self._hook.config.retrieval.model_copy(update={"final_k": k})
 

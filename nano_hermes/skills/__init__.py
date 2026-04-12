@@ -10,6 +10,7 @@ layers on:
   two-phase promotion. (Phase 2.)
 """
 from .indexer import SkillHit, SkillIndexer
+from .propose_tool import ProposeSkillTool
 from .tool import SkillSearchTool
 
-__all__ = ["SkillHit", "SkillIndexer", "SkillSearchTool"]
+__all__ = ["SkillHit", "SkillIndexer", "ProposeSkillTool", "SkillSearchTool"]

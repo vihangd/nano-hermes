@@ -66,6 +66,8 @@ class TrajectorySearchTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         query: str = kwargs["query"]
+        if not query.strip():
+            return "Error: query must not be empty."
         k = int(kwargs.get("k") or 3)
 
         try:

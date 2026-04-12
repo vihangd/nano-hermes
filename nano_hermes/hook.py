@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from nanobot.agent.hook import AgentHook, AgentHookContext
@@ -102,18 +103,35 @@ class NanoHermesHook(AgentHook):
         # Per-iteration counters
         self._tool_calls = 0
         self._errors = 0
-        # Phase 2: skill candidate tracking (reset each iteration)
+        # Phase 2: skill candidate tracking (reset each iteration, trajectory only)
         self._candidate_skills: list[str] = []
+        # Phase 7: observed skill reads — tracks which skills the agent actually
+        # loaded via read_file(skills/<name>/SKILL.md) this iteration.
+        # Maps skill_name → tool_calls index so we can scope error attribution.
+        self._loaded_skills: dict[str, int] = {}
         # Phase 2: session-level accumulators (reset at session boundary)
         self._session_skills_used: set[str] = set()
         self._session_had_errors: bool = False
+        # Phase 5: async tasks for reflection embedding (global scope mode)
+        self._reflection_embed_tasks: set = set()
+        # Phase 5: track which global reflections we've already injected
+        # (across all sessions) to avoid re-injecting on every iteration.
+        self._last_injected_global_reflection_id: int = 0
 
     def embedder(self) -> EmbeddingChain:
         return EmbeddingChain(self.config.embedding)
 
     def record_skill_candidates(self, names: list[str]) -> None:
-        """Called by SkillSearchTool to register skills returned this iteration."""
-        self._candidate_skills = list(names)
+        """Called by SkillSearchTool to register skills returned this iteration.
+
+        These are recorded for trajectory tracking (which skills the agent
+        searched for), NOT for stat crediting. Stat crediting is based on
+        directly-observed read_file calls on skills/*/SKILL.md paths.
+
+        Extends (not replaces) so multiple skill_search calls in one iteration
+        are all captured for trajectory purposes.
+        """
+        self._candidate_skills.extend(names)
 
     # ------------------------------------------------------------------
     # AgentHook lifecycle
@@ -123,6 +141,7 @@ class NanoHermesHook(AgentHook):
         self._tool_calls = 0
         self._errors = 0
         self._candidate_skills = []
+        self._loaded_skills = {}
 
         # Run retention purge once per session (first iteration only)
         if context.iteration == 0:
@@ -142,7 +161,17 @@ class NanoHermesHook(AgentHook):
         if context.iteration == 0 and self.config.trajectory.inject_context:
             await self._maybe_inject_trajectory(context.messages)
 
-        # Inject any new reflections written since the last iteration.
+        # Phase 5: inject relevant cross-session reflections on first iteration
+        # of a new session when global scope is enabled.
+        if (
+            context.iteration == 0
+            and self.config.reflection_scope == "global"
+            and self.current_session_id is not None
+        ):
+            await self._maybe_inject_global_reflections(context.messages)
+
+        # Inject any new reflections written since the last iteration
+        # (always session-scoped so the agent gets immediate feedback).
         if self.current_session_id is not None:
             new_reflections = self._unseen_reflections(self.current_session_id)
             if new_reflections:
@@ -170,6 +199,22 @@ class NanoHermesHook(AgentHook):
         tool_count = len(context.tool_calls)
         self._tool_calls += tool_count
         self._salience_score += tool_burst_score(tool_count)
+
+        # Detect which skills the agent actually loads.
+        # nanobot's skill template tells the agent: "To use a skill, read its
+        # SKILL.md file using the read_file tool." So a read_file call on
+        # skills/<name>/SKILL.md is the directly-observable usage signal.
+        # Use getattr() defensively: Mock's constructor reserves 'name' and
+        # 'arguments' may not be accessible via normal attribute lookup in tests.
+        for i, tc in enumerate(context.tool_calls):
+            if getattr(tc, "name", None) != "read_file":
+                continue
+            args = getattr(tc, "arguments", None) or {}
+            path = args.get("path", "")
+            skill_name = self._extract_skill_name_from_path(path)
+            if skill_name:
+                # Store the position so we can scope error attribution later.
+                self._loaded_skills[skill_name] = i
 
     async def after_iteration(self, context: AgentHookContext) -> None:
         if context.error:
@@ -205,6 +250,99 @@ class NanoHermesHook(AgentHook):
     # ------------------------------------------------------------------
     # Internals — reflection retrieval / formatting
     # ------------------------------------------------------------------
+
+    async def _maybe_inject_global_reflections(self, messages: list[dict]) -> None:
+        """Inject cross-session reflections relevant to the current task.
+
+        Only fires on iteration 0 of a new session when
+        ``reflection_scope="global"``. Embeds the first user message and
+        searches ``reflections_vec`` for the top-N most relevant reflections
+        from ANY past session, excluding the current one.
+        """
+        from .session.archiver import _extract_text
+
+        task_text = next(
+            (
+                _extract_text(m)
+                for m in messages
+                if m.get("role") == "user" and _extract_text(m)
+            ),
+            None,
+        )
+        if not task_text:
+            return
+        try:
+            limit = self.config.reflection.recent_limit
+            rows = await self._global_reflections(task_text, limit)
+            if not rows:
+                return
+            # Filter out reflections from the current session (those are
+            # handled by _unseen_reflections) and already-injected ones.
+            current_session = self.current_session_id
+            fresh = [
+                (rid, content)
+                for rid, content, sid in rows
+                if sid != current_session
+                and rid > self._last_injected_global_reflection_id
+            ]
+            if not fresh:
+                return
+            context_contents = [content for _, content in fresh]
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "## Relevant reflections from past sessions\n"
+                        "These were written in previous conversations on similar tasks — "
+                        "use them to avoid repeating known pitfalls:\n"
+                        + "\n".join(f"- {c}" for c in context_contents)
+                    ),
+                }
+            )
+            self._last_injected_global_reflection_id = max(rid for rid, _ in fresh)
+            log.debug(
+                "global reflections injected: %d entries", len(fresh)
+            )
+        except Exception:
+            log.debug("global reflection injection failed", exc_info=True)
+
+    async def _global_reflections(
+        self, task_text: str, limit: int
+    ) -> list[tuple[int, str, int]]:
+        """Embed *task_text* and return top-*limit* reflections by similarity.
+
+        Returns list of ``(reflection_id, content, session_id)`` tuples,
+        ordered by embedding distance (closest first).
+        Raises if embedding fails — caller logs and skips.
+        """
+        import numpy as np
+
+        async with self.embedder() as chain:
+            [query_vec] = await chain.embed([task_text])
+
+        vec_blob = query_vec.astype(np.float32).tobytes()
+        # Fetch a wider pool then slice — vec0 k parameter must be a literal
+        fetch_k = min(limit * 4, 50)
+        vec_rows = self.db.execute(
+            "SELECT reflection_id, distance FROM reflections_vec "
+            "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+            (vec_blob, fetch_k),
+        ).fetchall()
+        if not vec_rows:
+            return []
+
+        placeholders = ",".join("?" * len(vec_rows))
+        id_to_distance = {r[0]: r[1] for r in vec_rows}
+        ref_rows = self.db.execute(
+            f"SELECT id, content, session_id FROM reflections WHERE id IN ({placeholders})",
+            [r[0] for r in vec_rows],
+        ).fetchall()
+
+        results = sorted(
+            [(r[0], r[1], r[2]) for r in ref_rows],
+            key=lambda x: id_to_distance.get(x[0], 999.0),
+        )
+        return results[:limit]
 
     async def _maybe_inject_trajectory(self, messages: list[dict]) -> None:
         """Embed the first user message and inject the most similar past trajectory."""
@@ -277,41 +415,111 @@ class NanoHermesHook(AgentHook):
                 log.exception("nano-hermes session bootstrap failed")
 
         prev_session = self.current_session_id
-        # Session boundary: finalize the previous session's trajectory
+        # Session boundary: close the previous session and finalize trajectory.
         if existing is not None and existing != prev_session and prev_session is not None:
+            # Mark the old session as ended so purge_older_than can find it.
+            try:
+                self.db.execute(
+                    "UPDATE sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL",
+                    (time.time(), prev_session),
+                )
+                self.db.commit()
+            except Exception:
+                log.exception("failed to set sessions.ended_at for session %d", prev_session)
             self._finalize_trajectory(prev_session)
+            # Reset global reflection watermark for the new session.
+            self._last_injected_global_reflection_id = 0
 
         self.current_session_id = existing
 
     def _update_skill_stats(self, context: AgentHookContext) -> None:
-        """Credit candidate skills with a use if the agent made tool calls."""
-        if not self._candidate_skills or not context.tool_calls:
-            return
-        had_error = context.error is not None or any(
-            ev.get("status") == "error" for ev in (context.tool_events or [])
-        )
-        now = time.time()
-        session_id = self.current_session_id
+        """Track skills used this iteration for trajectory recording.
+
+        This is trajectory-only — no DB writes, no stat crediting. The
+        observed-use detection (read_file on SKILL.md) tells us which skills
+        the agent consulted this iteration; we accumulate those into
+        _session_skills_used so trajectories capture a complete skill picture.
+
+        Stat crediting (use_count, success_count) and lifecycle transitions
+        are handled exclusively by SkillRateTool, which the agent calls
+        voluntarily with an explicit outcome judgment.
+        """
+        self._session_skills_used.update(self._candidate_skills)
+        self._session_skills_used.update(self._loaded_skills.keys())
+
+    def record_skill_rating(self, name: str) -> None:
+        """Called by SkillRateTool to register a rated skill for trajectory."""
+        self._session_skills_used.add(name)
+
+    def _extract_skill_name_from_path(self, path: str) -> str | None:
+        """Extract skill name from a path ending in skills/<name>/SKILL.md.
+
+        Handles absolute paths, relative paths, and paths with './' prefixes.
+        Returns None for any path that doesn't match the expected pattern.
+        """
+        try:
+            parts = Path(path).parts
+        except (TypeError, ValueError):
+            return None
+        for i, part in enumerate(parts):
+            if part == "skills" and i + 2 < len(parts) and parts[i + 2] == "SKILL.md":
+                return parts[i + 1]
+        return None
+
+    def _check_promotions(self, names: list[str]) -> None:
+        """Promote draft skills to active, or deprecate skills with low success."""
+        cfg = self.config.skill_stats
         try:
             with self.db:
-                for name in self._candidate_skills:
-                    self.db.execute(
-                        "UPDATE skill_stats SET "
-                        "use_count = use_count + 1, "
-                        "success_count = success_count + CASE WHEN ? THEN 1 ELSE 0 END, "
-                        "last_used_at = ?, "
-                        "provenance = json_insert(COALESCE(provenance, '[]'), '$[#]', ?) "
-                        "WHERE name = ?",
-                        (not had_error, now, session_id, name),
-                    )
+                for name in names:
+                    row = self.db.execute(
+                        "SELECT status, use_count, success_count FROM skill_stats WHERE name = ?",
+                        (name,),
+                    ).fetchone()
+                    if not row:
+                        continue
+                    status, use_count, success_count = row
+
+                    # Promotion: draft -> active after enough successes
+                    if status == "draft" and success_count >= cfg.promotion_threshold:
+                        self.db.execute(
+                            "UPDATE skill_stats SET status = 'active' WHERE name = ?",
+                            (name,),
+                        )
+                        log.info(
+                            "skill '%s' promoted draft -> active (success_count=%d)",
+                            name, success_count,
+                        )
+                        status = "active"
+
+                    # Deprecation: any non-deprecated skill with chronic low success rate
+                    if (
+                        status != "deprecated"
+                        and use_count >= cfg.deprecation_min_uses
+                        and use_count > 0
+                        and success_count / use_count < cfg.deprecation_max_success_rate
+                    ):
+                        self.db.execute(
+                            "UPDATE skill_stats SET status = 'deprecated' WHERE name = ?",
+                            (name,),
+                        )
+                        log.info(
+                            "skill '%s' deprecated (success_rate=%.2f after %d uses)",
+                            name, success_count / use_count, use_count,
+                        )
         except Exception:
-            log.exception("skill_stats update failed")
-        # Accumulate for the session-level trajectory
-        self._session_skills_used.update(self._candidate_skills)
+            log.exception("skill promotion check failed")
 
     def _finalize_trajectory(self, session_id: int) -> None:
         """Write a trajectory row for a completed session and reset accumulators."""
         try:
+            # Fallback: ensure ended_at is set even if _sync_session_id missed it.
+            self.db.execute(
+                "UPDATE sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL",
+                (time.time(), session_id),
+            )
+            self.db.commit()
+
             reflections = [
                 r[1]
                 for r in self.db.execute(

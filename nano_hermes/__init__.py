@@ -1,5 +1,5 @@
-"""nano-hermes: memory budgets, session search, and self-evolution
-extensions for HKUDS nanobot.
+"""nano-hermes: memory budgets, session search, skill evolution, and
+Reflexion-based self-improvement extensions for HKUDS nanobot.
 
 Usage::
 
@@ -9,10 +9,14 @@ Usage::
     loop = AgentLoop(bus=bus, provider=provider, workspace=ws)
     hook = nano_hermes.install(loop)
 
-``install`` attaches a lifecycle hook and registers the ``memory_patch``
-and ``session_search`` tools. It does NOT duplicate nanobot's existing
-memory/skill prompt injection — nanobot's ContextBuilder already handles
-that via ``MemoryStore.get_memory_context()`` and
+``install`` attaches a lifecycle hook and registers nine agent-facing
+tools: ``memory_patch``, ``session_search``, ``trajectory_search``,
+``skill_search``, ``skill_stats``, ``propose_skill``, ``skill_rate``,
+``reflect``, and ``nano_status``.
+
+It does NOT duplicate nanobot's existing memory/skill prompt injection —
+nanobot's ContextBuilder already handles that via
+``MemoryStore.get_memory_context()`` and
 ``SkillsLoader.build_skills_summary()``.
 """
 from __future__ import annotations
@@ -25,13 +29,16 @@ from .memory.tool import MemoryPatchTool
 from .reflect.tool import ReflectTool
 from .session.search import SessionSearchTool
 from .session.trajectory_search import TrajectorySearchTool
+from .skills.propose_tool import ProposeSkillTool
+from .skills.rate_tool import SkillRateTool
 from .skills.stats_tool import SkillStatsTool
 from .skills.tool import SkillSearchTool
+from .status.tool import NanoStatusTool
 
 if TYPE_CHECKING:
     from nanobot.agent.loop import AgentLoop
 
-__version__ = "0.1.0"
+__version__ = "0.8.0"
 __all__ = [
     "install",
     "NanoHermesHook",
@@ -41,7 +48,10 @@ __all__ = [
     "TrajectorySearchTool",
     "SkillSearchTool",
     "SkillStatsTool",
+    "ProposeSkillTool",
+    "SkillRateTool",
     "ReflectTool",
+    "NanoStatusTool",
     "__version__",
 ]
 
@@ -54,7 +64,10 @@ def install(
 
     Appends a ``NanoHermesHook`` to the loop's ``_extra_hooks`` list (same
     mechanism ``Nanobot.run(hooks=...)`` uses under the hood) and registers
-    ``memory_patch`` and ``session_search`` on the loop's ToolRegistry.
+    nine tools on the loop's ToolRegistry: ``memory_patch``,
+    ``session_search``, ``trajectory_search``, ``skill_search``,
+    ``skill_stats``, ``propose_skill``, ``skill_rate``, ``reflect``, and
+    ``nano_status``.
 
     Returns the installed hook so callers can inspect or later detach it.
     """
@@ -70,5 +83,8 @@ def install(
     loop.tools.register(TrajectorySearchTool(hook=hook))
     loop.tools.register(SkillSearchTool(hook=hook))
     loop.tools.register(SkillStatsTool(hook=hook))
+    loop.tools.register(ProposeSkillTool(hook=hook))
+    loop.tools.register(SkillRateTool(hook=hook))
     loop.tools.register(ReflectTool(hook=hook))
+    loop.tools.register(NanoStatusTool(hook=hook))
     return hook

@@ -50,6 +50,8 @@ coverage.xml
 # macOS
 .DS_Store
 
+ROADMAP.md
+
 # nano-hermes runtime state
 *.db
 *.db-shm

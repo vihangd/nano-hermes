@@ -70,6 +70,10 @@ class SkillStatsConfig(BaseModel):
     # Only applied when use_count >= min_uses_for_success_rate.
     use_stat_weighting: bool = True
     success_rate_boost: float = 0.3  # max boost to similarity score
+    # Phase 4: two-phase skill promotion thresholds.
+    promotion_threshold: int = 3          # successful uses to promote draft -> active
+    deprecation_min_uses: int = 5         # minimum uses before deprecation check
+    deprecation_max_success_rate: float = 0.2  # below this rate -> deprecated
 
 
 class TrajectoryConfig(BaseModel):
