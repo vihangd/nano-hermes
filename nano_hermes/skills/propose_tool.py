@@ -7,6 +7,7 @@ like active skills in search — only ``deprecated`` skills are filtered out.
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -57,8 +58,11 @@ _SCHEMA: dict[str, Any] = {
         "body": {
             "type": "string",
             "description": (
-                "Full Markdown body of the skill — when to use it, how to "
-                "invoke it, examples, common failure modes."
+                "Full Markdown body of the skill. Follow the structure template "
+                "in the skill-creator skill's references (overview, when-to-use, "
+                "procedure, examples, edge cases, guidelines). The body is NOT "
+                "embedded for search — only name+description is — so don't rely "
+                "on body prose for discoverability."
             ),
         },
         "files": {
@@ -106,6 +110,11 @@ class ProposeSkillTool(Tool):
     Use this when you've figured out a reusable procedure that would be
     valuable in future sessions — e.g. a reliable way to call an API,
     a multi-step data-processing recipe, or a debugging checklist.
+
+    Before authoring a skill, read the ``skill-creator`` skill (in the
+    ``<skills>`` list) for description craft, body templates, progressive-
+    disclosure guidance, and the pre-submission checklist — skipping it
+    produces thin skills that fail the promotion gate.
 
     The skill starts as a *draft*. Use ``skill_rate`` after applying the skill
     to record whether it helped. After enough successful ratings (default 3),
@@ -168,11 +177,7 @@ class ProposeSkillTool(Tool):
                 return f"Error: {err}"
 
         # --- Size cap ---
-        max_bytes = (
-            self._hook.config.skill_stats.max_skill_bytes
-            if self._hook.config
-            else 256 * 1024
-        )
+        max_bytes = self._hook.config.skill_stats.max_skill_bytes
         total = len(body.encode("utf-8")) + sum(
             len(f["content"].encode("utf-8")) for f in files
         )
@@ -321,34 +326,57 @@ class ProposeSkillTool(Tool):
                     "intended to update an existing skill."
                 )
 
+        # Track whether the directory existed BEFORE this call so we can
+        # safely rmtree on rollback. In edit mode we never rmtree — the
+        # existing content has precedence over a bad write.
+        dir_preexisted = skill_dir.exists()
         skill_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write SKILL.md.
-        skill_md = skill_dir / "SKILL.md"
-        content = f"---\nname: {skill_name}\ndescription: {description}\n---\n\n{body}\n"
-        skill_md.write_text(content, encoding="utf-8")
-
-        # Write companion files.
-        for f in files:
-            file_path = self._resolve_companion(skill_dir, f["path"])
-            if file_path is None:
-                return f"Error: companion file path escapes skill directory: {f['path']!r}"
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_text(f["content"], encoding="utf-8")
-
-        # Delete files (edit mode only).
-        for rel in delete_files:
-            file_path = self._resolve_companion(skill_dir, rel)
-            if file_path is None:
-                return f"Error: delete_files path escapes skill directory: {rel!r}"
-            if file_path.exists():
-                file_path.unlink()
-
         try:
+            # Write SKILL.md.
+            skill_md = skill_dir / "SKILL.md"
+            content = f"---\nname: {skill_name}\ndescription: {description}\n---\n\n{body}\n"
+            skill_md.write_text(content, encoding="utf-8")
+
+            # Write companion files.
+            for f in files:
+                file_path = self._resolve_companion(skill_dir, f["path"])
+                if file_path is None:
+                    raise ValueError(
+                        f"companion file path escapes skill directory: {f['path']!r}"
+                    )
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_path.write_text(f["content"], encoding="utf-8")
+
+            # Delete files (edit mode only).
+            for rel in delete_files:
+                file_path = self._resolve_companion(skill_dir, rel)
+                if file_path is None:
+                    raise ValueError(
+                        f"delete_files path escapes skill directory: {rel!r}"
+                    )
+                if file_path.exists():
+                    file_path.unlink()
+
             with self._hook.db:
                 self._hook.db.execute(upsert_sql, (skill_name,))
         except Exception as e:
-            return f"Error: wrote skill files but failed to update skill_stats: {e}"
+            # Rollback: in create mode, if we created the directory ourselves,
+            # remove it so a retry starts clean. In edit mode we preserve the
+            # existing content — a bad write must not destroy user data.
+            if not edit_mode and not dir_preexisted:
+                shutil.rmtree(skill_dir, ignore_errors=True)
+                return (
+                    f"Error: failed to write skill '{skill_name}': {e}. "
+                    "Rolled back — the skill directory was removed. "
+                    "Fix the underlying issue and retry."
+                )
+            return (
+                f"Error: failed to write skill '{skill_name}': {e}. "
+                "The skill directory may be in a partial state — "
+                "re-run with action='edit' to overwrite once the underlying "
+                "issue is fixed."
+            )
 
         return success_msg
 
