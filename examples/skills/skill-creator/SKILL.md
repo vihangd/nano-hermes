@@ -32,65 +32,77 @@ Abort or restructure if any of these apply:
 - **Description says only *what*, not *when*.** Leads to poor retrieval. Lead with "Use when…".
 - **Body embeds absolute paths, usernames, or host-specific commands.** The skill fails in other sessions. Move to `references/local-setup.md` or remove.
 - **You're shipping a script you haven't thought through.** Script behavior must be deterministic and documented in the body.
+- **You're reimplementing a library in the script.** If a published package already solves the hard part, the wrapper should invoke it via `uvx` / `bunx` / `npx` — not re-derive its logic. See `references/authoring-guide.md` §4 for the wrapper pattern.
 - **Body is over 500 lines.** Split into `references/` files or into two skills.
 - **The skill is really two skills glued together.** Name doesn't fit one sentence. Split.
 - **You plan to propose and never rate.** The draft→active gate exists for a reason. Rate after first real use.
 
 ## Minimal example
 
+This example demonstrates the **wrapper pattern**: the complex work (running tests, parsing output) is delegated to pytest via `uvx`; the wrapper script is thin and only adapts the invocation for the skill's needs.
+
 ```python
 propose_skill(
   name="run-pytest",
   description=(
     "Use when the user asks to run pytest in the current Python repo. "
-    "Executes with verbose output and short traceback, summarises failing "
-    "test names and error categories, handles --last-failed reruns."
+    "Executes pytest via uvx (no pre-install needed), verbose output with "
+    "short traceback, summarises failing test names and error categories."
   ),
   body="""
 ## Overview
-Run pytest with sane defaults and summarise failures in a way that
-helps the user fix them without scrolling through raw output.
+Run pytest via `uvx` with sane defaults and summarise failures. Uses
+uvx so the skill works in any Python repo without assuming a pre-
+installed pytest or a specific .venv layout.
 
 ## When to use
 User asks to run tests, run pytest, check test failures, or rerun
 the last failures in a Python repo.
 
 ## Procedure
-1. Check `pyproject.toml` or `pytest.ini` exists. If not, ask the
-   user to confirm the test command.
-2. Run `scripts/run.sh` from the repo root. See references/flags.md
-   if the user needs non-default flags.
-3. Parse the output, group failures by test file, summarise each.
-4. If there are many failures, offer to rerun the first N with --tb=long.
+1. Check `pyproject.toml`, `pytest.ini`, or a `tests/` directory
+   exists at the cwd. If none, ask the user to confirm.
+2. Run `bash scripts/run.sh` (optionally with extra pytest args, e.g.
+   `-k name` or `--lf`). The script invokes `uvx pytest@8.3.0`
+   internally — pinned for reproducibility.
+3. Summarise the FAILED/ERROR lines for the user. For many failures,
+   offer to rerun the first N with `--tb=long`.
 
 ## Examples
 - User: "run the tests"
-  → call scripts/run.sh, summarise
+  → `bash scripts/run.sh`, summarise
 - User: "rerun the last failures"
-  → call scripts/run.sh with --lf
+  → `bash scripts/run.sh --lf`
 
 ## Edge cases
-- No pyproject.toml → ask for the test runner command
-- pytest not installed → suggest `.venv/bin/pip install pytest`
+- No pyproject.toml and no tests/ dir → ask for the test command
+- First run is slow → uvx is downloading pytest; subsequent runs are cached
+- Offline with no uvx cache → fall back to a locally-installed pytest
+  if available, otherwise report the network requirement
+
+## Guidelines
+- Don't reimplement pytest output parsing — let pytest's own `-v` and
+  `--tb=short` do the formatting; the wrapper only filters.
 """,
   files=[
     {
       "path": "scripts/run.sh",
       "content": (
         "#!/usr/bin/env bash\n"
+        "# Thin wrapper around uvx pytest — pinned version for reproducibility\n"
         "set -euo pipefail\n"
-        ".venv/bin/pytest -v --tb=short \"$@\"\n"
+        "uvx pytest@8.3.0 -v --tb=short \"$@\"\n"
       ),
     },
     {
       "path": "references/flags.md",
-      "content": "# Pytest flags\n\n- `-k EXPR` — run tests matching EXPR\n- `--lf` — last-failed\n- `-x` — stop on first fail\n",
+      "content": "# Pytest flags\n\n- `-k EXPR` — run tests matching EXPR\n- `--lf` — last-failed\n- `-x` — stop on first fail\n- `-n auto` — parallel (requires pytest-xdist)\n",
     },
   ],
 )
 ```
 
-After running this skill for the first time in a real session, call `skill_rate(name="run-pytest", outcome="success")` (or `"failure"`).
+The script is 4 lines — all the test-running complexity lives in pytest itself, invoked via `uvx`. After using this skill for the first time in a real session, call `skill_rate(name="run-pytest", outcome="success")` (or `"failure"`).
 
 ## Pointers
 

@@ -13,6 +13,7 @@ Walk through each item. Any "no" is a blocker.
 - [ ] **Procedure is deterministic**: each step is testable. No "figure out" placeholders. Scripts handle the parts that need determinism.
 - [ ] **No local context leakage**: no absolute paths, no hard-coded usernames, no host-specific commands. A fresh agent in a different environment could run this.
 - [ ] **Scripts documented**: every companion script has its invocation documented in the body's Procedure section. Exit codes and error handling are explicit.
+- [ ] **Library-first**: if the skill does something a well-known library handles (parsing, formatting, protocol clients, validation, linting), the script invokes the library via `uvx` / `bunx` / `npx` rather than reimplementing it. Versions are pinned. See `authoring-guide.md` §4 for the wrapper pattern.
 - [ ] **Worked example**: body contains at least one concrete user intent → action example.
 - [ ] **Size**: total (body + files) is under ~256 KiB. If it's within 10% of the cap, trim before submitting.
 - [ ] **Fresh-agent test**: you read your own SKILL.md as if you were a new agent and could execute it without inventing facts.
@@ -29,6 +30,8 @@ Stop and refactor if you notice any of these while drafting.
 | Description only says *what*, not *when* | Poor semantic retrieval — other agents can't find it | Lead with "Use when…"; name the trigger explicitly |
 | Body embeds local paths or usernames | Skill fails for other sessions / users | Cut them or move to `references/local-setup.md` |
 | Script shipped untested | Agent runs it, it crashes, skill deprecates | Walk through the script's logic mentally or test it in the current session before including |
+| Reimplementing a library inline | Fragile, duplicates upstream bugs, drifts over time | Wrap `uvx <pypi-pkg>` / `bunx <npm-pkg>` / `npx <npm-pkg>` with a thin adapter — library does the complex work, script handles only arg parsing and output filtering |
+| Unpinned package version in wrapper | Skill breaks silently when the library releases a new major | Pin the version: `uvx pytest@8.3.0`, `bunx prettier@3.3.0` |
 | Body over 500 lines | Agent can't hold it in context alongside the task | Push detail into `references/*.md` or split into two skills |
 | Two skills glued together | Name doesn't fit one sentence | Split and propose both separately |
 | Duplicate of existing active skill | Pollutes search results, dilutes ratings | `skill_search` first; use `action="edit"` to fix an existing skill |

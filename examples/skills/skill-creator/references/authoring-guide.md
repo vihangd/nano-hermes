@@ -73,6 +73,65 @@ Keep SKILL.md lean. Push anything the agent won't always need into `references/`
 - Produce parseable output — one line per record, or JSON. Don't emit decorative logging to stdout that the agent then has to parse around.
 - Document the exact invocation in SKILL.md's Procedure section. Don't make the agent reverse-engineer your CLI.
 
+**Prefer libraries over reimplementation — the wrapper pattern.**
+
+Don't reinvent what an existing library already does well. For the complex core of a skill, use an on-demand package runner to invoke a published library, and ship a *lightweight wrapper script* that handles only argument munging, output parsing, and error translation. The wrapper should be dozens of lines, not hundreds — the heavy lifting lives in the library.
+
+On-demand runners (no pre-install required):
+
+- **Python**: `uvx <pkg>` runs a PyPI package in an ephemeral uv-managed environment. `uvx pytest`, `uvx ruff check .`, `uvx httpie GET https://…`, `uvx yt-dlp …`. Pin versions for reproducibility: `uvx pytest@8.3.0`. Works offline if the package is already cached.
+- **Node**: `bunx <pkg>` (preferred — faster, handles TypeScript natively) or `npx <pkg>` as fallback. `bunx typescript --init`, `bunx prettier --write .`, `npx tsx script.ts`. Pin versions: `bunx prettier@3.3.0`.
+- **Go / Rust / others**: `go run <url>@<version>` or `cargo install --locked <pkg>` — these do require a prior install step, so document it in the body.
+
+Wrapper anatomy:
+
+```
+scripts/run.sh  (~20 lines)
+  ├── parse args / set defaults
+  ├── invoke `uvx <lib>` or `bunx <lib>` with the parsed args
+  ├── filter, reshape, or summarise the output for the agent
+  └── translate non-zero exits into clear error messages
+```
+
+**When to use a library:**
+- Parsing (HTML, JSON, YAML, Markdown, CSV, arXiv Atom feeds, …) — always use a library, never regex.
+- Formatting / linting / validation (ruff, prettier, jq, xmllint).
+- Protocol clients (HTTP, gRPC, SSH, Git, arXiv, YouTube, Slack API).
+- Anything where "handle the edge cases correctly" is the hard part.
+
+**When to skip the library:**
+- The operation is a single shell builtin (`ls`, `cat`, `grep`) — no library needed.
+- The wrapper would be longer than the equivalent direct code.
+- No maintained library exists for the task.
+- The environment explicitly blocks `uvx` / `bunx` network access and no cache is available (rare; document this in the body if it applies).
+
+**Caveats to document in the skill body:**
+- First run downloads the package — note network requirement if it matters.
+- Pin versions in your invocation (`uvx pytest@8.3.0`, `bunx prettier@3.3.0`) if the skill is sensitive to output-format changes. An unpinned wrapper is a future breakage.
+- Cache location differs per runner (`~/.cache/uv`, `~/.bun/install/cache`) — don't hard-code it in the script.
+
+**Example (Python):**
+
+```sh
+#!/usr/bin/env bash
+# scripts/run.sh — thin wrapper around uvx pytest
+set -euo pipefail
+uvx pytest@8.3.0 -v --tb=short "$@" \
+  | awk '/FAILED|PASSED|ERROR/ {print}'   # summarise for the agent
+```
+
+**Example (Node):**
+
+```sh
+#!/usr/bin/env bash
+# scripts/format.sh — thin wrapper around bunx prettier
+set -euo pipefail
+bunx prettier@3.3.0 --write "$@" 2>&1 \
+  | grep -v "unchanged"                    # reduce noise for the agent
+```
+
+Both wrappers are under 10 lines. The complex part — parsing test output, file formatting, plugin resolution — is handled by the library. The wrapper adds only the task-specific adapter layer.
+
 ## 5. Naming and scope
 
 - Names are hyphen-lowercase, ≤64 chars, matching `^[a-z0-9][a-z0-9_-]{0,63}$`.
