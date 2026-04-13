@@ -119,7 +119,8 @@ class SkillIndexer:
         description_by_name: dict[str, str],
         chain: EmbeddingChain,
     ) -> dict[str, int]:
-        stale: list[tuple[str, str, str]] = []  # (name, text, digest)
+        source_by_name = {e["name"]: e.get("source", "workspace") for e in entries}
+        stale: list[tuple[str, str, str, str]] = []  # (name, text, digest, source)
         for entry in entries:
             name = entry["name"]
             text = _content_text(name, description_by_name.get(name, ""))
@@ -129,7 +130,7 @@ class SkillIndexer:
             ).fetchone()
             if row and row[0] == digest:
                 continue
-            stale.append((name, text, digest))
+            stale.append((name, text, digest, source_by_name[name]))
 
         if stale:
             vecs = await chain.embed([t[1] for t in stale])
@@ -144,19 +145,24 @@ class SkillIndexer:
 
     def _write_vectors(
         self,
-        stale: list[tuple[str, str, str]],
+        stale: list[tuple[str, str, str, str]],
         vecs: list[np.ndarray],
     ) -> None:
         now = time.time()
         with self._db:
-            for (name, _text, digest), vec in zip(stale, vecs):
+            for (name, _text, digest, source), vec in zip(stale, vecs):
+                # Builtin skills are trusted and start active. Workspace skills
+                # (including those created via shell scripts outside propose_skill)
+                # start as draft so they must pass skill_rate to promote.
+                # ON CONFLICT preserves the existing status — only set it on INSERT.
+                status = "active" if source == "builtin" else "draft"
                 self._db.execute(
-                    "INSERT INTO skill_stats (name, content_hash, indexed_at) "
-                    "VALUES (?, ?, ?) "
+                    "INSERT INTO skill_stats (name, status, content_hash, indexed_at) "
+                    "VALUES (?, ?, ?, ?) "
                     "ON CONFLICT(name) DO UPDATE SET "
                     "content_hash = excluded.content_hash, "
                     "indexed_at = excluded.indexed_at",
-                    (name, digest, now),
+                    (name, status, digest, now),
                 )
                 skill_id = self._db.execute(
                     "SELECT id FROM skill_stats WHERE name = ?", (name,)

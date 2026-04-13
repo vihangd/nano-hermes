@@ -74,6 +74,8 @@ class SkillStatsConfig(BaseModel):
     promotion_threshold: int = 3          # successful uses to promote draft -> active
     deprecation_min_uses: int = 5         # minimum uses before deprecation check
     deprecation_max_success_rate: float = 0.2  # below this rate -> deprecated
+    # Maximum total bytes (body + companion files) allowed per propose_skill call.
+    max_skill_bytes: int = 256 * 1024  # 256 KiB
 
 
 class TrajectoryConfig(BaseModel):

@@ -65,6 +65,21 @@ _ALL_CATEGORIES: list[tuple[str, list[tuple[str, re.Pattern[str]]]]] = [
     ("obfuscated code execution", _OBFUSCATION_PATTERNS),
 ]
 
+# Categories safe to apply to source code in scripts/ — excludes obfuscation
+# patterns that are normal constructs in Python, Node, and shell scripts.
+_SCRIPT_CATEGORIES: list[tuple[str, list[tuple[str, re.Pattern[str]]]]] = [
+    ("prompt injection", _INJECTION_PATTERNS),
+    ("destructive shell command", _DESTRUCTIVE_PATTERNS),
+    ("persistence mechanism", _PERSISTENCE_PATTERNS),
+    ("exfiltration command", _EXFIL_PATTERNS),
+]
+
+# Minimal categories for assets — only injection and destructive patterns.
+_ASSET_CATEGORIES: list[tuple[str, list[tuple[str, re.Pattern[str]]]]] = [
+    ("prompt injection", _INJECTION_PATTERNS),
+    ("destructive shell command", _DESTRUCTIVE_PATTERNS),
+]
+
 
 def scan_skill_content(body: str) -> str | None:
     """Return ``None`` if *body* is safe to write, or an error string.
@@ -90,6 +105,50 @@ def scan_skill_content(body: str) -> str | None:
             if pattern.search(body):
                 return (
                     f"skill content rejected — {category} pattern detected: {label}. "
+                    "Remove the flagged content and re-propose."
+                )
+
+    return None
+
+
+def scan_skill_file(rel_path: str, content: str) -> str | None:
+    """Scan a companion skill file for malicious patterns.
+
+    Applies different rule sets depending on the subdirectory:
+
+    - ``scripts/*`` — skips obfuscation patterns (``eval``, ``exec``,
+      ``__import__``, ``base64 -d |``) because these are ordinary constructs
+      in Python, Node.js, and shell scripts.
+    - ``references/*`` — full scan, same as ``scan_skill_content``.
+    - ``assets/*`` — lighter scan (injection + destructive only); binary
+      assets that fail UTF-8 decoding should not be passed here.
+
+    Returns ``None`` if safe, or an error string describing what was found.
+    """
+    first_dir = rel_path.split("/")[0] if "/" in rel_path else ""
+
+    # Invisible unicode applies to all text content regardless of subdirectory.
+    found_invisible = [cp for cp in _INVISIBLE_CODEPOINTS if cp in content]
+    if found_invisible:
+        names = ", ".join(f"U+{ord(c):04X}" for c in found_invisible)
+        return (
+            f"skill file rejected — invisible unicode detected: {names}. "
+            "These characters are commonly used for hidden prompt injection."
+        )
+
+    if first_dir == "scripts":
+        categories = _SCRIPT_CATEGORIES
+    elif first_dir == "assets":
+        categories = _ASSET_CATEGORIES
+    else:
+        # references/ and any unrecognised subdir get the full scan.
+        categories = _ALL_CATEGORIES
+
+    for category, patterns in categories:
+        for label, pattern in patterns:
+            if pattern.search(content):
+                return (
+                    f"skill file rejected — {category} pattern detected: {label}. "
                     "Remove the flagged content and re-propose."
                 )
 
