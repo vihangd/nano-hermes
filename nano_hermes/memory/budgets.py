@@ -12,6 +12,7 @@ from typing import Literal
 
 from nanobot.agent.memory import MemoryStore as NanobotMemoryStore
 
+from .._atomic import atomic_write_text
 from ..config import MemoryBudgets
 from .guard import scan_memory_content
 
@@ -62,17 +63,18 @@ class BudgetedMemory:
         raise ValueError(f"unknown slot {slot!r}")
 
     def write(self, slot: Slot, content: str) -> None:
-        limit = self._budget(slot)
+        limit = self._budget(slot)  # raises on unknown slot before any I/O
         if len(content) > limit:
             raise MemoryOverBudgetError(slot, len(content), limit)
-        if slot == "memory":
-            self.store.write_memory(content)
-        elif slot == "user":
-            self.store.write_user(content)
-        elif slot == "soul":
-            self.store.write_soul(content)
-        else:
-            raise ValueError(f"unknown slot {slot!r}")
+        # Bypass MemoryStore.write_* (raw write_text) and write atomically
+        # to the path the store would have targeted. A crash mid-write
+        # never leaves a half-written MEMORY.md/USER.md/SOUL.md.
+        target = {
+            "memory": self.store.memory_file,
+            "user":   self.store.user_file,
+            "soul":   self.store.soul_file,
+        }[slot]
+        atomic_write_text(target, content)
 
     def add(self, slot: Slot, entry: str) -> str | None:
         """Add an entry to a memory slot.

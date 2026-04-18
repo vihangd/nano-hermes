@@ -82,21 +82,26 @@ class TestCreateModeRollback:
 
     @pytest.mark.asyncio
     async def test_create_rollback_on_write_failure(self, tmp_path):
-        """If a companion file write raises, rollback removes the directory."""
+        """If a companion file write raises, rollback removes the directory.
+
+        Patches the imported ``atomic_write_text`` reference inside the
+        propose_tool module (NOT the source in nano_hermes._atomic) — calls
+        in propose_tool resolve through propose_tool's own namespace.
+        """
         tool, hook = _make_tool(tmp_path)
 
-        # Monkeypatch Path.write_text to fail on the second call (the companion
-        # file). The first call writes SKILL.md successfully, then we raise.
-        original_write_text = Path.write_text
+        import nano_hermes.skills.propose_tool as pt_mod
+
+        original = pt_mod.atomic_write_text
         call_count = {"n": 0}
 
-        def failing_write_text(self, data, *args, **kwargs):
+        def failing_atomic_write(file_path, content):
             call_count["n"] += 1
             if call_count["n"] >= 2:
                 raise OSError("simulated disk error")
-            return original_write_text(self, data, *args, **kwargs)
+            return original(file_path, content)
 
-        with patch.object(Path, "write_text", failing_write_text):
+        with patch.object(pt_mod, "atomic_write_text", failing_atomic_write):
             result = await tool.execute(
                 name="write-fail-skill",
                 description="Skill whose companion write will fail.",
@@ -109,10 +114,12 @@ class TestCreateModeRollback:
         assert not (tmp_path / "skills" / "write-fail-skill").exists()
 
 
-class TestEditModeNoRollback:
+class TestEditModePreservesData:
     @pytest.mark.asyncio
-    async def test_edit_does_not_rollback_on_db_failure(self, tmp_path):
-        """Edit mode must preserve existing user data even when DB fails."""
+    async def test_edit_restores_skill_md_on_db_failure(self, tmp_path):
+        """Edit mode must restore SKILL.md to its original content when the
+        DB upsert fails after the file has already been overwritten.
+        """
         tool, hook = _make_tool(tmp_path)
 
         # First, create a skill successfully.
@@ -150,10 +157,16 @@ class TestEditModeNoRollback:
             hook.db = real_db
 
         assert "Error" in result
-        assert "action='edit'" in result
+        assert "Rolled back" in result
+        assert "original content restored" in result
         # Directory must still exist — edit mode never rmtrees.
         assert skill_dir.exists()
         assert (skill_dir / "SKILL.md").exists()
+        # And the body content must be the original v1, not v2 — this is the
+        # core promise of edit-mode snapshot/restore.
+        text = (skill_dir / "SKILL.md").read_text()
+        assert "v1 body" in text
+        assert "v2 body" not in text
 
     @pytest.mark.asyncio
     async def test_create_rollback_preserves_preexisting_directory(self, tmp_path):
@@ -183,6 +196,148 @@ class TestEditModeNoRollback:
         # Original file untouched.
         assert (pre_existing / "SKILL.md").read_text().startswith("---")
         assert "Old body" in (pre_existing / "SKILL.md").read_text()
+
+
+class TestEditModeSnapshotRestore:
+    """Edit mode must restore each touched file to its prior content/state on
+    failure. Snapshots cover SKILL.md, overwritten companion files, deleted
+    files, and newly-added files.
+    """
+
+    @pytest.mark.asyncio
+    async def test_edit_restores_companion_file_on_db_failure(self, tmp_path):
+        tool, hook = _make_tool(tmp_path)
+        await tool.execute(
+            name="comp-restore",
+            description="Has a companion file.",
+            body="v1 body",
+            files=[{"path": "scripts/run.py", "content": "print('v1')\n"}],
+        )
+        with hook.db:
+            hook.db.execute(
+                "UPDATE skill_stats SET status='active' WHERE name=?", ("comp-restore",)
+            )
+
+        real_db = hook.db
+        hook.db = _FailingDB(
+            real_db,
+            fail_predicate=lambda sql: sql.strip().startswith(
+                "UPDATE skill_stats SET content_hash"
+            ),
+        )
+
+        try:
+            result = await tool.execute(
+                action="edit",
+                name="comp-restore",
+                description="Has a companion file.",
+                body="v2 body",
+                files=[{"path": "scripts/run.py", "content": "print('v2')\n"}],
+            )
+        finally:
+            hook.db = real_db
+
+        assert "Error" in result
+        assert "original content restored" in result
+        # Both files must be at v1.
+        skill_dir = tmp_path / "skills" / "comp-restore"
+        assert "v1 body" in (skill_dir / "SKILL.md").read_text()
+        assert (skill_dir / "scripts" / "run.py").read_text() == "print('v1')\n"
+
+    @pytest.mark.asyncio
+    async def test_edit_undeletes_file_on_db_failure(self, tmp_path):
+        tool, hook = _make_tool(tmp_path)
+        await tool.execute(
+            name="undelete",
+            description="Has a file we'll try to delete.",
+            body="v1 body",
+            files=[{"path": "scripts/foo.py", "content": "keep me\n"}],
+        )
+        with hook.db:
+            hook.db.execute(
+                "UPDATE skill_stats SET status='active' WHERE name=?", ("undelete",)
+            )
+
+        real_db = hook.db
+        hook.db = _FailingDB(
+            real_db,
+            fail_predicate=lambda sql: sql.strip().startswith(
+                "UPDATE skill_stats SET content_hash"
+            ),
+        )
+
+        try:
+            result = await tool.execute(
+                action="edit",
+                name="undelete",
+                description="Has a file we'll try to delete.",
+                body="v2 body",
+                delete_files=["scripts/foo.py"],
+            )
+        finally:
+            hook.db = real_db
+
+        assert "Error" in result
+        # The deleted file must be back with original content.
+        target = tmp_path / "skills" / "undelete" / "scripts" / "foo.py"
+        assert target.exists()
+        assert target.read_text() == "keep me\n"
+
+    @pytest.mark.asyncio
+    async def test_edit_removes_newly_added_file_on_db_failure(self, tmp_path):
+        tool, hook = _make_tool(tmp_path)
+        await tool.execute(
+            name="add-then-fail",
+            description="No companion files yet.",
+            body="v1 body",
+        )
+        with hook.db:
+            hook.db.execute(
+                "UPDATE skill_stats SET status='active' WHERE name=?",
+                ("add-then-fail",),
+            )
+
+        real_db = hook.db
+        hook.db = _FailingDB(
+            real_db,
+            fail_predicate=lambda sql: sql.strip().startswith(
+                "UPDATE skill_stats SET content_hash"
+            ),
+        )
+
+        try:
+            result = await tool.execute(
+                action="edit",
+                name="add-then-fail",
+                description="Now adds a file.",
+                body="v2 body",
+                files=[{"path": "scripts/new.py", "content": "x = 1\n"}],
+            )
+        finally:
+            hook.db = real_db
+
+        assert "Error" in result
+        # The newly-added file must NOT exist — its snapshot was None.
+        skill_dir = tmp_path / "skills" / "add-then-fail"
+        assert not (skill_dir / "scripts" / "new.py").exists()
+        # SKILL.md must be back at v1.
+        assert "v1 body" in (skill_dir / "SKILL.md").read_text()
+
+
+class TestAtomicWriteHygiene:
+    @pytest.mark.asyncio
+    async def test_atomic_write_leaves_no_tmp_file_on_success(self, tmp_path):
+        tool, _ = _make_tool(tmp_path)
+        await tool.execute(
+            name="hygiene",
+            description="Atomic-write smoke test.",
+            body="Body.",
+            files=[{"path": "scripts/run.py", "content": "x = 1\n"}],
+        )
+        skill_dir = tmp_path / "skills" / "hygiene"
+        # No leftover .SKILL.md.tmp.* or .run.py.tmp.* files.
+        leftover = list(skill_dir.rglob(".*.tmp.*"))
+        assert leftover == [], f"unexpected tempfiles: {leftover}"
 
 
 class TestDocstringPointer:
