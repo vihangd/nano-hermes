@@ -78,6 +78,21 @@ class SkillStatsConfig(BaseModel):
     max_skill_bytes: int = 256 * 1024  # 256 KiB
 
 
+class SkillsConfig(BaseModel):
+    """Skill-discovery overlay on top of nanobot's SkillsLoader.
+
+    nano-hermes still uses ``SkillsLoader`` for workspace + builtin skills.
+    This block adds N read-only external dirs whose SKILL.md files are
+    discovered and indexed parallel to builtin (status='active' on first
+    index). External skills are immutable from propose_skill — copy to
+    workspace first to modify.
+
+    Entries support ``~`` and ``${VAR}`` expansion; missing dirs are
+    logged and skipped (never raised, so a typo doesn't break startup).
+    """
+    external_dirs: list[str] = Field(default_factory=list)
+
+
 class TrajectoryConfig(BaseModel):
     """Config for Phase 3 trajectory replay."""
     # Inject the top-1 matching trajectory into before_iteration context.
@@ -94,6 +109,11 @@ class NanoHermesConfig(BaseModel):
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
     skill_stats: SkillStatsConfig = Field(default_factory=SkillStatsConfig)
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)
     trajectory: TrajectoryConfig = Field(default_factory=TrajectoryConfig)
     trajectory_retention_days: int = 45
     reflection_scope: Literal["session", "global"] = "session"
+    # Apply regex-based secret redaction to user-supplied content before it
+    # lands on disk (skill bodies, companion files, memory entries,
+    # reflections). Default on — opt out only for debugging.
+    redact_secrets: bool = True

@@ -132,6 +132,54 @@ class TestIndexerInsertStatus:
         assert row[0] == "active"
 
     @pytest.mark.asyncio
+    async def test_disappearing_skill_cleaned_from_skill_stats(self, tmp_path):
+        """When a skill present at refresh #1 is gone at refresh #2, its
+        skill_stats and skill_vec rows must be removed by ``_cleanup_removed``.
+        Without this, deprecated/deleted skills leave dangling rows that
+        ``skill_stats`` queries would surface as ghosts.
+        """
+        loop = _make_loop(tmp_path)
+        entries_v1 = [
+            _fake_entry("alive", "workspace", tmp_path),
+            _fake_entry("doomed", "workspace", tmp_path),
+        ]
+        descriptions = {"alive": "stays", "doomed": "removed next refresh"}
+        indexer, hook = self._make_indexer(loop, entries_v1, descriptions)
+        await indexer.refresh()
+
+        # Sanity: both rows exist after first refresh.
+        names = {
+            r[0] for r in hook.db.execute(
+                "SELECT name FROM skill_stats"
+            ).fetchall()
+        }
+        assert {"alive", "doomed"} <= names
+
+        # Now drop "doomed" from the entries the loader returns and refresh.
+        indexer._skills_loader.list_skills.return_value = [entries_v1[0]]
+        await indexer.refresh()
+
+        names = {
+            r[0] for r in hook.db.execute(
+                "SELECT name FROM skill_stats"
+            ).fetchall()
+        }
+        assert "alive" in names
+        assert "doomed" not in names, "skill_stats row leaked after disappearance"
+
+        # And its vector row should be gone too (no orphan in skill_vec).
+        # Get the 'alive' id; any other id-having vec row would be an orphan.
+        alive_id = hook.db.execute(
+            "SELECT id FROM skill_stats WHERE name = ?", ("alive",)
+        ).fetchone()[0]
+        vec_ids = {
+            r[0] for r in hook.db.execute(
+                "SELECT skill_id FROM skill_vec"
+            ).fetchall()
+        }
+        assert vec_ids == {alive_id}, f"orphaned vec rows: {vec_ids}"
+
+    @pytest.mark.asyncio
     async def test_unknown_source_defaults_to_draft(self, tmp_path):
         """A missing 'source' key should not crash — default to draft."""
         loop = _make_loop(tmp_path)

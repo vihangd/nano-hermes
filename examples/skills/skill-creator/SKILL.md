@@ -23,7 +23,7 @@ Use this skill when you are about to call `propose_skill` because you have a reu
 2. **Search first.** Call `skill_search` with the intent. If a matching `active` skill exists, use it; propose an `edit` if broken. Do not duplicate.
 3. **Draft in your head.** Work out the description, the body section outline, and the companion file list (scripts, references, assets). Skills are atomic — `propose_skill` takes everything in one call, so plan the whole thing before writing.
 4. **Read the references.** Read `references/authoring-guide.md` for the body template, description craft, and progressive-disclosure choices. Read `references/quality-checklist.md` for the pre-submission checklist and anti-patterns.
-5. **Submit, then rate.** Call `propose_skill(name, description, body, files)`. After you actually *use* the skill in a later turn and observe the outcome, call `skill_rate(name, outcome="success"|"failure")`. Promotion to `active` requires 3 successful ratings by default; without them the skill stays draft and never accumulates trust.
+5. **Submit, then rate.** Call `propose_skill(name, description, body, files)`. After you actually *use* the skill in a later turn and observe the outcome, call `skill_rate(name, outcome="success"|"failure")`. Promotion to `active` requires 3 successful ratings by default; without them the skill stays draft and never accumulates trust. For a small fix later (typo, single-line correction, one-section update), use `action="patch"` with `old_string`/`new_string` instead of re-emitting the whole body via `action="edit"`.
 
 ## STOP — red flags
 
@@ -36,6 +36,7 @@ Abort or restructure if any of these apply:
 - **Body is over 500 lines.** Split into `references/` files or into two skills.
 - **The skill is really two skills glued together.** Name doesn't fit one sentence. Split.
 - **You plan to propose and never rate.** The draft→active gate exists for a reason. Rate after first real use.
+- **Calling `edit` to fix a one-line typo.** Use `action="patch"` with `old_string`/`new_string` — saves a whole-body round-trip and preserves the rest of the structure.
 
 ## Minimal example
 

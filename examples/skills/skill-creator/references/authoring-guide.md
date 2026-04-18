@@ -157,9 +157,34 @@ If you fail the fresh-agent test, the skill isn't ready — don't submit it as a
 
 ## 8. Editing, not re-creating
 
-When fixing a bug in an existing skill, use `propose_skill(action="edit", ...)`. It preserves the `use_count`, `success_count`, and `last_used_at` counters that drive promotion. Re-creating with `action="create"` resets them to zero — the skill has to earn its trust all over again.
+When fixing a bug in an existing skill, use `propose_skill(action="edit", ...)` or `action="patch"`. Both preserve the `use_count`, `success_count`, and `last_used_at` counters that drive promotion. Re-creating with `action="create"` resets them to zero — the skill has to earn its trust all over again.
 
-You can pass `files=[...]` in edit mode to add or overwrite companion files, and `delete_files=[...]` to remove them. Edit is atomic: scan succeeds → all files land, scan fails → nothing changes.
+**`edit` vs `patch`:**
+
+- `action="edit"` rewrites the entire SKILL.md body. Use when you're restructuring sections, changing the description, or adding/removing companion files via `files=[...]` and `delete_files=[...]`.
+- `action="patch"` is surgical find-and-replace inside SKILL.md (or one companion file via `file_path`). Use for typos, single-line corrections, or small section rewrites — anything where re-emitting the whole body would be wasted tokens.
+
+Patch contract:
+
+```python
+propose_skill(
+  action="patch",
+  name="my-skill",
+  old_string="exact text to find",
+  new_string="replacement text",
+  # Optional:
+  file_path="scripts/run.sh",  # patch a companion file instead of SKILL.md
+  replace_all=True,            # replace every occurrence; default requires uniqueness
+)
+```
+
+Rules:
+- The match must be unique unless `replace_all=true` — provide enough surrounding context to disambiguate.
+- Patching SKILL.md must keep the frontmatter intact (`name` and `description` lines must still parse, and `name` must still match the skill directory).
+- Patches go through the same security scan as edit. If the patched result would introduce a destructive command or exfiltration pattern, the patch is rejected and the file is unchanged.
+- Patch invalidates the search index just like edit, so the new content reaches semantic search on the next `skill_search` call.
+
+**Edit and patch are both atomic with snapshot/restore:** if the security scan passes but the database upsert fails, every file the operation touched is restored to its prior content. A bad write never destroys user data.
 
 ## 9. What you get for free from nano-hermes
 
@@ -167,7 +192,7 @@ You don't need to worry about:
 
 - **Scaffolding directories** — `propose_skill` creates `{workspace}/skills/{name}/` and subdirectories for you.
 - **Validation** — paths, filenames, and content are scanned before any write; the orphaned-directory guard prevents silent adoption of shell-created skills.
-- **Rollback** — if any part of the write sequence fails in create mode, nano-hermes `rmtree`s the partial directory so you can retry cleanly. Edit mode preserves your existing content.
+- **Rollback** — every write goes through an atomic tempfile rename. In create mode, a partial failure removes the new directory. In edit and patch mode, every touched file is snapshotted and restored on failure — your existing content cannot be corrupted by a mid-flow error.
 - **Search indexing** — the next `skill_search` call picks up your new skill automatically; no manual refresh needed.
 - **Lifecycle tracking** — `skill_rate` drives promotion and deprecation; you just report outcomes.
 

@@ -82,12 +82,14 @@ class NanoHermesHook(AgentHook):
             db=self.db,
             embedder_factory=self.embedder,
             target_dims=config.embedding.target_dims,
+            redact_secrets=config.redact_secrets,
         )
         self.skill_indexer = SkillIndexer(
             db=self.db,
             skills_loader=loop.context.skills,
             embedder_factory=self.embedder,
             stats_config=config.skill_stats,
+            external_dirs=config.skills.external_dirs,
         )
         self.trajectory_writer = TrajectoryWriter(
             db=self.db,

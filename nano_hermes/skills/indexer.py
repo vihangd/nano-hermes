@@ -29,6 +29,7 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
@@ -36,6 +37,7 @@ from nanobot.agent.skills import SkillsLoader as NanobotSkillsLoader
 
 from ..config import SkillStatsConfig
 from ..embedding.chain import EmbeddingChain
+from .external import discover_external_skills, expand_external_dirs
 
 log = logging.getLogger(__name__)
 
@@ -64,11 +66,13 @@ class SkillIndexer:
         skills_loader: NanobotSkillsLoader,
         embedder_factory: Callable[[], EmbeddingChain],
         stats_config: SkillStatsConfig | None = None,
+        external_dirs: list[str] | None = None,
     ) -> None:
         self._db = db
         self._skills_loader = skills_loader
         self._embedder_factory = embedder_factory
         self._stats_config = stats_config
+        self._external_dirs = expand_external_dirs(external_dirs or [])
 
     # ------------------------------------------------------------------
     # Public API
@@ -104,14 +108,39 @@ class SkillIndexer:
     # ------------------------------------------------------------------
 
     def _list_entries(self) -> list[dict[str, Any]]:
-        return self._skills_loader.list_skills(filter_unavailable=False)
+        entries = self._skills_loader.list_skills(filter_unavailable=False)
+        if not self._external_dirs:
+            return entries
+        seen_names = {e["name"] for e in entries}
+        # Workspace > builtin > external precedence: skip externals shadowed
+        # by a same-named skill from SkillsLoader.
+        for ext in discover_external_skills(self._external_dirs):
+            if ext["name"] in seen_names:
+                continue
+            entries.append(ext)
+        return entries
 
     def _descriptions(self, entries: list[dict[str, Any]]) -> dict[str, str]:
         out: dict[str, str] = {}
         for entry in entries:
-            meta = self._skills_loader.get_skill_metadata(entry["name"]) or {}
-            out[entry["name"]] = meta.get("description", "")
+            if entry.get("source") == "external":
+                # SkillsLoader.get_skill_metadata returns None for paths
+                # outside its known dirs; the external entry carries its
+                # description inline.
+                out[entry["name"]] = entry.get("description", "")
+            else:
+                meta = self._skills_loader.get_skill_metadata(entry["name"]) or {}
+                out[entry["name"]] = meta.get("description", "")
         return out
+
+    def find_external_skill(self, name: str) -> Path | None:
+        """Return the directory containing an external SKILL.md by name,
+        or None when no external dir contains a skill with that name.
+        """
+        for ext in discover_external_skills(self._external_dirs):
+            if ext["name"] == name:
+                return Path(ext["path"]).parent
+        return None
 
     async def _refresh_with_chain(
         self,
@@ -151,11 +180,12 @@ class SkillIndexer:
         now = time.time()
         with self._db:
             for (name, _text, digest, source), vec in zip(stale, vecs):
-                # Builtin skills are trusted and start active. Workspace skills
-                # (including those created via shell scripts outside propose_skill)
-                # start as draft so they must pass skill_rate to promote.
+                # Builtin and external skills are trusted (config-curated)
+                # and start active. Workspace skills (including those created
+                # via shell scripts outside propose_skill) start as draft so
+                # they must pass skill_rate to promote.
                 # ON CONFLICT preserves the existing status — only set it on INSERT.
-                status = "active" if source == "builtin" else "draft"
+                status = "active" if source in ("builtin", "external") else "draft"
                 self._db.execute(
                     "INSERT INTO skill_stats (name, status, content_hash, indexed_at) "
                     "VALUES (?, ?, ?, ?) "

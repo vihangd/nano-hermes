@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.tools.base import Tool, tool_parameters
 
+from .._atomic import atomic_write_text
+from ..redact import RedactionResult, format_redaction_note, redact
 from .guard import scan_skill_content, scan_skill_file
 
 if TYPE_CHECKING:
@@ -31,13 +33,15 @@ _SCHEMA: dict[str, Any] = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["create", "edit"],
+            "enum": ["create", "edit", "patch"],
             "description": (
                 "'create' (default) writes a new draft skill — fails if an "
                 "active or draft skill with that name already exists. "
                 "'edit' rewrites the SKILL.md of an existing active or draft "
-                "skill without touching usage counters — use read_file to "
-                "inspect current content before editing."
+                "skill (full body replacement, may add/remove companion files). "
+                "'patch' is a surgical find-and-replace inside SKILL.md (or one "
+                "companion file via file_path) — preferred for typos and "
+                "single-line fixes since it avoids re-emitting the whole body."
             ),
         },
         "name": {
@@ -51,26 +55,29 @@ _SCHEMA: dict[str, Any] = {
         "description": {
             "type": "string",
             "description": (
-                "One-line summary of what the skill does. This is embedded "
-                "for semantic search, so precision matters."
+                "One-line summary of what the skill does. Required for create "
+                "and edit. This is embedded for semantic search, so precision "
+                "matters. Ignored for patch — to change the description, use "
+                "patch with old_string/new_string targeting the frontmatter line."
             ),
         },
         "body": {
             "type": "string",
             "description": (
-                "Full Markdown body of the skill. Follow the structure template "
-                "in the skill-creator skill's references (overview, when-to-use, "
-                "procedure, examples, edge cases, guidelines). The body is NOT "
-                "embedded for search — only name+description is — so don't rely "
-                "on body prose for discoverability."
+                "Full Markdown body of the skill. Required for create and edit. "
+                "Follow the structure template in the skill-creator skill's "
+                "references (overview, when-to-use, procedure, examples, edge "
+                "cases, guidelines). The body is NOT embedded for search — "
+                "only name+description is — so don't rely on body prose for "
+                "discoverability. Ignored for patch."
             ),
         },
         "files": {
             "type": "array",
             "description": (
-                "Optional companion files to write alongside SKILL.md. "
-                "Each path must be relative to the skill root and start with "
-                "'scripts/', 'references/', or 'assets/'. "
+                "Optional companion files to write alongside SKILL.md (create "
+                "and edit only). Each path must be relative to the skill root "
+                "and start with 'scripts/', 'references/', or 'assets/'. "
                 "Scripts may be Python (.py), Node (.js/.mjs/.ts), or shell (.sh/.bash). "
                 "In edit mode, listed files are created or overwritten."
             ),
@@ -98,8 +105,38 @@ _SCHEMA: dict[str, Any] = {
             ),
             "items": {"type": "string"},
         },
+        "old_string": {
+            "type": "string",
+            "description": (
+                "Text to find for action='patch'. Must match exactly. By "
+                "default the match must be unique — provide enough surrounding "
+                "context to disambiguate, or set replace_all=true."
+            ),
+        },
+        "new_string": {
+            "type": "string",
+            "description": (
+                "Replacement text for action='patch'. Use an empty string to "
+                "delete the matched text."
+            ),
+        },
+        "file_path": {
+            "type": "string",
+            "description": (
+                "For action='patch' only. Companion file to patch instead of "
+                "SKILL.md — must be 'scripts/', 'references/', or 'assets/' "
+                "followed by a filename. Omit to patch SKILL.md."
+            ),
+        },
+        "replace_all": {
+            "type": "boolean",
+            "description": (
+                "For action='patch'. When true, replace every occurrence of "
+                "old_string instead of requiring a unique match. Default false."
+            ),
+        },
     },
-    "required": ["name", "description", "body"],
+    "required": ["name"],
 }
 
 
@@ -129,6 +166,14 @@ class ProposeSkillTool(Tool):
     - Companion files (scripts/, references/, assets/) are optional.
       Script files may be Python, Node, or shell — security scanning is
       adjusted per subdirectory so legitimate code constructs are allowed.
+
+    Three actions:
+    - ``create`` (default): write a new draft skill.
+    - ``edit``: full SKILL.md rewrite of an existing skill, plus optional
+      companion file add/remove via ``files`` and ``delete_files``.
+    - ``patch``: surgical find-and-replace inside SKILL.md or one companion
+      file via ``file_path``. Prefer this for typos and one-line fixes — it
+      avoids re-emitting the whole body.
     """
 
     def __init__(self, *, hook: "NanoHermesHook") -> None:
@@ -145,25 +190,34 @@ class ProposeSkillTool(Tool):
     async def execute(self, **kwargs: Any) -> str:
         action: str = kwargs.get("action") or "create"
         skill_name: str = kwargs.get("name", "").strip()
-        description: str = kwargs.get("description", "").strip()
-        body: str = kwargs.get("body", "").strip()
-        files: list[dict[str, str]] = kwargs.get("files") or []
-        delete_files: list[str] = kwargs.get("delete_files") or []
 
-        # --- Common validation ---
+        # --- Name validation (required for every action) ---
         if not _NAME_RE.match(skill_name):
             return (
                 "Error: invalid skill name — must be lowercase letters, "
                 "digits, hyphens, or underscores, starting with a letter or "
                 f"digit (got '{skill_name}')."
             )
+
+        if action == "patch":
+            return await self._patch(skill_name, kwargs)
+
+        if action not in ("create", "edit"):
+            return (
+                f"Error: unknown action {action!r} — must be 'create', 'edit', "
+                "or 'patch'."
+            )
+
+        # --- create/edit-only validation ---
+        description: str = kwargs.get("description", "").strip()
+        body: str = kwargs.get("body", "").strip()
+        files: list[dict[str, str]] = kwargs.get("files") or []
+        delete_files: list[str] = kwargs.get("delete_files") or []
+
         if not description:
             return "Error: description must not be empty."
         if not body:
             return "Error: body must not be empty."
-
-        if action not in ("create", "edit"):
-            return f"Error: unknown action {action!r} — must be 'create' or 'edit'."
 
         # --- Validate companion file paths ---
         err = self._validate_file_list(files)
@@ -175,6 +229,13 @@ class ProposeSkillTool(Tool):
             )
             if err:
                 return f"Error: {err}"
+
+        # --- Apply secret redaction (before security scan + size cap so a
+        # body that's clean except for embedded secrets still passes scan
+        # and so the redacted size is what counts against the cap). ---
+        description, body, files, redaction_note = self._apply_redaction(
+            description, body, files
+        )
 
         # --- Size cap ---
         max_bytes = self._hook.config.skill_stats.max_skill_bytes
@@ -188,8 +249,12 @@ class ProposeSkillTool(Tool):
             )
 
         if action == "edit":
-            return await self._edit(skill_name, description, body, files, delete_files)
-        return await self._create(skill_name, description, body, files)
+            return await self._edit(
+                skill_name, description, body, files, delete_files, redaction_note
+            )
+        return await self._create(
+            skill_name, description, body, files, redaction_note
+        )
 
     def _validate_file_list(self, files: list[dict[str, str]]) -> str | None:
         seen: set[str] = set()
@@ -206,12 +271,49 @@ class ProposeSkillTool(Tool):
             seen.add(path)
         return None
 
+    def _apply_redaction(
+        self,
+        description: str,
+        body: str,
+        files: list[dict[str, str]],
+    ) -> tuple[str, str, list[dict[str, str]], str]:
+        """Redact secrets from agent-supplied content.
+
+        Returns ``(description, body, files, note)``. ``note`` is the
+        human-readable suffix to append to a success message — empty string
+        when nothing was redacted (or when redaction is disabled).
+        """
+        if not self._hook.config.redact_secrets:
+            return description, body, files, ""
+
+        desc_r = redact(description)
+        body_r = redact(body)
+        new_files: list[dict[str, str]] = []
+        file_results: list[RedactionResult] = []
+        for f in files:
+            cr = redact(f["content"])
+            file_results.append(cr)
+            new_files.append({"path": f["path"], "content": cr.text})
+
+        total = desc_r.count + body_r.count + sum(r.count for r in file_results)
+        if total == 0:
+            return desc_r.text, body_r.text, new_files, ""
+
+        kinds: set[str] = set(desc_r.kinds) | set(body_r.kinds)
+        for r in file_results:
+            kinds.update(r.kinds)
+        aggregate = RedactionResult(
+            text="", count=total, kinds=tuple(sorted(kinds))
+        )
+        return desc_r.text, body_r.text, new_files, format_redaction_note(aggregate)
+
     async def _create(
         self,
         skill_name: str,
         description: str,
         body: str,
         files: list[dict[str, str]],
+        redaction_note: str = "",
     ) -> str:
         # --- Conflict check ---
         row = self._hook.db.execute(
@@ -246,6 +348,7 @@ class ProposeSkillTool(Tool):
                 f"ok: created draft skill '{skill_name}' at "
                 f"workspace/skills/{skill_name}/SKILL.md. "
                 "It will appear in skill_search after the next search call triggers re-indexing."
+                + redaction_note
             ),
         )
 
@@ -256,6 +359,7 @@ class ProposeSkillTool(Tool):
         body: str,
         files: list[dict[str, str]],
         delete_files: list[str],
+        redaction_note: str = "",
     ) -> str:
         # --- Must exist and not be deprecated ---
         row = self._hook.db.execute(
@@ -273,6 +377,10 @@ class ProposeSkillTool(Tool):
                 "Use action='create' to re-propose it with fresh counters."
             )
 
+        err = self._refuse_if_external(skill_name)
+        if err:
+            return err
+
         return await self._write_skill(
             skill_name, description, body, files, delete_files,
             upsert_sql=(
@@ -282,9 +390,210 @@ class ProposeSkillTool(Tool):
                 f"ok: updated skill '{skill_name}' at "
                 f"workspace/skills/{skill_name}/SKILL.md. "
                 "Usage stats preserved. Re-indexing will happen on next skill_search call."
+                + redaction_note
             ),
             edit_mode=True,
         )
+
+    async def _patch(self, skill_name: str, kwargs: dict[str, Any]) -> str:
+        old_string = kwargs.get("old_string")
+        new_string = kwargs.get("new_string")
+        file_path = kwargs.get("file_path")  # None → SKILL.md
+        replace_all = bool(kwargs.get("replace_all", False))
+
+        if not old_string:
+            return "Error: old_string is required for action='patch'."
+        if new_string is None:
+            return (
+                "Error: new_string is required for action='patch'. "
+                "Use an empty string to delete the matched text."
+            )
+
+        # --- Redact secrets in new_string (not old_string — locator must
+        # match what's already on disk). Aggregated note is appended to
+        # the success message. ---
+        redaction_note = ""
+        if self._hook.config.redact_secrets:
+            r = redact(new_string)
+            new_string = r.text
+            redaction_note = format_redaction_note(r)
+
+        # --- Must exist and not be deprecated ---
+        row = self._hook.db.execute(
+            "SELECT status FROM skill_stats WHERE name = ?", (skill_name,)
+        ).fetchone()
+        if not row:
+            return (
+                f"Error: skill '{skill_name}' not found. "
+                "Use action='create' to propose a new skill."
+            )
+        if row[0] == "deprecated":
+            return (
+                f"Error: skill '{skill_name}' is deprecated. "
+                "Use action='create' to re-propose it with fresh counters."
+            )
+
+        err = self._refuse_if_external(skill_name)
+        if err:
+            return err
+
+        skill_dir = self._hook.workspace / "skills" / skill_name
+
+        # --- Resolve target ---
+        if file_path is None:
+            target = skill_dir / "SKILL.md"
+            target_label = "SKILL.md"
+        else:
+            if not _FILE_PATH_RE.match(file_path):
+                return (
+                    f"Error: invalid file_path {file_path!r} — must be 'scripts/', "
+                    "'references/', or 'assets/' followed by a filename "
+                    "(letters, digits, dots, hyphens, underscores, max 128 chars)."
+                )
+            resolved = self._resolve_companion(skill_dir, file_path)
+            if resolved is None:
+                return f"Error: file_path {file_path!r} escapes skill directory."
+            target = resolved
+            target_label = file_path
+
+        if not target.exists():
+            return f"Error: {target_label} does not exist in skill '{skill_name}'."
+
+        original = target.read_text(encoding="utf-8")
+
+        # --- Find/replace (exact match) ---
+        count = original.count(old_string)
+        if count == 0:
+            return f"Error: old_string not found in {target_label}."
+        if count > 1 and not replace_all:
+            return (
+                f"Error: old_string matches {count} times in {target_label}. "
+                "Provide more surrounding context to make the match unique, or "
+                "set replace_all=true."
+            )
+
+        if replace_all:
+            new_content = original.replace(old_string, new_string)
+            match_count = count
+        else:
+            new_content = original.replace(old_string, new_string, 1)
+            match_count = 1
+
+        if new_content == original:
+            return (
+                f"Error: patch is a no-op — old_string and new_string produce "
+                f"identical content for {target_label}."
+            )
+
+        # --- If patching SKILL.md, frontmatter must still be intact ---
+        if file_path is None:
+            err = self._validate_frontmatter_intact(new_content, skill_name)
+            if err:
+                return f"Error: patch would break SKILL.md: {err}"
+
+        # --- Security scan the result ---
+        if file_path is None:
+            scan_err = scan_skill_content(self._extract_body(new_content))
+        else:
+            scan_err = scan_skill_file(file_path, new_content)
+        if scan_err:
+            return f"Error: patch result failed security scan: {scan_err}"
+
+        # --- Size cap (combined size of all files in the skill dir, with
+        # the patched target replaced) ---
+        err = self._check_size_after_patch(skill_dir, target, new_content)
+        if err:
+            return f"Error: {err}"
+
+        # --- Apply with rollback ---
+        try:
+            atomic_write_text(target, new_content)
+            with self._hook.db:
+                self._hook.db.execute(
+                    "UPDATE skill_stats SET content_hash = NULL, indexed_at = NULL "
+                    "WHERE name = ?",
+                    (skill_name,),
+                )
+        except Exception as e:
+            try:
+                atomic_write_text(target, original)
+            except Exception:
+                pass
+            return (
+                f"Error: failed to patch {target_label} in '{skill_name}': {e}. "
+                "Rolled back — original content restored."
+            )
+
+        plural = "s" if match_count > 1 else ""
+        return (
+            f"ok: patched {target_label} in '{skill_name}' "
+            f"({match_count} replacement{plural}). "
+            "Re-indexing on next skill_search call."
+            + redaction_note
+        )
+
+    @staticmethod
+    def _validate_frontmatter_intact(content: str, skill_name: str) -> str | None:
+        """Return ``None`` if *content* still has a parseable name+description
+        frontmatter block whose name matches *skill_name*; otherwise an error.
+        """
+        if not content.startswith("---"):
+            return "frontmatter opener '---' is missing"
+        end = content.find("\n---", 3)
+        if end == -1:
+            return "frontmatter is not closed (no '---' after the opener)"
+        raw = content[4:end]
+        fm: dict[str, str] = {}
+        for line in raw.splitlines():
+            if ":" not in line or line.startswith("#"):
+                continue
+            key, _, value = line.partition(":")
+            fm[key.strip()] = value.strip()
+        if "name" not in fm:
+            return "frontmatter no longer contains 'name'"
+        if "description" not in fm or not fm["description"]:
+            return "frontmatter no longer contains a non-empty 'description'"
+        if fm["name"] != skill_name:
+            return (
+                f"frontmatter name {fm['name']!r} no longer matches the skill "
+                f"directory ({skill_name!r})"
+            )
+        return None
+
+    @staticmethod
+    def _extract_body(content: str) -> str:
+        """Return the body of a SKILL.md (everything after the closing '---')."""
+        if not content.startswith("---"):
+            return content
+        end = content.find("\n---", 3)
+        if end == -1:
+            return content
+        # Skip the closing '---' line and any leading newline.
+        body_start = end + len("\n---")
+        return content[body_start:].lstrip("\n")
+
+    def _check_size_after_patch(
+        self, skill_dir: Path, target: Path, new_content: str
+    ) -> str | None:
+        """Verify the skill's total size still fits the cap after the patch."""
+        max_bytes = self._hook.config.skill_stats.max_skill_bytes
+        total = 0
+        for p in skill_dir.rglob("*"):
+            if not p.is_file():
+                continue
+            if p == target:
+                total += len(new_content.encode("utf-8"))
+            else:
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    continue
+        if total > max_bytes:
+            return (
+                f"skill content too large after patch — {total:,} bytes exceeds "
+                f"the {max_bytes:,}-byte limit."
+            )
+        return None
 
     async def _write_skill(
         self,
@@ -326,45 +635,77 @@ class ProposeSkillTool(Tool):
                     "intended to update an existing skill."
                 )
 
-        # Track whether the directory existed BEFORE this call so we can
-        # safely rmtree on rollback. In edit mode we never rmtree — the
-        # existing content has precedence over a bad write.
+        # Track whether the directory existed BEFORE this call so a fresh-dir
+        # create can safely rmtree on rollback (the cleanest cleanup). In all
+        # other cases we rely on snapshot/restore to undo individual file changes.
         dir_preexisted = skill_dir.exists()
         skill_dir.mkdir(parents=True, exist_ok=True)
 
+        # Resolve every companion path upfront so a path-traversal attempt
+        # fails before any I/O, and so we know exactly which files to snapshot.
+        skill_md = skill_dir / "SKILL.md"
+        skill_md_content = (
+            f"---\nname: {skill_name}\ndescription: {description}\n---\n\n{body}\n"
+        )
+        write_targets: list[tuple[Path, str]] = [(skill_md, skill_md_content)]
+
+        for f in files:
+            resolved = self._resolve_companion(skill_dir, f["path"])
+            if resolved is None:
+                if not edit_mode and not dir_preexisted:
+                    shutil.rmtree(skill_dir, ignore_errors=True)
+                return (
+                    f"Error: companion file path escapes skill directory: {f['path']!r}"
+                )
+            write_targets.append((resolved, f["content"]))
+
+        delete_targets: list[Path] = []
+        for rel in delete_files:
+            resolved = self._resolve_companion(skill_dir, rel)
+            if resolved is None:
+                if not edit_mode and not dir_preexisted:
+                    shutil.rmtree(skill_dir, ignore_errors=True)
+                return f"Error: delete_files path escapes skill directory: {rel!r}"
+            delete_targets.append(resolved)
+
+        # Snapshot every file we'll touch so we can roll back on failure.
+        # `None` means the file did not exist prior — restore == unlink.
+        snapshots: list[tuple[Path, str | None]] = []
+        for path, _ in write_targets:
+            snapshots.append(
+                (path, path.read_text(encoding="utf-8") if path.exists() else None)
+            )
+        for path in delete_targets:
+            snapshots.append(
+                (path, path.read_text(encoding="utf-8") if path.exists() else None)
+            )
+
         try:
-            # Write SKILL.md.
-            skill_md = skill_dir / "SKILL.md"
-            content = f"---\nname: {skill_name}\ndescription: {description}\n---\n\n{body}\n"
-            skill_md.write_text(content, encoding="utf-8")
-
-            # Write companion files.
-            for f in files:
-                file_path = self._resolve_companion(skill_dir, f["path"])
-                if file_path is None:
-                    raise ValueError(
-                        f"companion file path escapes skill directory: {f['path']!r}"
-                    )
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                file_path.write_text(f["content"], encoding="utf-8")
-
-            # Delete files (edit mode only).
-            for rel in delete_files:
-                file_path = self._resolve_companion(skill_dir, rel)
-                if file_path is None:
-                    raise ValueError(
-                        f"delete_files path escapes skill directory: {rel!r}"
-                    )
-                if file_path.exists():
-                    file_path.unlink()
+            for path, payload in write_targets:
+                atomic_write_text(path, payload)
+            for path in delete_targets:
+                if path.exists():
+                    path.unlink()
 
             with self._hook.db:
                 self._hook.db.execute(upsert_sql, (skill_name,))
         except Exception as e:
-            # Rollback: in create mode, if we created the directory ourselves,
-            # remove it so a retry starts clean. In edit mode we preserve the
-            # existing content — a bad write must not destroy user data.
+            # Restore snapshots in reverse so any newly-created files are
+            # cleaned up before any restored writes happen.
+            for path, original in reversed(snapshots):
+                try:
+                    if original is None:
+                        if path.exists():
+                            path.unlink()
+                    else:
+                        atomic_write_text(path, original)
+                except Exception:
+                    # Best-effort restore — surface the original error regardless.
+                    pass
+
             if not edit_mode and not dir_preexisted:
+                # Fresh dir we created: rmtree to also clean up any empty
+                # subdirs (scripts/, references/, assets/) we made.
                 shutil.rmtree(skill_dir, ignore_errors=True)
                 return (
                     f"Error: failed to write skill '{skill_name}': {e}. "
@@ -373,9 +714,8 @@ class ProposeSkillTool(Tool):
                 )
             return (
                 f"Error: failed to write skill '{skill_name}': {e}. "
-                "The skill directory may be in a partial state — "
-                "re-run with action='edit' to overwrite once the underlying "
-                "issue is fixed."
+                "Rolled back — original content restored. "
+                "Fix the underlying issue and retry."
             )
 
         return success_msg
@@ -389,3 +729,27 @@ class ProposeSkillTool(Tool):
         except ValueError:
             return None
         return resolved
+
+    def _refuse_if_external(self, skill_name: str) -> str | None:
+        """Return an error string if *skill_name* lives ONLY in an external dir.
+
+        External dirs are configured read-only mirrors. Editing or patching
+        an external skill in place would require writing outside the
+        workspace — instead the agent must copy the skill into
+        workspace/skills/ and modify the copy.
+
+        Honors workspace > external precedence: if a workspace copy exists
+        (which is what propose_skill would write to), the external one is
+        shadowed and the edit/patch proceeds against the workspace copy.
+        """
+        workspace_skill = self._hook.workspace / "skills" / skill_name / "SKILL.md"
+        if workspace_skill.exists():
+            return None
+        ext_dir = self._hook.skill_indexer.find_external_skill(skill_name)
+        if ext_dir is None:
+            return None
+        return (
+            f"Error: skill '{skill_name}' lives in an external directory "
+            f"({ext_dir}) and is read-only. Copy it to "
+            f"workspace/skills/{skill_name}/ first if you want to modify it."
+        )

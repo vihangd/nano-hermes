@@ -8,7 +8,7 @@ Walk through each item. Any "no" is a blocker.
 
 - [ ] **Name**: hyphen-lowercase, ≤64 chars, matches `^[a-z0-9][a-z0-9_-]{0,63}$`. Task-driven, not tool-driven. No version suffixes.
 - [ ] **Description**: starts with "Use when…" or an equivalent trigger phrase. Names the key domain noun. ≤200 chars. Specific enough to rule out irrelevant queries.
-- [ ] **Duplicate check**: you called `skill_search` with the same intent and did not find an existing `active` skill. (Or you are proposing an edit of one via `action="edit"`.)
+- [ ] **Duplicate check**: you called `skill_search` with the same intent and did not find an existing `active` skill. (Or you are proposing an edit of one via `action="edit"` or surgical update via `action="patch"`.)
 - [ ] **Body structure**: follows the template from `authoring-guide.md` — Overview / When to use / Procedure / Examples / Edge cases / (Guidelines).
 - [ ] **Procedure is deterministic**: each step is testable. No "figure out" placeholders. Scripts handle the parts that need determinism.
 - [ ] **No local context leakage**: no absolute paths, no hard-coded usernames, no host-specific commands. A fresh agent in a different environment could run this.
@@ -40,6 +40,7 @@ Stop and refactor if you notice any of these while drafting.
 | Version suffix on name (`fetch-arxiv-v2`) | Orphans the old skill's counters | Edit, don't re-create; `action="edit"` preserves stats |
 | Description that promises capabilities the body doesn't deliver | Skill retrieves but fails when applied | Audit: description must match body exactly |
 | Body duplicates information that's already in nanobot's built-in tools | Skill is redundant wrapping | Point to the built-in tool, don't re-document it |
+| Calling `action="edit"` to fix a one-line typo | Wastes tokens; risks introducing new errors elsewhere in the body | Use `action="patch"` with `old_string`/`new_string`; pass `file_path` to patch a companion file instead of SKILL.md |
 
 ## 3. Lifecycle integration — draft→active is the real completion gate
 
@@ -53,7 +54,7 @@ Stop and refactor if you notice any of these while drafting.
 
 - A skill that is proposed but never rated stays at 0/0 forever. It's technically searchable (drafts are), but it has no evidence it works. Treat unrated drafts as debt.
 - Rating with `"failure"` is not a punishment — it's information. A skill that fails once might still earn promotion if it later succeeds three times. A skill that fails chronically is correctly removed.
-- Edit existing skills via `action="edit"` to preserve counters. Re-creating with the same name resets everything — only do this if the skill genuinely needs a clean slate.
+- Edit existing skills via `action="edit"` (full body rewrite) or `action="patch"` (surgical find-and-replace) to preserve counters. Re-creating with the same name resets everything — only do this if the skill genuinely needs a clean slate.
 
 **The loop you should maintain:**
 
