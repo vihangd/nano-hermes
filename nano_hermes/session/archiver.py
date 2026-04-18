@@ -28,6 +28,7 @@ from typing import Any, Callable
 import numpy as np
 
 from ..embedding.chain import AllProvidersFailed, EmbeddingChain
+from ..redact import redact
 
 log = logging.getLogger(__name__)
 
@@ -65,10 +66,12 @@ class SessionArchiver:
         db: sqlite3.Connection,
         embedder_factory: Callable[[], EmbeddingChain],
         target_dims: int,
+        redact_secrets: bool = True,
     ) -> None:
         self._db = db
         self._embedder_factory = embedder_factory
         self._target_dims = target_dims
+        self._redact_secrets = redact_secrets
         # id(messages_list) → sessions.id and high-water message index.
         self._session_ids: dict[int, int] = {}
         self._watermarks: dict[int, int] = {}
@@ -150,6 +153,11 @@ class SessionArchiver:
             text = _extract_text(msg)
             if text is None:
                 continue
+            # Redact secret-shaped strings so they neither land in chunks
+            # nor reach the embedding provider over the wire. The same
+            # masked text feeds both the INSERT and the background embed.
+            if self._redact_secrets:
+                text = redact(text).text
             cur.execute(
                 "INSERT INTO chunks "
                 "(session_id, turn_index, role, content, created_at) "

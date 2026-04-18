@@ -22,6 +22,7 @@ import numpy as np
 from nanobot.agent.tools.base import Tool, tool_parameters
 
 from ..embedding.chain import AllProvidersFailed
+from ..redact import format_redaction_note, redact
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -80,6 +81,16 @@ class ReflectTool(Tool):
         if not stripped:
             return "Error: reflection content is empty after stripping whitespace."
         content = stripped
+
+        # Redact secrets BEFORE the DB insert and BEFORE embedding — the
+        # masked text is what we persist and what cross-session retrieval
+        # later sees.
+        redaction_note = ""
+        if self._hook.config.redact_secrets:
+            r = redact(content)
+            content = r.text
+            redaction_note = format_redaction_note(r)
+
         session_id = self._hook.current_session_id
         if session_id is None:
             return (
@@ -103,7 +114,10 @@ class ReflectTool(Tool):
         if self._hook.config.reflection_scope == "global":
             self._schedule_embed(reflection_id, content.strip())
 
-        return f"ok: reflection saved ({len(content)} chars, session {session_id})"
+        return (
+            f"ok: reflection saved ({len(content)} chars, session {session_id})"
+            + redaction_note
+        )
 
     def _schedule_embed(self, reflection_id: int, text: str) -> None:
         try:

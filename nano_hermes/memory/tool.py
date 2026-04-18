@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.tools.base import Tool, tool_parameters
 
+from ..redact import format_redaction_note, redact
+
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
 
@@ -73,6 +75,20 @@ class MemoryPatchTool(Tool):
         needle = kwargs.get("needle")
         replacement = kwargs.get("replacement")
 
+        # Redact secrets from the content the agent is about to persist.
+        # `needle` is a locator (must match what's already on disk) so we
+        # never redact it.
+        redaction_note = ""
+        if self._hook.config.redact_secrets:
+            if action == "add" and content is not None:
+                r = redact(content)
+                content = r.text
+                redaction_note = format_redaction_note(r)
+            elif action == "replace" and replacement is not None:
+                r = redact(replacement)
+                replacement = r.text
+                redaction_note = format_redaction_note(r)
+
         mem = self._hook.budgeted_memory
         try:
             if action == "add":
@@ -81,12 +97,12 @@ class MemoryPatchTool(Tool):
                 result = mem.add(slot, content)  # type: ignore[arg-type]
                 if result == "duplicate":
                     return f"ok: entry already exists in {slot} (not re-added)"
-                return f"ok: added {len(content.strip())} chars to {slot}"
+                return f"ok: added {len(content.strip())} chars to {slot}{redaction_note}"
             if action == "replace":
                 if needle is None or replacement is None:
                     return "Error: action=replace requires `needle` and `replacement`"
                 mem.replace(slot, needle, replacement)  # type: ignore[arg-type]
-                return f"ok: replaced in {slot}"
+                return f"ok: replaced in {slot}{redaction_note}"
             if action == "remove":
                 if needle is None:
                     return "Error: action=remove requires `needle`"
