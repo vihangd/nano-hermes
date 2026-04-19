@@ -19,18 +19,25 @@ from ..config import RetrievalConfig
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
 
-# CJK Unified, Extensions A/B, Compatibility Ideographs, Symbols,
+# CJK Unified, Extensions A–F, Compatibility Ideographs, Symbols,
 # Hiragana, Katakana, Hangul — ranges where FTS5's unicode61 tokenizer
 # produces whole-string tokens rather than per-character tokens, causing
 # multi-character CJK queries to return 0 FTS results.
+# Extensions B–F live in the supplementary plane (U+20000–U+2FFFF).
 _CJK_RE = re.compile(
     r"[\u2E80-\u9FFF\uF900-\uFAFF\uFE30-\uFE4F"
-    r"\u3000-\u303F\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF]"
+    r"\u3000-\u303F\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF"
+    r"\U00020000-\U0002FFFF]"
 )
 
 
 def _contains_cjk(s: str) -> bool:
     return bool(_CJK_RE.search(s))
+
+
+def _like_escape(s: str) -> str:
+    """Escape SQLite LIKE wildcards so the pattern matches the literal string."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _match_centered_snippet(text: str, query: str, max_chars: int = 240) -> str:
@@ -135,8 +142,8 @@ def hybrid_search(
     # Fall back to a LIKE scan when FTS5 comes up empty on a CJK query.
     if not fts_ids and _contains_cjk(query_text):
         like_rows = conn.execute(
-            "SELECT id FROM chunks WHERE content LIKE ? LIMIT ?",
-            (f"%{query_text}%", cfg.fts_k),
+            "SELECT id FROM chunks WHERE content LIKE ? ESCAPE '\\' LIMIT ?",
+            (f"%{_like_escape(query_text)}%", cfg.fts_k),
         ).fetchall()
         fts_ids = [r[0] for r in like_rows]
 
@@ -253,8 +260,8 @@ class SessionSearchTool(Tool):
         if not rows and _contains_cjk(query):
             rows = self._hook.db.execute(
                 "SELECT id, session_id, content FROM chunks "
-                "WHERE content LIKE ? LIMIT ?",
-                (f"%{query}%", cfg.final_k),
+                "WHERE content LIKE ? ESCAPE '\\' LIMIT ?",
+                (f"%{_like_escape(query)}%", cfg.final_k),
             ).fetchall()
         if not rows:
             return f"no matches (embedding unavailable: {reason})"

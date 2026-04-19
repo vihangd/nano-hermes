@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import pytest
 
-from nano_hermes.session.search import _contains_cjk, _match_centered_snippet
+from nano_hermes.session.search import (
+    _contains_cjk,
+    _like_escape,
+    _match_centered_snippet,
+)
 
 
 class TestContainsCjk:
@@ -27,6 +31,12 @@ class TestContainsCjk:
 
     def test_empty_false(self):
         assert not _contains_cjk("")
+
+    def test_supplementary_plane_cjk_true(self):
+        # CJK Extension B (U+20000–U+2A6DF) lives above the BMP.
+        # _CJK_RE must cover \U00020000-\U0002FFFF or the LIKE fallback
+        # never fires for these rare but valid characters.
+        assert _contains_cjk("\U00020000")
 
 
 class TestMatchCenteredSnippet:
@@ -97,6 +107,23 @@ class TestMatchCenteredSnippet:
         assert snippet.count("hit") >= 2
 
 
+class TestLikeEscape:
+    def test_percent_escaped(self):
+        assert _like_escape("50% done") == "50\\% done"
+
+    def test_underscore_escaped(self):
+        assert _like_escape("user_id") == "user\\_id"
+
+    def test_backslash_escaped(self):
+        assert _like_escape("a\\b") == "a\\\\b"
+
+    def test_plain_text_unchanged(self):
+        assert _like_escape("hello world") == "hello world"
+
+    def test_cjk_text_unchanged(self):
+        assert _like_escape("人工智能") == "人工智能"
+
+
 class TestCjkFallbackIntegration:
     """Integration tests: CJK queries on a real DB should find content via LIKE."""
 
@@ -120,7 +147,12 @@ class TestCjkFallbackIntegration:
                 (time.time(),),
             )
 
-        # Insert a chunk with Chinese content.
+        # Insert a chunk with Chinese content.  Deliberately do NOT insert a
+        # chunks_vec row: without a vector the ANN path cannot return this
+        # chunk, so the only way it surfaces is through the CJK LIKE fallback.
+        # This isolates the fallback path — if we inserted a zero vec and used
+        # a zero query vec, sqlite-vec might return it via ANN (distance 0)
+        # and the assertion would pass regardless of the LIKE code.
         cjk_text = "这是关于人工智能的讨论"
         with hook.db:
             hook.db.execute(
@@ -130,23 +162,16 @@ class TestCjkFallbackIntegration:
             )
             chunk_id = hook.db.execute("SELECT last_insert_rowid()").fetchone()[0]
             # FTS trigger fires automatically on INSERT INTO chunks.
-            # Add a dummy vector row (zero vector).
-            dim = hook.config.embedding.target_dims
-            zero_vec = np.zeros(dim, dtype=np.float32).tobytes()
-            hook.db.execute(
-                "INSERT INTO chunks_vec(chunk_id, embedding) VALUES (?, ?)",
-                (chunk_id, zero_vec),
-            )
+            # No chunks_vec row — vector path cannot return this chunk.
 
         cfg = RetrievalConfig()
         query = "人工智能"
         assert _contains_cjk(query)
 
-        # Use a zero query vector — vec results will likely be empty or low.
         qv = np.zeros(hook.config.embedding.target_dims, dtype=np.float32)
         hits = hybrid_search(hook.db, query, qv, cfg)
 
-        # The CJK LIKE fallback must surface this chunk.
+        # The CJK LIKE fallback must have fired and surfaced the chunk.
         chunk_ids = {h.chunk_id for h in hits}
         assert chunk_id in chunk_ids, (
             f"CJK LIKE fallback failed — chunk {chunk_id} not in {chunk_ids}"

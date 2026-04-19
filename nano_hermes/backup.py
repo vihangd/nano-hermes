@@ -44,8 +44,17 @@ def snapshot_db(src: Path, dst: Path, *, overwrite: bool = False) -> None:
     # (backup() into a non-SQLite file raises DatabaseError.)
     if dst.exists():
         dst.unlink()
-    with sqlite3.connect(str(src)) as src_conn, sqlite3.connect(str(dst)) as dst_conn:
-        src_conn.backup(dst_conn)
+    try:
+        with sqlite3.connect(str(src)) as src_conn, sqlite3.connect(str(dst)) as dst_conn:
+            src_conn.backup(dst_conn)
+    except Exception:
+        # Clean up the partial file so it doesn't accumulate against the
+        # retain count or get mistaken for a valid snapshot.
+        try:
+            dst.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def snapshot_quick(
@@ -73,7 +82,9 @@ def snapshot_quick(
 def _prune(snap_dir: Path, db_name: str, retain: int) -> None:
     pattern = f"{db_name}.*{_SNAPSHOT_SUFFIX}"
     snapshots = sorted(snap_dir.glob(pattern))
-    for old in snapshots[:-retain]:
+    # snapshots[:-0] == [] in Python, so handle retain<=0 explicitly.
+    to_delete = snapshots if retain <= 0 else snapshots[:-retain]
+    for old in to_delete:
         try:
             old.unlink()
         except OSError:

@@ -78,10 +78,10 @@ class TestSnapshotDb:
         src = _make_db(tmp_path / "src.db", rows=2)
         dst = tmp_path / "dst.db"
 
-        # Open a connection and begin an explicit transaction, then snapshot
-        # *before* committing.
+        # Open a connection, start an explicit transaction, then snapshot
+        # *before* committing.  The default isolation_level ("") is fine —
+        # the explicit BEGIN is what opens the transaction.
         writer = sqlite3.connect(str(src))
-        writer.isolation_level = None  # autocommit off
         writer.execute("BEGIN")
         writer.execute("INSERT INTO data VALUES ('uncommitted')")
 
@@ -93,6 +93,53 @@ class TestSnapshotDb:
         with sqlite3.connect(str(dst)) as conn:
             vals = {r[0] for r in conn.execute("SELECT val FROM data").fetchall()}
         assert "uncommitted" not in vals
+
+    def test_wal_mode_snapshot_is_consistent(self, tmp_path):
+        """The main advantage of Connection.backup() over shutil.copy is that
+        it coordinates with WAL — a snapshot taken while the WAL has
+        uncheckpointed transactions still produces a consistent copy.
+        """
+        src = tmp_path / "wal.db"
+        with sqlite3.connect(str(src)) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE data (val TEXT)")
+            conn.execute("INSERT INTO data VALUES ('committed')")
+            conn.commit()
+
+        # Leave an open connection with an uncommitted write to force WAL use.
+        writer = sqlite3.connect(str(src))
+        writer.execute("BEGIN")
+        writer.execute("INSERT INTO data VALUES ('in-flight')")
+
+        dst = tmp_path / "wal-snap.db"
+        snapshot_db(src, dst)
+
+        writer.rollback()
+        writer.close()
+
+        with sqlite3.connect(str(dst)) as conn:
+            result = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            vals = {r[0] for r in conn.execute("SELECT val FROM data").fetchall()}
+        assert result == "ok"
+        assert "committed" in vals
+        assert "in-flight" not in vals
+
+    def test_partial_backup_cleaned_up_on_failure(self, tmp_path):
+        """If backup() raises the partial dst file must be removed.
+
+        sqlite3.Connection.backup is a C-level read-only slot, so we trigger
+        a real failure by passing a non-SQLite source file.  sqlite3.connect()
+        succeeds (lazy open) but backup() raises DatabaseError when it tries
+        to read the page header.
+        """
+        src = tmp_path / "corrupt.db"
+        src.write_bytes(b"this is not a valid sqlite3 database" * 10)
+        dst = tmp_path / "dst.db"
+
+        with pytest.raises(sqlite3.DatabaseError):
+            snapshot_db(src, dst)
+
+        assert not dst.exists(), "partial file must be cleaned up after failed backup"
 
 
 class TestSnapshotQuick:
@@ -139,3 +186,14 @@ class TestPrune:
             (tmp_path / f"x.db.{i}.snapshot.db").write_bytes(b"x")
         _prune(tmp_path, "x.db", retain=5)
         assert len(list(tmp_path.glob("*.snapshot.db"))) == 3
+
+    def test_prune_retain_zero_deletes_all(self, tmp_path):
+        """retain=0 must delete all snapshots, not silently no-op.
+
+        Python's list[:-0] == list[:0] == [] so the slice path is wrong;
+        the code uses an explicit guard for retain <= 0.
+        """
+        for i in range(4):
+            (tmp_path / f"x.db.{i}.snapshot.db").write_bytes(b"x")
+        _prune(tmp_path, "x.db", retain=0)
+        assert len(list(tmp_path.glob("*.snapshot.db"))) == 0
