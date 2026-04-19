@@ -6,6 +6,7 @@ degrade to FTS5-only so the tool still returns something useful.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,85 @@ from ..config import RetrievalConfig
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
+
+# CJK Unified, Extensions A/B, Compatibility Ideographs, Symbols,
+# Hiragana, Katakana, Hangul — ranges where FTS5's unicode61 tokenizer
+# produces whole-string tokens rather than per-character tokens, causing
+# multi-character CJK queries to return 0 FTS results.
+_CJK_RE = re.compile(
+    r"[\u2E80-\u9FFF\uF900-\uFAFF\uFE30-\uFE4F"
+    r"\u3000-\u303F\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF]"
+)
+
+
+def _contains_cjk(s: str) -> bool:
+    return bool(_CJK_RE.search(s))
+
+
+def _match_centered_snippet(text: str, query: str, max_chars: int = 240) -> str:
+    """Return up to *max_chars* of *text*, centered on where *query* matches.
+
+    Three-tier fallback (mirrors hermes-agent a5bc698b):
+    1. Full-phrase match — center window on the literal query string.
+    2. Proximity co-occurrence — find the densest span where all query
+       terms appear within 200 chars of each other.
+    3. Individual terms — first occurrence of any single term.
+    Within the chosen span a 25%-before / 75%-after window bias is applied
+    so the context flows forward from the match.
+    """
+    if len(text) <= max_chars:
+        return text
+
+    text_lower = text.lower()
+    query_lower = query.lower().strip()
+    positions: list[int] = []
+
+    # 1. Full-phrase
+    for m in re.finditer(re.escape(query_lower), text_lower):
+        positions.append(m.start())
+
+    # 2. Proximity co-occurrence of all terms within 200 chars
+    if not positions:
+        terms = query_lower.split()
+        if len(terms) > 1:
+            term_pos: dict[str, list[int]] = {
+                t: [m.start() for m in re.finditer(re.escape(t), text_lower)]
+                for t in terms
+            }
+            rarest = min(terms, key=lambda t: len(term_pos.get(t, [])))
+            for pos in term_pos.get(rarest, []):
+                if all(
+                    any(abs(p - pos) < 200 for p in term_pos.get(t, []))
+                    for t in terms
+                    if t != rarest
+                ):
+                    positions.append(pos)
+
+    # 3. Individual terms (last resort)
+    if not positions:
+        for t in query_lower.split():
+            for m in re.finditer(re.escape(t), text_lower):
+                positions.append(m.start())
+
+    if not positions:
+        return text[:max_chars] + ("…" if len(text) > max_chars else "")
+
+    # Pick the window that covers the most match positions.
+    positions.sort()
+    best_start, best_count = 0, 0
+    for cand in positions:
+        ws = max(0, cand - max_chars // 4)  # 25% before, 75% after
+        if ws + max_chars > len(text):
+            ws = max(0, len(text) - max_chars)
+        count = sum(1 for p in positions if ws <= p < ws + max_chars)
+        if count > best_count:
+            best_count, best_start = count, ws
+
+    start = best_start
+    end = min(len(text), start + max_chars)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(text) else ""
+    return prefix + text[start:end] + suffix
 
 
 @dataclass
@@ -49,6 +129,16 @@ def hybrid_search(
         (query_text, cfg.fts_k),
     ).fetchall()
     fts_ids = [r[0] for r in fts_rows]
+
+    # FTS5's unicode61 tokenizer doesn't segment CJK text, so queries in
+    # Chinese/Japanese/Korean return 0 FTS hits despite matching content.
+    # Fall back to a LIKE scan when FTS5 comes up empty on a CJK query.
+    if not fts_ids and _contains_cjk(query_text):
+        like_rows = conn.execute(
+            "SELECT id FROM chunks WHERE content LIKE ? LIMIT ?",
+            (f"%{query_text}%", cfg.fts_k),
+        ).fetchall()
+        fts_ids = [r[0] for r in like_rows]
 
     vec_blob = query_vec.astype(np.float32).tobytes()
     vec_rows = conn.execute(
@@ -140,7 +230,8 @@ class SessionSearchTool(Tool):
         if not hits:
             return "no matches"
         return "\n".join(
-            f"[{h.session_id}#{h.chunk_id} score={h.score:.3f}] {h.content[:240]}"
+            f"[{h.session_id}#{h.chunk_id} score={h.score:.3f}] "
+            f"{_match_centered_snippet(h.content, query)}"
             for h in hits
         )
 
@@ -159,6 +250,15 @@ class SessionSearchTool(Tool):
             "LIMIT ?",
             (query, cfg.final_k),
         ).fetchall()
+        if not rows and _contains_cjk(query):
+            rows = self._hook.db.execute(
+                "SELECT id, session_id, content FROM chunks "
+                "WHERE content LIKE ? LIMIT ?",
+                (f"%{query}%", cfg.final_k),
+            ).fetchall()
         if not rows:
             return f"no matches (embedding unavailable: {reason})"
-        return "\n".join(f"[{r[1]}#{r[0]}] {r[2][:240]}" for r in rows)
+        return "\n".join(
+            f"[{r[1]}#{r[0]}] {_match_centered_snippet(r[2], query)}"
+            for r in rows
+        )
