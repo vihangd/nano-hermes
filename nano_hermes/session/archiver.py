@@ -28,6 +28,7 @@ from typing import Any, Callable
 import numpy as np
 
 from ..embedding.chain import AllProvidersFailed, EmbeddingChain
+from ..embedding.contextual import add_context_preamble
 from ..redact import redact
 
 log = logging.getLogger(__name__)
@@ -75,6 +76,8 @@ class SessionArchiver:
         # id(messages_list) → sessions.id and high-water message index.
         self._session_ids: dict[int, int] = {}
         self._watermarks: dict[int, int] = {}
+        # session_id → first user message text (task context for embeddings).
+        self._session_tasks: dict[int, str] = {}
         # Pending background embedding tasks — retained so asyncio
         # doesn't GC them mid-flight.
         self._embed_tasks: set[asyncio.Task] = set()
@@ -93,10 +96,11 @@ class SessionArchiver:
         Returns ``(new_chunk_ids, embed_task_or_none)``. Callers don't
         need to await the task; tests can via :meth:`drain`.
         """
-        chunk_ids, texts = self._archive(messages)
+        chunk_ids, texts, session_id = self._archive(messages)
         if not chunk_ids:
             return [], None
-        task = self._schedule_embed(chunk_ids, texts)
+        task_ctx = self._session_tasks.get(session_id) if session_id is not None else None
+        task = self._schedule_embed(chunk_ids, texts, task_ctx)
         return chunk_ids, task
 
     async def drain(self, timeout: float | None = 5.0) -> None:
@@ -145,6 +149,7 @@ class SessionArchiver:
         for k in keys_to_remove:
             self._session_ids.pop(k, None)
             self._watermarks.pop(k, None)
+        self._session_tasks.pop(session_id, None)
 
     # ------------------------------------------------------------------
     # Internals
@@ -152,7 +157,7 @@ class SessionArchiver:
 
     def _archive(
         self, messages: list[dict[str, Any]]
-    ) -> tuple[list[int], list[str]]:
+    ) -> tuple[list[int], list[str], int | None]:
         key = id(messages)
         watermark = self._watermarks.get(key, 0)
         # If the list got shorter since last time, treat it as a fresh
@@ -181,6 +186,9 @@ class SessionArchiver:
             # masked text feeds both the INSERT and the background embed.
             if self._redact_secrets:
                 text = redact(text).text
+            # Capture first user message as task context for embeddings.
+            if msg.get("role") == "user" and session_id not in self._session_tasks:
+                self._session_tasks[session_id] = text[:500]
             cur.execute(
                 "INSERT INTO chunks "
                 "(session_id, turn_index, role, content, created_at) "
@@ -192,7 +200,7 @@ class SessionArchiver:
         self._watermarks[key] = len(messages)
         if new_ids:
             self._db.commit()
-        return new_ids, new_texts
+        return new_ids, new_texts, session_id
 
     def _start_session(self, key: int) -> int:
         cur = self._db.cursor()
@@ -206,21 +214,22 @@ class SessionArchiver:
         return session_id
 
     def _schedule_embed(
-        self, chunk_ids: list[int], texts: list[str]
+        self, chunk_ids: list[int], texts: list[str], task_ctx: str | None = None
     ) -> asyncio.Task:
         # Raises RuntimeError if no running loop — that's the contract.
         loop = asyncio.get_running_loop()
-        task = loop.create_task(self._embed_and_write(chunk_ids, texts))
+        task = loop.create_task(self._embed_and_write(chunk_ids, texts, task_ctx))
         self._embed_tasks.add(task)
         task.add_done_callback(self._embed_tasks.discard)
         return task
 
     async def _embed_and_write(
-        self, chunk_ids: list[int], texts: list[str]
+        self, chunk_ids: list[int], texts: list[str], task_ctx: str | None = None
     ) -> None:
+        embed_texts = [add_context_preamble(t, task_ctx) for t in texts]
         try:
             async with self._embedder_factory() as chain:
-                vecs = await chain.embed(texts)
+                vecs = await chain.embed(embed_texts)
         except AllProvidersFailed as e:
             log.warning("embed batch (%d chunks) skipped: %s", len(chunk_ids), e)
             return
