@@ -22,6 +22,8 @@ class EmbeddingConfig(BaseModel):
     target_dims: int = 512
     normalize_after_truncate: bool = True
     timeout_seconds: float = 20.0
+    # How long (seconds) to skip a provider after an HTTP 402/429/5xx error.
+    unhealthy_ttl_seconds: float = 600.0
     chain: list[EmbeddingProvider] = Field(
         default_factory=lambda: [
             EmbeddingProvider(provider="deepinfra", api_key_env="DEEPINFRA_API_KEY"),

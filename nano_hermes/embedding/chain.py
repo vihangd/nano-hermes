@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -29,6 +30,15 @@ _ENDPOINTS: dict[str, str] = {
     "together":   "https://api.together.xyz/v1/embeddings",
     "openrouter": "https://openrouter.ai/api/v1/embeddings",
 }
+
+# Per-process unhealthy-provider cache.
+# Key: (provider_name, model). Value: monotonic time after which to retry.
+_unhealthy_until: dict[tuple[str, str], float] = {}
+# Throttle "skipping unhealthy provider" log to once per minute per provider.
+_last_skip_logged: dict[tuple[str, str], float] = {}
+
+_UNHEALTHY_TTL = 600.0       # 10 min default; configurable in EmbeddingConfig
+_SKIP_LOG_THROTTLE = 60.0    # 1 min between skip-log lines per provider
 
 
 class AllProvidersFailed(RuntimeError):
@@ -56,11 +66,33 @@ class EmbeddingChain:
         if not texts:
             return []
         errors: list[str] = []
+        ttl = getattr(self.config, "unhealthy_ttl_seconds", _UNHEALTHY_TTL)
+        now = time.monotonic()
         for p in self.config.chain:
+            key = (p.provider, self.config.model)
+            if _unhealthy_until.get(key, 0.0) > now:
+                last_log = _last_skip_logged.get(key, 0.0)
+                if now - last_log > _SKIP_LOG_THROTTLE:
+                    log.debug("skipping unhealthy provider %s (cached)", p.provider)
+                    _last_skip_logged[key] = now
+                errors.append(f"{p.provider}: unhealthy (cached)")
+                continue
             try:
                 raws = await self._call(p, list(texts))
+                # Successful call — clear any stale unhealthy entry.
+                _unhealthy_until.pop(key, None)
                 return [self._postprocess(v) for v in raws]
-            except Exception as e:  # aiohttp errors, KeyError on payload, RuntimeError
+            except aiohttp.ClientResponseError as e:
+                if e.status in (402, 429) or e.status >= 500:
+                    _unhealthy_until[key] = now + ttl
+                    log.warning(
+                        "embedding provider %s returned HTTP %d — marked unhealthy for %.0fs",
+                        p.provider, e.status, ttl,
+                    )
+                else:
+                    log.warning("embedding provider %s failed: %s", p.provider, e)
+                errors.append(f"{p.provider}: HTTP {e.status}")
+            except Exception as e:
                 errors.append(f"{p.provider}: {e}")
                 log.warning("embedding provider %s failed: %s", p.provider, e)
         raise AllProvidersFailed("; ".join(errors))
