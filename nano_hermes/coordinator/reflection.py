@@ -48,6 +48,8 @@ class ReflectionCoordinator:
         # Salience state
         self._salience_score: float = 0.0
         self._nudge_pending: bool = False
+        # Queued skill-specific reflection suggestions.
+        self._skill_suggestions: list[str] = []
         # Watermark: highest reflection id injected per session.
         # Bounded by on_new_session pruning completed sessions.
         self._last_injected_reflection_id: dict[int, int] = {}
@@ -92,6 +94,26 @@ class ReflectionCoordinator:
             return None
         self._nudge_pending = False
         return {"role": "system", "content": _NUDGE_TEXT}
+
+    def queue_skill_suggestions(self, suggestions: list[str]) -> None:
+        """Queue skill-quality reflection suggestions for next injection."""
+        self._skill_suggestions.extend(suggestions)
+
+    def take_skill_suggestions(self) -> dict | None:
+        """Return queued skill suggestions as a system message, or None."""
+        if not self._skill_suggestions:
+            return None
+        bullets = "\n".join(f"- {s}" for s in self._skill_suggestions)
+        self._skill_suggestions = []
+        return {
+            "role": "system",
+            "content": (
+                "## Skill quality signals\n"
+                "One or more skills you use have a mixed success rate. "
+                "When convenient, use reflect() to note what works and what doesn't:\n"
+                + bullets
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Session-scoped reflections

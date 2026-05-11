@@ -72,6 +72,9 @@ class NanoHermesHook(AgentHook):
             embedder_factory=self.embedder,
         )
 
+        # Tracks which skills have already had a reflection suggestion injected.
+        self._skill_reflection_triggered: set[str] = set()
+
         # Coordinators
         self._skill_tracker = SkillUsageTracker(
             db=self.db,
@@ -167,6 +170,12 @@ class NanoHermesHook(AgentHook):
     def _check_promotions(self, names: list[str]) -> None:
         """Delegate to SkillUsageTracker. Called by rate_tool.py."""
         self._skill_tracker.check_promotions(names)
+        from .skills.reflection_trigger import check_skill_reflection_triggers  # noqa: PLC0415
+        suggestions = check_skill_reflection_triggers(
+            self.db, names, self.config.skill_stats, self._skill_reflection_triggered
+        )
+        if suggestions:
+            self._reflection_coord.queue_skill_suggestions(suggestions)
 
     # ------------------------------------------------------------------
     # Injection timing mechanism (unchanged)
@@ -230,6 +239,11 @@ class NanoHermesHook(AgentHook):
         nudge = self._reflection_coord.take_nudge()
         if nudge:
             self._inject(context.messages, nudge)
+
+        # Deliver queued skill-quality reflection suggestions.
+        skill_suggestions = self._reflection_coord.take_skill_suggestions()
+        if skill_suggestions:
+            self._inject(context.messages, skill_suggestions)
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         tool_count = len(context.tool_calls)
