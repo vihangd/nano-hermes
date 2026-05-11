@@ -15,6 +15,7 @@ from nanobot.agent.tools.base import Tool, tool_parameters
 
 from .._atomic import atomic_write_text
 from ..redact import RedactionResult, format_redaction_note, redact
+from ..utils.fuzzy_patch import apply_patch as fuzzy_apply_patch
 from .guard import scan_skill_content, scan_skill_file
 
 if TYPE_CHECKING:
@@ -461,23 +462,15 @@ class ProposeSkillTool(Tool):
 
         original = target.read_text(encoding="utf-8")
 
-        # --- Find/replace (exact match) ---
-        count = original.count(old_string)
-        if count == 0:
-            return f"Error: old_string not found in {target_label}."
-        if count > 1 and not replace_all:
-            return (
-                f"Error: old_string matches {count} times in {target_label}. "
-                "Provide more surrounding context to make the match unique, or "
-                "set replace_all=true."
-            )
-
-        if replace_all:
-            new_content = original.replace(old_string, new_string)
-            match_count = count
-        else:
-            new_content = original.replace(old_string, new_string, 1)
-            match_count = 1
+        # --- Find/replace (fuzzy: exact → whitespace-normalized → SequenceMatcher) ---
+        new_content, patch_err, confidence = fuzzy_apply_patch(
+            original, old_string, new_string, replace_all=replace_all
+        )
+        if patch_err:
+            return f"Error: {patch_err}"
+        assert new_content is not None
+        match_count = original.count(old_string) if replace_all else 1
+        fuzzy_note = "" if confidence == 1.0 else f" (fuzzy match, confidence {confidence:.0%})"
 
         if new_content == original:
             return (
@@ -527,7 +520,7 @@ class ProposeSkillTool(Tool):
         plural = "s" if match_count > 1 else ""
         return (
             f"ok: patched {target_label} in '{skill_name}' "
-            f"({match_count} replacement{plural}). "
+            f"({match_count} replacement{plural}){fuzzy_note}. "
             "Re-indexing on next skill_search call."
             + redaction_note
         )
