@@ -45,6 +45,7 @@ class NanoHermesHook(AgentHook):
         except TypeError:
             super().__init__()
         self.config = config
+        self._loop = loop
         self.workspace = loop.workspace
         self.budgeted_memory = BudgetedMemory(
             store=loop.context.memory,

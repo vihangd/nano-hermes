@@ -97,6 +97,17 @@ CREATE TABLE IF NOT EXISTS reflections (
     created_at      REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_reflections_session ON reflections(session_id);
+
+-- Phase 3 tables ---------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS skill_versions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_name  TEXT NOT NULL,
+    body        TEXT NOT NULL,           -- snapshot of SKILL.md at version time
+    reason      TEXT,                    -- e.g. "auto-rewrite by SkillRewriter"
+    created_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_skill_versions_name ON skill_versions(skill_name, created_at);
 """
 
 # vec0 takes dims as a literal at CREATE time, so it has to be formatted

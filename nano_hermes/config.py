@@ -88,6 +88,12 @@ class SkillStatsConfig(BaseModel):
     deprecation_max_success_rate: float = 0.2  # below this rate -> deprecated
     # Maximum total bytes (body + companion files) allowed per propose_skill call.
     max_skill_bytes: int = 256 * 1024  # 256 KiB
+    # Phase 3.1: failure-driven skill rewriter thresholds.
+    # Skills with failure_rate > rewrite_failure_threshold AND use_count >= rewrite_min_uses
+    # are candidates for automatic rewriting.
+    rewrite_failure_threshold: float = 0.6  # >60% failure rate
+    rewrite_min_uses: int = 5               # minimum uses before rewrite trigger
+    rewrite_context_chunks: int = 5         # how many failed-session chunks to send the LLM
 
 
 class SkillsConfig(BaseModel):
