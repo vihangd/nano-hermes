@@ -108,6 +108,15 @@ CREATE TABLE IF NOT EXISTS skill_versions (
     created_at  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_skill_versions_name ON skill_versions(skill_name, created_at);
+
+CREATE TABLE IF NOT EXISTS skill_compositions (
+    skill_a     TEXT NOT NULL,
+    skill_b     TEXT NOT NULL,
+    count       INTEGER NOT NULL DEFAULT 1,
+    last_used   REAL NOT NULL,
+    UNIQUE(skill_a, skill_b)
+);
+CREATE INDEX IF NOT EXISTS idx_skill_compositions_a ON skill_compositions(skill_a, count DESC);
 """
 
 # vec0 takes dims as a literal at CREATE time, so it has to be formatted

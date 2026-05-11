@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 from nanobot.agent.tools.base import Tool, tool_parameters
 
 from ..embedding.chain import AllProvidersFailed
+from .composition import get_compositions
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -81,7 +82,11 @@ class SkillSearchTool(Tool):
         if not hits:
             return "no indexed skills (none have a description?)"
         self._hook.record_skill_candidates([h.name for h in hits])
-        return "\n".join(
-            f"[{h.distance:.3f}] {h.name} — {h.description[:160]} ({h.location})"
-            for h in hits
-        )
+        lines = []
+        for h in hits:
+            line = f"[{h.distance:.3f}] {h.name} — {h.description[:160]} ({h.location})"
+            partners = get_compositions(self._hook.db, h.name)
+            if partners:
+                line += f" [often used with: {', '.join(partners)}]"
+            lines.append(line)
+        return "\n".join(lines)
