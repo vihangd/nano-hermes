@@ -641,6 +641,7 @@ class TestStatWeightedSkillSearch:
             loop,
             config={
                 "skill_stats": {
+                    "ranking_mode": "stat_weighted",
                     "use_stat_weighting": True,
                     "success_rate_boost": 10.0,  # large boost to decisively break the tie
                     "min_uses_for_success_rate": 1,

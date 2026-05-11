@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -229,9 +230,12 @@ class SkillIndexer:
         description_by_name: dict[str, str],
         location_by_name: dict[str, str],
     ) -> list[SkillHit]:
-        # Fetch a wider pool when stat weighting is on so re-ranking has
-        # enough candidates — top-k might not survive after boost.
-        fetch_k = k * 3 if (self._stats_config and self._stats_config.use_stat_weighting) else k
+        cfg = self._stats_config
+        ranking_mode = cfg.ranking_mode if cfg else "off"
+
+        # Widen the candidate pool when re-ranking so the top-k after
+        # adjustment isn't constrained by the pre-rerank ordering.
+        fetch_k = k * 3 if ranking_mode != "off" else k
         vec_blob = query_vec.astype(np.float32).tobytes()
         rows = self._db.execute(
             "SELECT skill_id, distance FROM skill_vec "
@@ -250,10 +254,14 @@ class SkillIndexer:
         id_to_name = {r[0]: r[1] for r in stat_rows}
         id_to_stats = {r[0]: (r[2], r[3]) for r in stat_rows}  # id → (use_count, success_count)
 
-        cfg = self._stats_config
-        min_uses = cfg.min_uses_for_success_rate if cfg else 3
-        boost = cfg.success_rate_boost if cfg else 0.0
-        use_weighting = cfg.use_stat_weighting if cfg else False
+        # UCB1: fetch total pull count across all active skills once.
+        total_uses: int = 0
+        if ranking_mode == "ucb1":
+            row = self._db.execute(
+                "SELECT COALESCE(SUM(use_count), 0) FROM skill_stats "
+                "WHERE status != 'deprecated'"
+            ).fetchone()
+            total_uses = int(row[0]) if row else 0
 
         hits: list[SkillHit] = []
         for skill_id, distance in rows:
@@ -261,17 +269,24 @@ class SkillIndexer:
             if not name:
                 continue
             effective_distance = float(distance)
-            if use_weighting:
-                use_count, success_count = id_to_stats.get(skill_id, (0, 0))
+            use_count, success_count = id_to_stats.get(skill_id, (0, 0))
+
+            if ranking_mode == "ucb1":
+                success_rate = success_count / use_count if use_count > 0 else 0.0
+                # Exploration bonus: large for cold-start skills, decays as
+                # skill_uses grows relative to total_uses.
+                exploration = math.sqrt(
+                    2.0 * math.log(total_uses + 1) / max(use_count, 1)
+                )
+                ucb1_score = success_rate + exploration
+                effective_distance -= cfg.ucb1_coefficient * ucb1_score  # type: ignore[union-attr]
+            elif ranking_mode == "stat_weighted":
+                min_uses = cfg.min_uses_for_success_rate if cfg else 3  # type: ignore[union-attr]
+                boost = cfg.success_rate_boost if cfg else 0.0  # type: ignore[union-attr]
                 if use_count >= min_uses:
                     success_rate = success_count / use_count
-                    # Subtract a small success-rate bonus from distance so
-                    # highly reliable skills win ties and narrow races.
-                    # Using additive adjustment (not multiplicative) so the
-                    # bonus works even when raw distance is 0.
-                    # Default boost=0.3 → max adjustment of 0.003 at 100%
-                    # success rate — tiny vs typical L2 gaps (~0.1–1.4).
                     effective_distance -= boost * success_rate * 0.01
+
             hits.append(
                 SkillHit(
                     name=name,

@@ -65,11 +65,18 @@ class ReflectionConfig(BaseModel):
 class SkillStatsConfig(BaseModel):
     """Config for skill usage stat tracking."""
     min_uses_for_success_rate: int = 3  # Don't display rate below this threshold
-    # Phase 3: weight skill_search results by empirical success rate.
-    # score = (1 - distance) * (1 + success_rate_boost * success_rate)
-    # Only applied when use_count >= min_uses_for_success_rate.
+    # Ranking mode for skill_search re-ranking.
+    #   "ucb1"         — UCB1 bandit (exploration + exploitation)
+    #   "stat_weighted" — pure success-rate boost (legacy)
+    #   "off"          — no stat adjustment
+    ranking_mode: Literal["ucb1", "stat_weighted", "off"] = "ucb1"
+    # UCB1: how much the bandit score shifts effective_distance.
+    # Typical L2 gap between skills is ~0.1–1.4; default 0.05 gives a max
+    # cold-start adjustment of ~0.12 (meaningful without overwhelming).
+    ucb1_coefficient: float = 0.05
+    # Legacy stat_weighted fields (still used when ranking_mode="stat_weighted").
     use_stat_weighting: bool = True
-    success_rate_boost: float = 0.3  # max boost to similarity score
+    success_rate_boost: float = 0.3
     # Phase 4: two-phase skill promotion thresholds.
     promotion_threshold: int = 3          # successful uses to promote draft -> active
     deprecation_min_uses: int = 5         # minimum uses before deprecation check
