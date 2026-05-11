@@ -181,13 +181,17 @@ def purge_older_than(conn: sqlite3.Connection, days: int) -> dict[str, int]:
         f"DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < {cutoff}"
     ).rowcount
 
-    # Clean up orphaned vec0 rows for chunks and reflections.
-    for cid in old_chunk_ids:
-        conn.execute("DELETE FROM chunks_vec WHERE chunk_id = ?", (cid,))
-    for rid in old_ref_ids:
-        conn.execute("DELETE FROM reflections_vec WHERE reflection_id = ?", (rid,))
+    # Clean up orphaned vec0 rows for chunks and reflections (batched).
+    if old_chunk_ids:
+        ph = ",".join("?" * len(old_chunk_ids))
+        conn.execute(f"DELETE FROM chunks_vec WHERE chunk_id IN ({ph})", old_chunk_ids)
+    if old_ref_ids:
+        ph = ",".join("?" * len(old_ref_ids))
+        conn.execute(
+            f"DELETE FROM reflections_vec WHERE reflection_id IN ({ph})", old_ref_ids
+        )
 
-    # Collect trajectory IDs before deleting so we can clean up vec rows
+    # Collect trajectory IDs before deleting so we can clean up vec rows.
     old_traj_ids = [
         r[0]
         for r in conn.execute(
@@ -197,7 +201,10 @@ def purge_older_than(conn: sqlite3.Connection, days: int) -> dict[str, int]:
     traj = conn.execute(
         f"DELETE FROM trajectories WHERE created_at < {cutoff}"
     ).rowcount
-    for tid in old_traj_ids:
-        conn.execute("DELETE FROM trajectories_vec WHERE trajectory_id = ?", (tid,))
+    if old_traj_ids:
+        ph = ",".join("?" * len(old_traj_ids))
+        conn.execute(
+            f"DELETE FROM trajectories_vec WHERE trajectory_id IN ({ph})", old_traj_ids
+        )
     conn.commit()
     return {"sessions": sess, "trajectories": traj}

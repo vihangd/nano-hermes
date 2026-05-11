@@ -123,6 +123,29 @@ class SessionArchiver:
         """
         return self._session_ids.get(id(messages))
 
+    def ensure_session(self, messages: list[dict[str, Any]]) -> int | None:
+        """Bootstrap a session row and archive any new chunks without embedding.
+
+        Safe to call from synchronous code — no asyncio event loop required.
+        Subsequent :meth:`archive_and_embed` calls use the watermark to avoid
+        double-inserting chunks already written here.
+        """
+        if not messages:
+            return self._session_ids.get(id(messages))
+        self._archive(messages)
+        return self._session_ids.get(id(messages))
+
+    def prune_session_by_id(self, session_id: int) -> None:
+        """Remove all internal bookkeeping entries that map to session_id.
+
+        Called when a session boundary is crossed to bound dict growth.
+        Keyed by id(messages_list), not by session_id directly.
+        """
+        keys_to_remove = [k for k, v in self._session_ids.items() if v == session_id]
+        for k in keys_to_remove:
+            self._session_ids.pop(k, None)
+            self._watermarks.pop(k, None)
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

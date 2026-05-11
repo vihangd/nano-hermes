@@ -43,6 +43,8 @@ class TestPurgeOnStartup:
         messages: list[dict] = [{"role": "user", "content": "new session"}]
         ctx = AgentHookContext(iteration=0, messages=messages)
         await hook.before_iteration(ctx)
+        if hook._purge_task:
+            await hook._purge_task
 
         assert hook.db.execute(
             "SELECT COUNT(*) FROM trajectories"
@@ -108,6 +110,8 @@ class TestPurgeSessionsCascade:
 
         messages: list[dict] = [{"role": "user", "content": "new session"}]
         await hook.before_iteration(AgentHookContext(iteration=0, messages=messages))
+        if hook._purge_task:
+            await hook._purge_task
 
         assert hook.db.execute(
             "SELECT COUNT(*) FROM sessions WHERE id = ?", (old_session_id,)
@@ -161,3 +165,71 @@ class TestPurgeChunksVecCleanup:
         assert hook.db.execute(
             "SELECT COUNT(*) FROM chunks_vec WHERE chunk_id = ?", (old_chunk_id,)
         ).fetchone()[0] == 0, "chunks_vec orphan not cleaned by purge_older_than"
+
+
+# ---------------------------------------------------------------------------
+# Phase 0.4: purge_older_than uses batched IN-clause DELETEs (not N+1)
+# ---------------------------------------------------------------------------
+
+class TestPurgeBatchedDelete:
+    def test_chunks_vec_delete_is_batched(
+        self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """purge_older_than must issue a single batched DELETE for chunks_vec."""
+        import time as _time
+        from nano_hermes.session.db import purge_older_than
+
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        old_ts = _time.time() - 60 * 86400
+        cur = hook.db.execute(
+            "INSERT INTO sessions (session_key, started_at, ended_at) VALUES (?, ?, ?)",
+            ("old:batch:1", old_ts, old_ts),
+        )
+        old_session_id = cur.lastrowid
+
+        fake_vec = np.ones(hook.config.embedding.target_dims, dtype=np.float32)
+        fake_vec /= np.linalg.norm(fake_vec)
+
+        chunk_ids = []
+        for i in range(3):
+            cur2 = hook.db.execute(
+                "INSERT INTO chunks (session_id, turn_index, role, content, created_at) "
+                "VALUES (?, ?, 'user', 'content', ?)",
+                (old_session_id, i, old_ts),
+            )
+            cid = cur2.lastrowid
+            chunk_ids.append(cid)
+            hook.db.execute(
+                "INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)",
+                (cid, fake_vec.tobytes()),
+            )
+        hook.db.commit()
+
+        # sqlite3.Connection.execute is a C-level slot and cannot be
+        # monkeypatched directly. Wrap the connection in a proxy instead.
+        class _CountingProxy:
+            def __init__(self, conn):
+                self._real = conn
+                self.delete_count = 0
+
+            def execute(self, sql, *args, **kwargs):
+                if "chunks_vec" in sql.lower() and "delete" in sql.lower():
+                    self.delete_count += 1
+                return self._real.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        proxy = _CountingProxy(hook.db)
+        purge_older_than(proxy, days=30)  # type: ignore[arg-type]
+
+        # All 3 chunk_ids should be deleted in exactly ONE batched statement.
+        assert proxy.delete_count == 1, (
+            f"Expected 1 batched DELETE, got {proxy.delete_count} — N+1 bug present"
+        )
+        for cid in chunk_ids:
+            assert hook.db.execute(
+                "SELECT COUNT(*) FROM chunks_vec WHERE chunk_id = ?", (cid,)
+            ).fetchone()[0] == 0
