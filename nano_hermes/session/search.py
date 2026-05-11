@@ -15,6 +15,7 @@ import numpy as np
 from nanobot.agent.tools.base import Tool, tool_parameters
 
 from ..config import RetrievalConfig
+from .mmr import MMRHit, mmr_rerank
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -156,20 +157,34 @@ def hybrid_search(
     vec_ids = [r[0] for r in vec_rows]
 
     fused = reciprocal_rank_fusion(fts_ids, vec_ids, cfg.rrf_k)
-    top = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[: cfg.final_k]
-    if not top:
+    # Sort by RRF score descending; keep a wider pool for MMR to re-rank.
+    candidates = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)
+    if not candidates:
         return []
 
-    placeholders = ",".join("?" * len(top))
+    placeholders = ",".join("?" * len(candidates))
     rows = conn.execute(
         f"SELECT id, session_id, content FROM chunks WHERE id IN ({placeholders})",
-        [cid for cid, _ in top],
+        [cid for cid, _ in candidates],
     ).fetchall()
     by_id = {r[0]: r for r in rows}
-    return [
-        Hit(chunk_id=cid, session_id=by_id[cid][1], content=by_id[cid][2], score=score)
-        for cid, score in top
+
+    mmr_hits = [
+        MMRHit(
+            chunk_id=cid,
+            session_id=by_id[cid][1],
+            content=by_id[cid][2],
+            score=score,
+        )
+        for cid, score in candidates
         if cid in by_id
+    ]
+
+    lam = getattr(cfg, "mmr_lambda", 1.0)
+    reranked = mmr_rerank(mmr_hits, lam=lam, k=cfg.final_k)
+    return [
+        Hit(chunk_id=h.chunk_id, session_id=h.session_id, content=h.content, score=h.score)
+        for h in reranked
     ]
 
 

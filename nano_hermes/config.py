@@ -51,6 +51,9 @@ class RetrievalConfig(BaseModel):
     vec_k: int = 25       # vector candidate pool
     rrf_k: int = 60       # RRF smoothing constant (Cormack et al. default)
     final_k: int = 8
+    # MMR diversity reranking applied after RRF fusion.
+    # λ=1.0 disables MMR (pure relevance). λ=0.7 recommended balance.
+    mmr_lambda: float = 0.7
 
 
 class ReflectionConfig(BaseModel):
