@@ -306,10 +306,10 @@ class NanoHermesHook(AgentHook):
 
         if completed_id is not None:
             # Session boundary: finalize trajectory, reset skill state, prune dicts.
-            skills_used, had_errors = self._skill_tracker.reset_session()
-            if len(skills_used) >= 2:
+            skills_used, skills_loaded, had_errors = self._skill_tracker.reset_session()
+            if len(skills_loaded) >= 2:
                 from .skills.composition import record_composition  # noqa: PLC0415
-                record_composition(self.db, skills_used)
+                record_composition(self.db, skills_loaded)
             self._session_coord.finalize(completed_id, skills_used, had_errors)
             self._reflection_coord.on_new_session(completed_id)
             self.archiver.prune_session_by_id(completed_id)

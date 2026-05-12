@@ -67,10 +67,12 @@ class TestResetSession:
     ) -> None:
         tracker._session_skills_used = {"x", "y"}
         tracker._session_had_errors = True
-        skills, errors = tracker.reset_session()
+        skills, loaded, errors = tracker.reset_session()
         assert skills == {"x", "y"}
+        assert isinstance(loaded, set)
         assert errors is True
         assert tracker._session_skills_used == set()
+        assert tracker._session_skills_loaded == set()
         assert tracker._session_had_errors is False
 
 

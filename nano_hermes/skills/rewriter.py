@@ -212,16 +212,15 @@ async def run_rewriter(hook: "NanoHermesHook") -> list[str]:
         if new_body is None:
             continue
 
-        # Extract description line from new body for the edit call.
-        description = _extract_description(new_body) or ""
-
+        # Pass description="" — _edit only uses it in the success message;
+        # SkillIndexer re-extracts description from the file on next search.
         # Use ProposeSkillTool's internal _edit path — import lazily to
         # avoid circular imports at module load time.
         from .propose_tool import ProposeSkillTool  # noqa: PLC0415
         tool = ProposeSkillTool(hook=hook)
         result = await tool._edit(
             skill_name=candidate.skill_name,
-            description=description,
+            description="",
             body=new_body,
             files=[],
             delete_files=[],
@@ -236,10 +235,3 @@ async def run_rewriter(hook: "NanoHermesHook") -> list[str]:
     return rewritten
 
 
-def _extract_description(body: str) -> str | None:
-    """Extract the description from the SKILL.md frontmatter or first paragraph."""
-    for line in body.splitlines():
-        line = line.strip()
-        if line.startswith("description:"):
-            return line[len("description:"):].strip().strip('"').strip("'")
-    return None

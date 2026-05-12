@@ -31,6 +31,10 @@ class SkillUsageTracker:
         self._loaded_skills: dict[str, int] = {}
         # Per-session accumulators (reset at session boundary)
         self._session_skills_used: set[str] = set()
+        # Narrow signal: only skills the agent actually loaded (read_file on SKILL.md)
+        # or explicitly rated. Used for composition tracking — candidates (search hits)
+        # are excluded to avoid false co-occurrence pairs.
+        self._session_skills_loaded: set[str] = set()
         self._session_had_errors: bool = False
 
     # ------------------------------------------------------------------
@@ -57,6 +61,7 @@ class SkillUsageTracker:
     def record_rating(self, name: str) -> None:
         """Register an explicitly-rated skill for trajectory tracking."""
         self._session_skills_used.add(name)
+        self._session_skills_loaded.add(name)
 
     def record_error(self) -> None:
         """Signal that an error occurred this iteration."""
@@ -74,17 +79,23 @@ class SkillUsageTracker:
         """
         self._session_skills_used.update(self._candidate_skills)
         self._session_skills_used.update(self._loaded_skills.keys())
+        self._session_skills_loaded.update(self._loaded_skills.keys())
 
-    def reset_session(self) -> tuple[set[str], bool]:
+    def reset_session(self) -> tuple[set[str], set[str], bool]:
         """Return accumulated session data and reset state.
 
-        Returns (skills_used, had_errors). Called at session boundary.
+        Returns (skills_used_broad, skills_loaded_narrow, had_errors).
+        skills_loaded_narrow contains only skills the agent actually read
+        or explicitly rated — suitable for composition co-occurrence tracking.
+        skills_used_broad includes search candidates — suitable for trajectory.
         """
         skills = self._session_skills_used
+        loaded = self._session_skills_loaded
         errors = self._session_had_errors
         self._session_skills_used = set()
+        self._session_skills_loaded = set()
         self._session_had_errors = False
-        return skills, errors
+        return skills, loaded, errors
 
     # ------------------------------------------------------------------
     # Properties for read-only access

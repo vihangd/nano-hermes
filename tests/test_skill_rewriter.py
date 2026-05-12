@@ -15,6 +15,7 @@ from nano_hermes.skills.rewriter import (
     gather_failure_context,
     get_rewrite_candidates,
     rewrite_skill,
+    run_rewriter,
     save_skill_version,
 )
 
@@ -221,3 +222,90 @@ class TestRewriteSkill:
         candidate = RewriteCandidate(skill_name=skill_name, use_count=10, success_count=2)
         result = asyncio.run(rewrite_skill(hook, candidate))
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Integration: run_rewriter (full pipeline including _edit)
+# ---------------------------------------------------------------------------
+
+class TestRunRewriter:
+    def _setup(self, tmp_path: Path, skill_name: str) -> "NanoHermesHook":
+        """Seed a failing skill with SKILL.md and a failed session."""
+        loop = _make_loop(tmp_path)
+        hook = nano_hermes.install(loop)
+
+        # Seed skill stats above thresholds
+        hook.db.execute(
+            "INSERT OR REPLACE INTO skill_stats "
+            "(name, status, use_count, success_count) VALUES (?, 'active', 10, 1)",
+            (skill_name,),
+        )
+        hook.db.commit()
+
+        # Create SKILL.md (no description: line — tests that run_rewriter handles this)
+        skill_dir = hook.workspace / "skills" / skill_name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"# {skill_name}\n\nA poorly written skill.\n\n## Steps\n1. Do the wrong thing\n"
+        )
+
+        _seed_failed_session(hook, skill_name, "the agent could not complete the task")
+        return hook
+
+    def test_run_rewriter_updates_skill_file(self, tmp_path):
+        skill_name = "needs-rewrite"
+        hook = self._setup(tmp_path, skill_name)
+
+        # LLM returns new body without a description: frontmatter line
+        new_body = f"# {skill_name}\n\nImproved skill.\n\n## Steps\n1. Do the right thing\n"
+        mock_response = MagicMock()
+        mock_response.content = new_body
+        hook._loop.provider = MagicMock()
+        hook._loop.provider.chat_with_retry = AsyncMock(return_value=mock_response)
+
+        rewritten = asyncio.run(run_rewriter(hook))
+
+        assert skill_name in rewritten, "run_rewriter should return the rewritten skill name"
+        skill_path = hook.workspace / "skills" / skill_name / "SKILL.md"
+        assert "Improved skill" in skill_path.read_text()
+
+    def test_run_rewriter_preserves_old_version(self, tmp_path):
+        skill_name = "preserve-me"
+        hook = self._setup(tmp_path, skill_name)
+        old_text = (hook.workspace / "skills" / skill_name / "SKILL.md").read_text()
+
+        new_body = f"# {skill_name}\n\nRewritten.\n\n## Steps\n1. Better\n"
+        mock_response = MagicMock()
+        mock_response.content = new_body
+        hook._loop.provider = MagicMock()
+        hook._loop.provider.chat_with_retry = AsyncMock(return_value=mock_response)
+
+        asyncio.run(run_rewriter(hook))
+
+        row = hook.db.execute(
+            "SELECT body FROM skill_versions WHERE skill_name = ?", (skill_name,)
+        ).fetchone()
+        assert row is not None
+        assert row[0] == old_text
+
+    def test_run_rewriter_config_thresholds(self, tmp_path):
+        """Skills below config thresholds should not be rewritten."""
+        skill_name = "healthy-skill"
+        loop = _make_loop(tmp_path)
+        hook = nano_hermes.install(loop)
+
+        # High success rate — should not trigger
+        hook.db.execute(
+            "INSERT OR REPLACE INTO skill_stats "
+            "(name, status, use_count, success_count) VALUES (?, 'active', 10, 9)",
+            (skill_name,),
+        )
+        hook.db.commit()
+
+        hook._loop.provider = MagicMock()
+        hook._loop.provider.chat_with_retry = AsyncMock()
+
+        rewritten = asyncio.run(run_rewriter(hook))
+
+        assert skill_name not in rewritten
+        hook._loop.provider.chat_with_retry.assert_not_called()
