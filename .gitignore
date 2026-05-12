@@ -56,3 +56,10 @@ ROADMAP.md
 *.db
 *.db-shm
 *.db-wal
+
+# Serena IDE tool config
+.serena/
+
+# Research / scratch docs
+MEMORY_RESEARCH.md
+RESEARCH_AI_AGENT_SECURITY.md
