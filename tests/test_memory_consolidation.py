@@ -103,6 +103,24 @@ class TestGreedyCluster:
         # At exactly threshold they should merge (>=)
         assert len(clusters) == 1
 
+    def test_cascading_merge_with_renormalized_centroid(self):
+        # Four vectors: three near-identical (should all merge), one far.
+        # Without centroid re-normalisation after each update the centroid
+        # deflates and the third near-vector may fall below threshold.
+        base = _norm(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+        near1 = _norm(np.array([0.99, 0.12, 0.0, 0.0], dtype=np.float32))
+        near2 = _norm(np.array([0.98, 0.0, 0.12, 0.0], dtype=np.float32))
+        far = _norm(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32))
+
+        clusters = greedy_cluster([base, near1, near2, far], threshold=0.92)
+
+        assert len(clusters) == 2, (
+            "expected 2 clusters: {base,near1,near2} and {far}, "
+            f"got {len(clusters)}: {clusters}"
+        )
+        sizes = sorted(len(c) for c in clusters)
+        assert sizes == [1, 3]
+
     def test_empty_input(self):
         assert greedy_cluster([]) == []
 

@@ -43,12 +43,14 @@ def check_skill_reflection_triggers(
         if name in already_triggered:
             continue
         row = db.execute(
-            "SELECT use_count, success_count FROM skill_stats WHERE name = ?",
+            "SELECT use_count, success_count, status FROM skill_stats WHERE name = ?",
             (name,),
         ).fetchone()
         if not row:
             continue
-        use_count, success_count = int(row[0]), int(row[1])
+        use_count, success_count, status = int(row[0]), int(row[1]), row[2]
+        if status == "deprecated":
+            continue
         if use_count < cfg.min_uses_for_success_rate:
             continue
         rate = success_count / use_count

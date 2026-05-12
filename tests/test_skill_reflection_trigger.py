@@ -110,6 +110,24 @@ class TestCheckSkillReflectionTriggers:
         )
         assert suggestions, "exactly 80% should trigger (inclusive upper bound)"
 
+    def test_no_trigger_for_deprecated_skill(self, tmp_path):
+        loop = _make_loop(tmp_path)
+        hook = nano_hermes.install(loop)
+
+        # Deprecated skill with mixed success rate — should NOT trigger
+        hook.db.execute(
+            "INSERT OR REPLACE INTO skill_stats "
+            "(name, status, use_count, success_count) VALUES (?, 'deprecated', 10, 5)",
+            ("deprecated-skill",),
+        )
+        hook.db.commit()
+        triggered: set[str] = set()
+
+        suggestions = check_skill_reflection_triggers(
+            hook.db, ["deprecated-skill"], self._cfg(), triggered
+        )
+        assert not suggestions, "deprecated skills should never trigger reflection"
+
 
 class TestReflectionCoordinatorQueueing:
     def test_queue_and_take(self, tmp_path):

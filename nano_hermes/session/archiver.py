@@ -163,7 +163,9 @@ class SessionArchiver:
         # If the list got shorter since last time, treat it as a fresh
         # list that happens to share the same id() — start a new session.
         if watermark > len(messages):
-            self._session_ids.pop(key, None)
+            old_sid = self._session_ids.pop(key, None)
+            if old_sid is not None:
+                self._session_tasks.pop(old_sid, None)
             watermark = 0
 
         session_id = self._session_ids.get(key)

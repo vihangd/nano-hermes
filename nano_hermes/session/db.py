@@ -168,13 +168,15 @@ def purge_older_than(conn: sqlite3.Connection, days: int) -> dict[str, int]:
 
     Returns ``{"sessions": n, "trajectories": n}`` for logging.
     """
-    cutoff = f"strftime('%s','now') - {days * 86400}"
+    import time as _time  # noqa: PLC0415
+    cutoff = _time.time() - days * 86400
 
     # Collect vec IDs BEFORE cascade deletes remove the parent rows.
     old_session_ids = [
         r[0]
         for r in conn.execute(
-            f"SELECT id FROM sessions WHERE ended_at IS NOT NULL AND ended_at < {cutoff}"
+            "SELECT id FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?",
+            (cutoff,),
         ).fetchall()
     ]
     if old_session_ids:
@@ -198,7 +200,8 @@ def purge_older_than(conn: sqlite3.Connection, days: int) -> dict[str, int]:
         old_ref_ids = []
 
     sess = conn.execute(
-        f"DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < {cutoff}"
+        "DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?",
+        (cutoff,),
     ).rowcount
 
     # Clean up orphaned vec0 rows for chunks and reflections (batched).
@@ -215,11 +218,13 @@ def purge_older_than(conn: sqlite3.Connection, days: int) -> dict[str, int]:
     old_traj_ids = [
         r[0]
         for r in conn.execute(
-            f"SELECT id FROM trajectories WHERE created_at < {cutoff}"
+            "SELECT id FROM trajectories WHERE created_at < ?",
+            (cutoff,),
         ).fetchall()
     ]
     traj = conn.execute(
-        f"DELETE FROM trajectories WHERE created_at < {cutoff}"
+        "DELETE FROM trajectories WHERE created_at < ?",
+        (cutoff,),
     ).rowcount
     if old_traj_ids:
         ph = ",".join("?" * len(old_traj_ids))

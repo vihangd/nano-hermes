@@ -69,6 +69,10 @@ class ReflectionConfig(BaseModel):
     """
     threshold: float = 5.0
     recent_limit: int = 5   # max reflections injected per iteration
+    # Minimum cosine similarity (1 - distance) for global cross-session
+    # reflection injection. Prevents injecting unrelated reflections when
+    # reflection_scope = "global".
+    global_inject_min_similarity: float = 0.60
 
 
 class SkillStatsConfig(BaseModel):

@@ -244,8 +244,13 @@ class ReflectionCoordinator:
             [r[0] for r in vec_rows],
         ).fetchall()
 
+        min_sim = getattr(self._config.reflection, "global_inject_min_similarity", 0.60)
         results = sorted(
-            [(r[0], r[1], r[2]) for r in ref_rows],
+            [
+                (r[0], r[1], r[2])
+                for r in ref_rows
+                if (1.0 - id_to_distance.get(r[0], 999.0)) >= min_sim
+            ],
             key=lambda x: id_to_distance.get(x[0], 999.0),
         )
         return results[:limit]

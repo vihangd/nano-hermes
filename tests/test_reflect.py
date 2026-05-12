@@ -254,9 +254,12 @@ class TestGlobalReflection:
         ref_id = cur.lastrowid
         hook.db.commit()
 
-        # Write a fake embedding for this reflection
-        fake_vec = np.ones(hook.config.embedding.target_dims, dtype=np.float32)
-        fake_vec /= np.linalg.norm(fake_vec)
+        # Write a fake embedding that matches what _fake_embed returns for
+        # "scraping job with BeautifulSoup" (no keyword match → _FAKE_VEC_UNRELATED
+        # = unit vector on dim 2). Using the same vector ensures distance ≈ 0
+        # which passes the global_inject_min_similarity threshold.
+        fake_vec = np.zeros(hook.config.embedding.target_dims, dtype=np.float32)
+        fake_vec[2] = 1.0
         hook.db.execute(
             "INSERT INTO reflections_vec (reflection_id, embedding) VALUES (?, ?)",
             (ref_id, fake_vec.tobytes()),

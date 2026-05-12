@@ -248,7 +248,10 @@ class SessionSearchTool(Tool):
         except Exception as e:
             return self._fts_only_fallback(query, cfg, reason=str(e))
 
-        hits = hybrid_search(self._hook.db, query, qv, cfg)
+        try:
+            hits = hybrid_search(self._hook.db, query, qv, cfg)
+        except Exception as e:
+            return self._fts_only_fallback(query, cfg, reason=str(e))
         if not hits:
             return "no matches"
         return "\n".join(
@@ -263,15 +266,18 @@ class SessionSearchTool(Tool):
         # FTS5's MATCH operator requires the real table name, not an alias —
         # `f MATCH ?` parses as referencing a column called `f`. Join from
         # chunks_fts and order by its hidden BM25 `rank` column.
-        rows = self._hook.db.execute(
-            "SELECT chunks.id, chunks.session_id, chunks.content "
-            "FROM chunks_fts "
-            "JOIN chunks ON chunks.id = chunks_fts.rowid "
-            "WHERE chunks_fts MATCH ? "
-            "ORDER BY chunks_fts.rank "
-            "LIMIT ?",
-            (query, cfg.final_k),
-        ).fetchall()
+        try:
+            rows = self._hook.db.execute(
+                "SELECT chunks.id, chunks.session_id, chunks.content "
+                "FROM chunks_fts "
+                "JOIN chunks ON chunks.id = chunks_fts.rowid "
+                "WHERE chunks_fts MATCH ? "
+                "ORDER BY chunks_fts.rank "
+                "LIMIT ?",
+                (query, cfg.final_k),
+            ).fetchall()
+        except Exception:
+            rows = []
         if not rows and _contains_cjk(query):
             rows = self._hook.db.execute(
                 "SELECT id, session_id, content FROM chunks "

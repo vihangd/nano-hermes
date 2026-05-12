@@ -58,7 +58,9 @@ def greedy_cluster(
         if sims[best] >= threshold:
             n = len(clusters[best])
             clusters[best].append(i)
-            centroids[best] = centroids[best] + (vec - centroids[best]) / (n + 1)
+            new_c = centroids[best] + (vec - centroids[best]) / (n + 1)
+            norm = float(np.linalg.norm(new_c))
+            centroids[best] = new_c / norm if norm > 0.0 else new_c
         else:
             clusters.append([i])
             centroids.append(vec.copy())
