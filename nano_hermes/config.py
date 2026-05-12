@@ -44,6 +44,10 @@ class MemoryBudgets(BaseModel):
     memory_md_chars: int = 2200
     user_md_chars: int = 1375
     soul_md_chars: int = 1500
+    # Cosine similarity threshold for memory_patch(action="consolidate").
+    # Entries with similarity >= threshold are merged (longest survives).
+    # 0.92 catches near-duplicates while preserving meaningfully distinct entries.
+    consolidation_similarity_threshold: float = 0.92
 
 
 class RetrievalConfig(BaseModel):

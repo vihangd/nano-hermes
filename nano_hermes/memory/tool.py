@@ -25,8 +25,12 @@ _SCHEMA: dict[str, Any] = {
         },
         "action": {
             "type": "string",
-            "enum": ["add", "replace", "remove"],
-            "description": "What to do with the slot.",
+            "enum": ["add", "replace", "remove", "consolidate"],
+            "description": (
+                "What to do with the slot. "
+                "consolidate: embed entries, merge near-duplicates (cosine ≥ threshold), "
+                "keep the longest entry per cluster. Call when memory feels bloated."
+            ),
         },
         "content": {
             "type": "string",
@@ -108,6 +112,39 @@ class MemoryPatchTool(Tool):
                     return "Error: action=remove requires `needle`"
                 mem.remove(slot, needle)  # type: ignore[arg-type]
                 return f"ok: removed from {slot}"
+            if action == "consolidate":
+                return await self._consolidate(slot)  # type: ignore[arg-type]
             return f"Error: unknown action {action!r}"
         except Exception as e:
             return f"Error: {e}"
+
+    async def _consolidate(self, slot: str) -> str:
+        from .consolidation import consolidate_entries, split_entries  # noqa: PLC0415
+
+        mem = self._hook.budgeted_memory
+        text = mem.read(slot)  # type: ignore[arg-type]
+        if not text.strip():
+            return f"ok: {slot} is empty — nothing to consolidate"
+
+        entries = split_entries(text)
+        if len(entries) < 2:
+            return f"ok: {slot} has only {len(entries)} entry — nothing to consolidate"
+
+        threshold = self._hook.config.memory.consolidation_similarity_threshold
+        try:
+            surviving, n_removed = await consolidate_entries(
+                entries, self._hook.embedder, threshold
+            )
+        except Exception as e:
+            return f"Error: embedding failed during consolidation — {e}"
+
+        if n_removed == 0:
+            return f"ok: {slot} — no near-duplicates found at threshold {threshold:.2f}"
+
+        new_text = "\n\n".join(surviving)
+        mem.write(slot, new_text)  # type: ignore[arg-type]
+        chars_freed = len(text) - len(new_text)
+        return (
+            f"ok: {slot} consolidated — {n_removed} entr{'y' if n_removed == 1 else 'ies'} merged, "
+            f"{chars_freed:+d} chars ({len(entries)} → {len(surviving)})"
+        )
