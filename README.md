@@ -2,7 +2,7 @@
 
 Self-evolving memory, skill lifecycle, and Reflexion-based self-improvement extensions for [HKUDS/nanobot](https://github.com/HKUDS/nanobot).
 
-Adds eight agent-facing tools plus a lifecycle hook that archives turns into a searchable SQLite index, runs Reflexion-style self-critique, maintains a Voyager-style embedding index over nanobot's skill library, and supports a two-phase skill promotion system (draft → active → deprecated).
+Adds ten agent-facing tools plus a lifecycle hook that archives turns into a searchable SQLite index, runs Reflexion-style self-critique, maintains a Voyager-style embedding index over nanobot's skill library, supports a two-phase skill promotion system (draft → active → deprecated), and automatically rewrites chronically failing skills using a SkillForge-inspired pipeline.
 
 Designed for low-resource hosts (Raspberry Pi) — no local embedding model, one SQLite file per workspace, hosted-embedding failover across DeepInfra, Together, and OpenRouter.
 
@@ -52,7 +52,7 @@ cd /path/to/nano-hermes
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e /path/to/nanobot      # local nanobot checkout
 pip install -e '.[dev]'              # nano-hermes + pytest + sqlite-vec
-pytest -v                            # 97 tests, expect all green
+pytest -v                            # 636 tests, expect all green
 ```
 
 If `sqlite-vec` has no wheel for your Python version (e.g. 3.14), build from source:
@@ -116,29 +116,88 @@ The state database lives under `<workspace>/nano_hermes/state.db`.
 
 ```python
 nano_hermes.install(loop, config={
+    # ── Memory budgets ──────────────────────────────────────────────────
     "memory": {
-        "memory_md_chars": 3000,   # default 2200
-        "user_md_chars": 2000,     # default 1375
-        "soul_md_chars": 2000,     # default 1500
+        "memory_md_tokens": 512,    # default 512  (~2000 English chars)
+        "user_md_tokens": 320,      # default 320
+        "soul_md_tokens": 384,      # default 384
+        # memory_patch(action="consolidate") threshold — merge entries with
+        # cosine similarity ≥ this. 0.92 collapses near-duplicates only.
+        "consolidation_similarity_threshold": 0.92,
+        # memory_patch(action="distill") — episodic→semantic hub detection.
+        # A chunk cluster must span this many successful sessions to surface.
+        "distill_hub_min_sessions": 2,
+        "distill_max_chunks": 150,          # cap before O(N²) clustering
+        "distill_cluster_threshold": 0.88,
     },
-    "reflection": {
-        "threshold": 3.0,          # default 5.0 — lower = more nudges
-        "recent_limit": 8,         # default 5 — max reflections injected per iter
-    },
-    "reflection_scope": "global",  # "session" (default) or "global" for cross-session recall
+
+    # ── Retrieval ────────────────────────────────────────────────────────
     "retrieval": {
-        "final_k": 12,             # default 8 — hits returned by session_search
+        "final_k": 8,               # default 8 — hits returned by session_search
+        "mmr_lambda": 0.7,          # diversity reranking λ (1.0 = pure relevance)
     },
+
+    # ── Reflexion nudges ─────────────────────────────────────────────────
+    "reflection": {
+        "threshold": 5.0,           # default 5.0 — lower = more nudges
+        "recent_limit": 5,          # default 5 — max reflections injected per iter
+        "global_inject_min_similarity": 0.60,  # cross-session injection threshold
+    },
+    "reflection_scope": "global",   # "session" (default) or "global"
+
+    # ── Skill lifecycle & ranking ────────────────────────────────────────
     "skill_stats": {
-        "promotion_threshold": 5,         # default 3 — successful uses to promote draft
-        "deprecation_min_uses": 10,       # default 5 — uses before deprecation check
-        "deprecation_max_success_rate": 0.1,  # default 0.2 — below this → deprecated
+        # Ranking mode for skill_search re-ranking.
+        # "ucb1" (default) — exploration+exploitation bandit
+        # "stat_weighted" — legacy success-rate boost
+        # "off" — no stat adjustment
+        "ranking_mode": "ucb1",
+        "ucb1_coefficient": 0.05,           # UCB1 bandit coefficient
+
+        "promotion_threshold": 3,           # successful uses → draft→active
+        "deprecation_min_uses": 5,          # uses before deprecation check
+        "deprecation_max_success_rate": 0.2,# below this rate → deprecated
+        "max_skill_bytes": 262144,          # 256 KiB max per propose_skill call
+        "diversity_similarity_threshold": 0.88,  # promotion diversity gate
+        "skill_search_dedup_threshold": 0.82,    # search-time sibling collapsing
+
+        # ── Failure-driven auto-rewriter (SkillForge) ───────────────────
+        # Skills with failure_rate > threshold AND use_count >= min_uses are
+        # automatically rewritten. Off until skills accumulate enough data.
+        "rewrite_failure_threshold": 0.6,   # >60% failure rate triggers rewrite
+        "rewrite_min_uses": 5,
+        "rewrite_context_chunks": 5,        # failed-session chunks sent to LLM
+
+        # ── GEPA iterative evolution ─────────────────────────────────────
+        # Gentler first pass (lower threshold) before the rewriter.
+        # Off by default — enable once you have ≥5 sessions of failure data.
+        "gepa_enabled": False,
+        "gepa_failure_threshold": 0.4,
+        "gepa_min_uses": 5,
+        "gepa_max_mutations": 3,
+        "gepa_minibatch_size": 3,
+
+        # ── Auto-evolution trigger ───────────────────────────────────────
+        # Run GEPA (if enabled) then rewriter every N completed sessions.
+        # 0 = disabled. Recommended starting value: 5–10.
+        "rewrite_session_interval": 0,
     },
+
+    # ── Trajectory replay ────────────────────────────────────────────────
     "trajectory": {
-        "inject_context": True,           # default False — inject similar past trajectories
-        "inject_min_similarity": 0.8,     # default 0.75 — similarity threshold
+        "inject_context": False,            # inject similar past trajectory on iter 0
+        "inject_min_similarity": 0.75,
     },
     "trajectory_retention_days": 45,
+
+    # ── Workflow induction (Phase 4.1) ───────────────────────────────────
+    # Off by default. Enable once you have ≥25 successful sessions.
+    "workflow_induction": {
+        "enabled": False,
+        "min_cluster_size": 3,      # minimum trajectories to form a workflow candidate
+        "max_trajectories": 100,
+        "cluster_threshold": 0.85,
+    },
 })
 ```
 
@@ -146,18 +205,20 @@ nano_hermes.install(loop, config={
 
 ## What the agent gets
 
-Eight tools land on `loop.tools`:
+Ten tools land on `loop.tools`:
 
 | Tool | What it does |
 |---|---|
-| `memory_patch(slot, action, ...)` | Edit `MEMORY.md` / `USER.md` / `SOUL.md`. Enforces char budgets; blocks prompt injection and invisible unicode. `slot ∈ {memory, user, soul}`, `action ∈ {add, replace, remove}`. |
-| `session_search(query, k=8)` | Hybrid FTS5 + embedding search over archived turn chunks. RRF fusion. Degrades to FTS-only if every embedding provider is unreachable. |
+| `memory_patch(action, slot?, ...)` | Edit `MEMORY.md` / `USER.md` / `SOUL.md`. `slot ∈ {memory, user, soul}`. `action ∈ {add, replace, remove, consolidate, distill}`. `consolidate`: embed entries, merge near-duplicates (cosine ≥ threshold), keeps longest entry per cluster — call when memory feels bloated. `distill`: find recurring themes across successful sessions and surface candidate facts for you to add to memory; `slot` is ignored. |
+| `session_search(query, k=8)` | Hybrid FTS5 + embedding search over archived turn chunks. RRF fusion + MMR diversity reranking. Degrades to FTS-only if every embedding provider is unreachable. |
 | `trajectory_search(query, k=3)` | Semantic search over past session summaries (task, outcome, skills used, reflection). Higher-signal than session_search — distilled lessons, not raw transcripts. |
-| `skill_search(query, k=5)` | Semantic retrieval over available skills ranked by embedding similarity. Records returned skills as candidates for stat tracking. Deprecated skills are excluded. |
+| `skill_search(query, k=5)` | Semantic retrieval over available skills ranked by UCB1 bandit (exploration + exploitation). Records returned skills as candidates for stat tracking. Deprecated skills are excluded; near-duplicate hits are collapsed to siblings. |
 | `skill_stats(name?)` | Read-only view of skill usage history: use count, success rate, status (draft/active/deprecated), last used. Omit `name` for a summary of all tracked skills. |
-| `propose_skill(name, description, body, action="create")` | Create a new draft skill (`action="create"`) or rewrite an existing one (`action="edit"`). Skills start as `draft`, auto-promote to `active` after enough successful uses, and get `deprecated` if they chronically fail. |
+| `propose_skill(name, description, body, action="create")` | Create a new draft skill (`action="create"`) or rewrite an existing one (`action="edit"`). Skills start as `draft`, auto-promote to `active` after enough successful uses, and get `deprecated` if they chronically fail. Fuzzy patch matching handles indentation drift on edit. |
+| `skill_rate(name, outcome)` | Manually rate a skill after use (`outcome ∈ {success, failure}`). Used to record cases where the hook cannot infer outcome automatically. |
 | `reflect(content)` | Store a 2–4 sentence self-critique for the current session. Injected into the next iteration's prompt. With `reflection_scope="global"`, also embedded for cross-session recall. |
 | `nano_status()` | Read-only snapshot of internal state: session ID, turns archived, salience score, nudge pending, reflection count, skill counts by lifecycle stage, DB size on disk. |
+| `workflow_suggest(k=3)` | Cluster successful past trajectories by embedding similarity; surface recurring task patterns as workflow candidates. Prompts you to call `propose_skill` to codify them. Requires `workflow_induction.enabled = True`. |
 
 ---
 
@@ -166,14 +227,16 @@ Eight tools land on `loop.tools`:
 ```
 install(loop)
  ├── loop._extra_hooks.append(NanoHermesHook(config, loop))
- └── loop.tools.register(×8)
+ └── loop.tools.register(×10)
 
 NanoHermesHook
- ├── BudgetedMemory    → wraps loop.context.memory (nanobot's MemoryStore)
- ├── SessionArchiver   → writes to <workspace>/nano_hermes/state.db
- ├── SkillIndexer      → reads loop.context.skills, writes skill_vec
- ├── TrajectoryWriter  → writes session summaries to trajectories + trajectories_vec
- └── salience counters / reflection bookkeeping / skill stat tracking
+ ├── BudgetedMemory        → wraps loop.context.memory (nanobot's MemoryStore)
+ ├── SessionArchiver       → writes to <workspace>/nano_hermes/state.db
+ ├── SkillIndexer          → reads loop.context.skills, writes skill_vec
+ ├── TrajectoryWriter      → writes session summaries to trajectories + trajectories_vec
+ ├── SkillUsageTracker     → skill stat accumulation, promotion/deprecation checks
+ ├── ReflectionCoordinator → salience scoring, nudge injection, cross-session recall
+ └── SessionCoordinator    → session boundary detection, trajectory finalization
 ```
 
 **Per iteration:**
@@ -185,15 +248,16 @@ NanoHermesHook
    - On iteration 0 with `reflection_scope="global"`: inject cross-session reflections relevant to the current task.
    - Inject any new reflections written since the last iteration (capped by `recent_limit`).
    - If a salience nudge is pending from last iteration, append the Reflexion nudge text.
+   - If skill quality suggestions are pending (OPRO-inspired triggers), inject them.
 2. LLM call (nanobot).
 3. `before_execute_tools`: score tool-call bursts toward salience.
-4. Tool execution (nanobot) — including any of our seven tools.
+4. Tool execution (nanobot) — including any of our ten tools.
 5. `after_iteration`:
    - Archive newly-appended messages: sync insert into `chunks` + schedule async embed.
    - Credit candidate skills with usage stats; run promotion/deprecation checks.
    - Add error + user-correction salience.
    - If cumulative score ≥ threshold, flip `_nudge_pending`.
-   - On session boundary: write `ended_at`, finalize trajectory, embed task text.
+   - On session boundary: write `ended_at`, finalize trajectory, record skill co-occurrences, prune internal dicts. Increment completed-session counter; if `rewrite_session_interval > 0` and the counter hits a multiple, schedule a background GEPA+rewriter evolution cycle.
 
 **Skill lifecycle:**
 
@@ -206,6 +270,11 @@ propose_skill(action="create")  →  status="draft"
      ↓  (re-propose)
 propose_skill(action="create")  →  status="draft" (counters reset)
 propose_skill(action="edit")    →  SKILL.md updated, counters preserved
+
+Auto-evolution (if rewrite_session_interval > 0):
+     every N sessions → GEPA pass (iterative mutation, if gepa_enabled=True)
+                      → SkillForge rewriter (one-shot, severe failures)
+     old text preserved in skill_versions table for diff history
 ```
 
 **Data on disk:**
@@ -220,7 +289,8 @@ propose_skill(action="edit")    →  SKILL.md updated, counters preserved
 │   └── <skill>/SKILL.md        ← propose_skill writes here
 └── nano_hermes/
     └── state.db                ← sessions, chunks, chunks_fts, chunks_vec,
-                                   skill_stats, skill_vec, reflections,
+                                   skill_stats, skill_vec, skill_versions,
+                                   skill_compositions, reflections,
                                    reflections_vec, trajectories, trajectories_vec
 ```
 
@@ -230,9 +300,11 @@ propose_skill(action="edit")    →  SKILL.md updated, counters preserved
 
 ```python
 hook = nano_hermes.install(loop)
-for tool in ["memory_patch", "session_search", "trajectory_search",
-             "skill_search", "skill_stats", "propose_skill", "reflect",
-             "nano_status"]:
+for tool in [
+    "memory_patch", "session_search", "trajectory_search",
+    "skill_search", "skill_stats", "propose_skill", "skill_rate",
+    "reflect", "nano_status", "workflow_suggest",
+]:
     assert tool in loop.tools, f"missing: {tool}"
 print(type(hook).__name__)   # NanoHermesHook
 ```
@@ -241,7 +313,7 @@ Or in the REPL after `nano-hermes agent`:
 ```
 you> /tools
 ```
-You should see all seven tools alongside nanobot's builtins.
+You should see all ten tools alongside nanobot's builtins.
 
 ---
 
@@ -258,6 +330,12 @@ Check `hook.current_session_id is not None` — if you call `reflect` before any
 
 **`propose_skill` fails with "already exists".**
 The skill is `active` or `draft`. Use `action="edit"` to update it, or wait for deprecation and re-create.
+
+**`workflow_suggest` returns "disabled".**
+Set `workflow_induction.enabled = True` in config. Requires at least `min_cluster_size` (default 3) successful session trajectories with overlapping task embeddings before any pattern surfaces.
+
+**`memory_patch(action="distill")` returns "no recurring cross-session hubs found".**
+Need ≥2 successful sessions (`outcome='ok'` in trajectories) with thematically overlapping content in `chunks`. Run more sessions and retry.
 
 **`sqlite3.OperationalError: no such module: vec0`.**
 ```python
