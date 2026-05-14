@@ -70,11 +70,11 @@ class TestInstall:
 
     def test_config_override_applies_to_budgets(self, loop: AgentLoop) -> None:
         hook = nano_hermes.install(
-            loop, config={"memory": {"memory_md_chars": 50}}
+            loop, config={"memory": {"memory_md_tokens": 50}}
         )
-        assert hook.budgeted_memory.budgets.memory_md_chars == 50
+        assert hook.budgeted_memory.budgets.memory_md_tokens == 50
         # other budgets keep their defaults
-        assert hook.budgeted_memory.budgets.user_md_chars == 1375
+        assert hook.budgeted_memory.budgets.user_md_tokens == 320
 
 
 # ---------------------------------------------------------------------------

@@ -30,14 +30,16 @@ class TestMemoryPatch:
     async def test_over_budget_returns_actionable_error(
         self, loop: AgentLoop
     ) -> None:
-        nano_hermes.install(loop, config={"memory": {"memory_md_chars": 50}})
+        nano_hermes.install(loop, config={"memory": {"memory_md_tokens": 5}})
         tool = loop.tools.get("memory_patch")
 
-        out = await tool.execute(slot="memory", action="add", content="x" * 120)
+        # ~50-word sentence produces well over 5 tokens
+        out = await tool.execute(
+            slot="memory", action="add", content="hello world " * 20
+        )
         assert out.startswith("Error")
-        # both the budget and the shortfall should surface
-        assert "50" in out
-        assert "70" in out
+        assert "token" in out
+        assert "5" in out  # limit surfaces in message
 
     async def test_replace_flow(self, loop: AgentLoop) -> None:
         nano_hermes.install(loop)

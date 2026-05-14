@@ -11,6 +11,8 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 if TYPE_CHECKING:
     from ..config import SkillStatsConfig
 
@@ -133,6 +135,34 @@ class SkillUsageTracker:
     # Promotion / deprecation
     # ------------------------------------------------------------------
 
+    def _is_too_similar_to_active(self, name: str, threshold: float) -> bool:
+        """Return True if the draft skill is too semantically similar to any active skill.
+
+        Uses already-stored skill_vec embeddings — no API call needed.
+        Normalized embeddings → dot product == cosine similarity.
+        """
+        row = self._db.execute(
+            "SELECT sv.embedding FROM skill_vec sv "
+            "JOIN skill_stats ss ON ss.id = sv.skill_id "
+            "WHERE ss.name = ?",
+            (name,),
+        ).fetchone()
+        if row is None:
+            return False  # not yet indexed — allow promotion, indexer will catch up
+
+        candidate = np.frombuffer(row[0], dtype=np.float32)
+        active_rows = self._db.execute(
+            "SELECT sv.embedding FROM skill_vec sv "
+            "JOIN skill_stats ss ON ss.id = sv.skill_id "
+            "WHERE ss.status = 'active' AND ss.name != ?",
+            (name,),
+        ).fetchall()
+        for ar in active_rows:
+            sim = float(np.dot(candidate, np.frombuffer(ar[0], dtype=np.float32)))
+            if sim >= threshold:
+                return True
+        return False
+
     def check_promotions(self, names: list[str]) -> None:
         """Promote draft skills to active, or deprecate skills with low success."""
         cfg = self._config
@@ -151,16 +181,27 @@ class SkillUsageTracker:
 
                     # Promotion: draft -> active after enough successes
                     if status == "draft" and success_count >= cfg.promotion_threshold:
-                        self._db.execute(
-                            "UPDATE skill_stats SET status = 'active' WHERE name = ?",
-                            (name,),
+                        threshold = getattr(
+                            cfg, "diversity_similarity_threshold", 0.88
                         )
-                        log.info(
-                            "skill '%s' promoted draft -> active (success_count=%d)",
-                            name,
-                            success_count,
-                        )
-                        status = "active"
+                        if self._is_too_similar_to_active(name, threshold):
+                            log.info(
+                                "skill '%s' promotion blocked: too similar to an "
+                                "existing active skill (threshold=%.2f)",
+                                name,
+                                threshold,
+                            )
+                        else:
+                            self._db.execute(
+                                "UPDATE skill_stats SET status = 'active' WHERE name = ?",
+                                (name,),
+                            )
+                            log.info(
+                                "skill '%s' promoted draft -> active (success_count=%d)",
+                                name,
+                                success_count,
+                            )
+                            status = "active"
 
                     # Deprecation: any non-deprecated skill with chronic low success
                     if (

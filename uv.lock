@@ -1323,6 +1323,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pydantic" },
     { name = "sqlite-vec" },
+    { name = "tiktoken" },
 ]
 
 [package.optional-dependencies]
@@ -1343,6 +1344,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "sqlite-vec", specifier = ">=0.1.6" },
+    { name = "tiktoken", specifier = ">=0.6" },
 ]
 provides-extras = ["dev"]
 

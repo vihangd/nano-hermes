@@ -16,13 +16,30 @@ from .._atomic import atomic_write_text
 from ..config import MemoryBudgets
 from .guard import scan_memory_content
 
+
+def _count_tokens(text: str) -> int:
+    """Count tokens using cl100k_base (GPT-4 / Claude shared BPE).
+
+    Falls back to a UTF-8 byte approximation if tiktoken is unavailable
+    (e.g., restricted-network Pi environment where the vocab file can't be
+    downloaded). The fallback slightly over-counts CJK but stays conservative.
+    """
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        # ~4 UTF-8 bytes per token for Latin text; ~3 bytes/char for CJK
+        # which is ~1.5 bytes/token — dividing by 3 is a safe upper bound.
+        return max(1, len(text.encode("utf-8")) // 3)
+
 Slot = Literal["memory", "user", "soul"]
 
 
 class MemoryOverBudgetError(Exception):
     def __init__(self, slot: Slot, used: int, limit: int) -> None:
         super().__init__(
-            f"{slot} budget exceeded: {used}/{limit} chars "
+            f"{slot} budget exceeded: {used}/{limit} tokens "
             f"(need {used - limit} fewer — remove or replace lower-value entries first)"
         )
         self.slot = slot
@@ -48,9 +65,9 @@ class BudgetedMemory:
 
     def _budget(self, slot: Slot) -> int:
         return {
-            "memory": self.budgets.memory_md_chars,
-            "user": self.budgets.user_md_chars,
-            "soul": self.budgets.soul_md_chars,
+            "memory": self.budgets.memory_md_tokens,
+            "user": self.budgets.user_md_tokens,
+            "soul": self.budgets.soul_md_tokens,
         }[slot]
 
     def read(self, slot: Slot) -> str:
@@ -64,8 +81,9 @@ class BudgetedMemory:
 
     def write(self, slot: Slot, content: str) -> None:
         limit = self._budget(slot)  # raises on unknown slot before any I/O
-        if len(content) > limit:
-            raise MemoryOverBudgetError(slot, len(content), limit)
+        used = _count_tokens(content)
+        if used > limit:
+            raise MemoryOverBudgetError(slot, used, limit)
         # Bypass MemoryStore.write_* (raw write_text) and write atomically
         # to the path the store would have targeted. A crash mid-write
         # never leaves a half-written MEMORY.md/USER.md/SOUL.md.

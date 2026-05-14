@@ -8,6 +8,7 @@ dependencies = [
   "aiohttp>=3.9",
   "numpy>=1.26",
   "sqlite-vec>=0.1.6",
+  "tiktoken>=0.6",
 ]
 
 # ``nanobot`` itself is a peer dependency: users install it themselves

@@ -34,16 +34,20 @@ class EmbeddingConfig(BaseModel):
 
 
 class MemoryBudgets(BaseModel):
-    """Char budgets enforced by ``BudgetedMemory`` on writes.
+    """Token budgets enforced by ``BudgetedMemory`` on writes.
 
     Nanobot's underlying MemoryStore does not enforce these — we do, on
     behalf of the agent's ``memory_patch`` tool. Writes from nanobot's
     Dream / Consolidator path bypass budgets intentionally: curated
     background writes get latitude.
+
+    Budgets are counted in tokens (cl100k_base encoding) rather than chars
+    so that CJK or emoji-heavy content doesn't silently inflate prompt cost.
+    Approximate equivalents: 512 tokens ≈ 2000 English chars.
     """
-    memory_md_chars: int = 2200
-    user_md_chars: int = 1375
-    soul_md_chars: int = 1500
+    memory_md_tokens: int = 512
+    user_md_tokens: int = 320
+    soul_md_tokens: int = 384
     # Cosine similarity threshold for memory_patch(action="consolidate").
     # Entries with similarity >= threshold are merged (longest survives).
     # 0.92 catches near-duplicates while preserving meaningfully distinct entries.
@@ -96,6 +100,11 @@ class SkillStatsConfig(BaseModel):
     deprecation_max_success_rate: float = 0.2  # below this rate -> deprecated
     # Maximum total bytes (body + companion files) allowed per propose_skill call.
     max_skill_bytes: int = 256 * 1024  # 256 KiB
+    # Cosine similarity threshold for the diversity gate at draft→active promotion.
+    # A draft skill whose embedding is >= this similar to ANY active skill is blocked
+    # from promotion (FactorMiner insight: uncurated duplicates hurt retrieval quality).
+    # 0.88 blocks near-duplicates while allowing meaningfully distinct variants.
+    diversity_similarity_threshold: float = 0.88
     # Phase 3.1: failure-driven skill rewriter thresholds.
     # Skills with failure_rate > rewrite_failure_threshold AND use_count >= rewrite_min_uses
     # are candidates for automatic rewriting.
