@@ -1,0 +1,54 @@
+{
+  "_comment": "Copy to ~/.nanobot/nano_hermes.json for user-level defaults.",
+  "_comment2": "Copy to <workspace>/nano_hermes/config.json for workspace overrides.",
+  "_comment3": "Workspace file wins on any key present in both files.",
+
+  "skill_stats": {
+    "rewrite_session_interval": 5,
+    "rewrite_failure_threshold": 0.6,
+    "rewrite_min_uses": 5,
+
+    "gepa_enabled": false,
+    "gepa_failure_threshold": 0.4,
+    "gepa_min_uses": 5,
+    "gepa_max_mutations": 3,
+
+    "promotion_threshold": 3,
+    "deprecation_min_uses": 5,
+    "deprecation_max_success_rate": 0.2,
+
+    "ranking_mode": "ucb1",
+    "ucb1_coefficient": 0.05
+  },
+
+  "memory": {
+    "memory_md_tokens": 512,
+    "user_md_tokens": 320,
+    "soul_md_tokens": 384,
+    "consolidation_similarity_threshold": 0.92,
+    "distill_hub_min_sessions": 2,
+    "distill_cluster_threshold": 0.88
+  },
+
+  "reflection": {
+    "threshold": 5.0,
+    "recent_limit": 5
+  },
+  "reflection_scope": "session",
+
+  "retrieval": {
+    "final_k": 8,
+    "mmr_lambda": 0.7
+  },
+
+  "trajectory": {
+    "inject_context": false,
+    "inject_min_similarity": 0.75
+  },
+  "trajectory_retention_days": 45,
+
+  "workflow_induction": {
+    "enabled": false,
+    "min_cluster_size": 3
+  }
+}

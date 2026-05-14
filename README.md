@@ -112,7 +112,35 @@ OPENROUTER_API_KEY=...        # failover
 
 The state database lives under `<workspace>/nano_hermes/state.db`.
 
-### Via install() config
+### Via config files (recommended for CLI use)
+
+When `nano-hermes gateway` (or `nano-hermes agent`) starts, it calls `install()` with no config argument. nano-hermes automatically discovers and merges two JSON files:
+
+| File | Scope |
+|---|---|
+| `~/.nanobot/nano_hermes.json` | user-level defaults (all workspaces) |
+| `<workspace>/nano_hermes/config.json` | workspace-specific overrides |
+
+Workspace values win on any key present in both files. Missing files are silently skipped. A fully-annotated example is at [`examples/nano_hermes.json`](examples/nano_hermes.json) in this repo.
+
+**Quick start** — copy the example to your user config and edit as needed:
+
+```bash
+mkdir -p ~/.nanobot
+cp /path/to/nano-hermes/examples/nano_hermes.json ~/.nanobot/nano_hermes.json
+```
+
+The most useful knob to set immediately is `rewrite_session_interval`:
+
+```json
+{
+  "skill_stats": {
+    "rewrite_session_interval": 5
+  }
+}
+```
+
+### Via install() config (Python SDK)
 
 ```python
 nano_hermes.install(loop, config={

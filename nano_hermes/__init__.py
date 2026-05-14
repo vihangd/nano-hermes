@@ -21,9 +21,14 @@ nanobot's ContextBuilder already handles that via
 """
 from __future__ import annotations
 
+import json
+import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .config import NanoHermesConfig
+
+log = logging.getLogger(__name__)
 from .hook import NanoHermesHook
 from .memory.tool import MemoryPatchTool
 from .reflect.tool import ReflectTool
@@ -58,6 +63,47 @@ __all__ = [
 ]
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge *override* into *base*; override wins on conflicts."""
+    result = dict(base)
+    for key, val in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result
+
+
+def _load_config_files(workspace: Path) -> dict[str, Any]:
+    """Load and merge user-level then workspace-level config files.
+
+    Locations (later overrides earlier):
+      1. ~/.nanobot/nano_hermes.json   — user-level defaults
+      2. <workspace>/nano_hermes/config.json — workspace-specific overrides
+
+    Missing files are silently skipped. Parse errors are logged at WARNING
+    and that file is skipped (other files still apply).
+    """
+    user_cfg = Path.home() / ".nanobot" / "nano_hermes.json"
+    workspace_cfg = workspace / "nano_hermes" / "config.json"
+
+    merged: dict[str, Any] = {}
+    for path in (user_cfg, workspace_cfg):
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text())
+            if not isinstance(data, dict):
+                log.warning("nano-hermes: %s must be a JSON object — skipping", path)
+                continue
+            merged = _deep_merge(merged, data)
+            log.debug("nano-hermes: loaded config from %s", path)
+        except Exception:
+            log.warning("nano-hermes: failed to parse %s — skipping", path, exc_info=True)
+
+    return merged
+
+
 def install(
     loop: "AgentLoop",
     config: dict[str, Any] | NanoHermesConfig | None = None,
@@ -75,8 +121,10 @@ def install(
     """
     if isinstance(config, NanoHermesConfig):
         cfg = config
+    elif config is not None:
+        cfg = NanoHermesConfig.model_validate(config)
     else:
-        cfg = NanoHermesConfig.model_validate(config or {})
+        cfg = NanoHermesConfig.model_validate(_load_config_files(loop.workspace))
 
     hook = NanoHermesHook(config=cfg, loop=loop)
     loop._extra_hooks.append(hook)
