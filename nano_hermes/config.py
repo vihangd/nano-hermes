@@ -105,6 +105,16 @@ class SkillStatsConfig(BaseModel):
     # from promotion (FactorMiner insight: uncurated duplicates hurt retrieval quality).
     # 0.88 blocks near-duplicates while allowing meaningfully distinct variants.
     diversity_similarity_threshold: float = 0.88
+    # GEPA (Genetic-Pareto Prompt Evolution) — iterative skill text evolution.
+    # Off by default; enable once you have ≥5 sessions worth of failure data.
+    # Each run costs 2 LLM calls × gepa_max_mutations rounds per eligible skill.
+    gepa_enabled: bool = False
+    # Lower threshold than rewrite_failure_threshold — GEPA runs as a gentler
+    # first pass; severe failures fall through to the SkillForge rewriter.
+    gepa_failure_threshold: float = 0.4
+    gepa_min_uses: int = 5               # minimum uses before GEPA trigger
+    gepa_max_mutations: int = 3           # Pareto evolution rounds per skill
+    gepa_minibatch_size: int = 3          # failed examples used per evaluation
     # Phase 3.1: failure-driven skill rewriter thresholds.
     # Skills with failure_rate > rewrite_failure_threshold AND use_count >= rewrite_min_uses
     # are candidates for automatic rewriting.
