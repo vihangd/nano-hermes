@@ -9,10 +9,10 @@ Usage::
     loop = AgentLoop(bus=bus, provider=provider, workspace=ws)
     hook = nano_hermes.install(loop)
 
-``install`` attaches a lifecycle hook and registers nine agent-facing
+``install`` attaches a lifecycle hook and registers ten agent-facing
 tools: ``memory_patch``, ``session_search``, ``trajectory_search``,
 ``skill_search``, ``skill_stats``, ``propose_skill``, ``skill_rate``,
-``reflect``, and ``nano_status``.
+``reflect``, ``nano_status``, and ``workflow_suggest``.
 
 It does NOT duplicate nanobot's existing memory/skill prompt injection —
 nanobot's ContextBuilder already handles that via
@@ -29,6 +29,7 @@ from .memory.tool import MemoryPatchTool
 from .reflect.tool import ReflectTool
 from .session.search import SessionSearchTool
 from .session.trajectory_search import TrajectorySearchTool
+from .session.workflow_suggest import WorkflowSuggestTool
 from .skills.propose_tool import ProposeSkillTool
 from .skills.rate_tool import SkillRateTool
 from .skills.stats_tool import SkillStatsTool
@@ -52,6 +53,7 @@ __all__ = [
     "SkillRateTool",
     "ReflectTool",
     "NanoStatusTool",
+    "WorkflowSuggestTool",
     "__version__",
 ]
 
@@ -66,8 +68,8 @@ def install(
     mechanism ``Nanobot.run(hooks=...)`` uses under the hood) and registers
     nine tools on the loop's ToolRegistry: ``memory_patch``,
     ``session_search``, ``trajectory_search``, ``skill_search``,
-    ``skill_stats``, ``propose_skill``, ``skill_rate``, ``reflect``, and
-    ``nano_status``.
+    ``skill_stats``, ``propose_skill``, ``skill_rate``, ``reflect``,
+    ``nano_status``, and ``workflow_suggest``.
 
     Returns the installed hook so callers can inspect or later detach it.
     """
@@ -87,4 +89,5 @@ def install(
     loop.tools.register(SkillRateTool(hook=hook))
     loop.tools.register(ReflectTool(hook=hook))
     loop.tools.register(NanoStatusTool(hook=hook))
+    loop.tools.register(WorkflowSuggestTool(hook=hook))
     return hook

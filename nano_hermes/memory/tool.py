@@ -25,11 +25,13 @@ _SCHEMA: dict[str, Any] = {
         },
         "action": {
             "type": "string",
-            "enum": ["add", "replace", "remove", "consolidate"],
+            "enum": ["add", "replace", "remove", "consolidate", "distill"],
             "description": (
                 "What to do with the slot. "
                 "consolidate: embed entries, merge near-duplicates (cosine ≥ threshold), "
-                "keep the longest entry per cluster. Call when memory feels bloated."
+                "keep the longest entry per cluster. Call when memory feels bloated. "
+                "distill: find recurring themes across successful sessions and surface "
+                "them as candidate facts for you to add to memory. Slot is ignored for distill."
             ),
         },
         "content": {
@@ -45,7 +47,7 @@ _SCHEMA: dict[str, Any] = {
             "description": "Replacement text (required for action=replace).",
         },
     },
-    "required": ["slot", "action"],
+    "required": ["action"],
 }
 
 
@@ -73,7 +75,7 @@ class MemoryPatchTool(Tool):
         return (type(self).__doc__ or "").strip()
 
     async def execute(self, **kwargs: Any) -> str:
-        slot: str = kwargs["slot"]
+        slot: str = kwargs.get("slot", "memory")
         action: str = kwargs["action"]
         content = kwargs.get("content")
         needle = kwargs.get("needle")
@@ -114,9 +116,46 @@ class MemoryPatchTool(Tool):
                 return f"ok: removed from {slot}"
             if action == "consolidate":
                 return await self._consolidate(slot)  # type: ignore[arg-type]
+            if action == "distill":
+                return await self._distill()
             return f"Error: unknown action {action!r}"
         except Exception as e:
             return f"Error: {e}"
+
+    async def _distill(self) -> str:
+        from .consolidation import find_hub_clusters  # noqa: PLC0415
+
+        cfg = self._hook.config.memory
+        try:
+            hubs = await find_hub_clusters(
+                self._hook.db,
+                min_sessions=cfg.distill_hub_min_sessions,
+                max_chunks=cfg.distill_max_chunks,
+                cluster_threshold=cfg.distill_cluster_threshold,
+            )
+        except Exception as e:
+            return f"Error: embedding failed during distillation — {e}"
+
+        if not hubs:
+            return (
+                "ok: no recurring cross-session hubs found "
+                "(need ≥2 successful sessions with thematically overlapping content)"
+            )
+
+        lines = [f"Found {len(hubs)} hub cluster(s) from episodic memory:\n"]
+        for i, hub in enumerate(hubs, 1):
+            n_sess = len(hub["sessions"])
+            lines.append(f"Hub {i} — spans {n_sess} session(s):")
+            for j, sample in enumerate(hub["samples"], 1):
+                snippet = sample.replace("\n", " ")[:200]
+                lines.append(f"  [{j}] {snippet}")
+            lines.append("")
+
+        lines.append(
+            "Review these hubs and distill durable facts with:\n"
+            '  memory_patch(action="add", slot="memory", content="<fact>")'
+        )
+        return "\n".join(lines)
 
     async def _consolidate(self, slot: str) -> str:
         from .consolidation import consolidate_entries, split_entries  # noqa: PLC0415

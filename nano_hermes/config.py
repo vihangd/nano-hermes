@@ -52,6 +52,14 @@ class MemoryBudgets(BaseModel):
     # Entries with similarity >= threshold are merged (longest survives).
     # 0.92 catches near-duplicates while preserving meaningfully distinct entries.
     consolidation_similarity_threshold: float = 0.92
+    # Episodic→semantic distillation (memory_patch action="distill").
+    # A chunk cluster must span this many distinct successful sessions to surface.
+    distill_hub_min_sessions: int = 2
+    # Cap the chunk pool before O(N²) clustering (Pi 3B+ memory budget).
+    distill_max_chunks: int = 150
+    # Cosine similarity threshold for hub clustering. Tighter than consolidation
+    # (0.92) — hubs are genuinely recurring topics, not just near-duplicate text.
+    distill_cluster_threshold: float = 0.88
 
 
 class RetrievalConfig(BaseModel):
@@ -126,6 +134,9 @@ class SkillStatsConfig(BaseModel):
     rewrite_failure_threshold: float = 0.6  # >60% failure rate
     rewrite_min_uses: int = 5               # minimum uses before rewrite trigger
     rewrite_context_chunks: int = 5         # how many failed-session chunks to send the LLM
+    # Auto-evolution trigger: run GEPA (if enabled) then rewriter every N completed sessions.
+    # 0 = disabled (off by default). Recommended starting value: 5–10.
+    rewrite_session_interval: int = 0
 
 
 class SkillsConfig(BaseModel):
@@ -153,6 +164,22 @@ class TrajectoryConfig(BaseModel):
     inject_min_similarity: float = 0.75
 
 
+class WorkflowInductionConfig(BaseModel):
+    """Trajectory-to-workflow induction (Phase 4.1).
+
+    Off by default — enable once you have ≥25 successful sessions.
+    The agent calls workflow_suggest to surface recurring task clusters;
+    it then decides whether to write a workflow skill via propose_skill.
+    """
+    enabled: bool = False
+    # Minimum number of similar successful trajectories to form a cluster.
+    min_cluster_size: int = 3
+    # Cap before O(N²) clustering (Pi budget).
+    max_trajectories: int = 100
+    # Cosine similarity threshold for trajectory clustering.
+    cluster_threshold: float = 0.85
+
+
 class NanoHermesConfig(BaseModel):
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     memory: MemoryBudgets = Field(default_factory=MemoryBudgets)
@@ -161,6 +188,7 @@ class NanoHermesConfig(BaseModel):
     skill_stats: SkillStatsConfig = Field(default_factory=SkillStatsConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     trajectory: TrajectoryConfig = Field(default_factory=TrajectoryConfig)
+    workflow_induction: WorkflowInductionConfig = Field(default_factory=WorkflowInductionConfig)
     trajectory_retention_days: int = 45
     reflection_scope: Literal["session", "global"] = "session"
     # Apply regex-based secret redaction to user-supplied content before it

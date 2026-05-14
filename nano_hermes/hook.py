@@ -25,6 +25,7 @@ from .embedding.chain import EmbeddingChain
 from .memory.budgets import BudgetedMemory
 from .reflect.salience import last_user_text
 from .session.archiver import SessionArchiver
+from .paths import state_db
 from .session.db import open_db, purge_older_than
 from .session.trajectory import TrajectoryWriter
 from .skills.indexer import SkillIndexer
@@ -99,6 +100,12 @@ class NanoHermesHook(AgentHook):
 
         # Background purge task handle (retained so tests can await it).
         self._purge_task: asyncio.Task | None = None
+
+        # Evolution task handle — GEPA + rewriter, scheduled at session boundaries.
+        self._evolution_task: asyncio.Task | None = None
+
+        # Completed-session counter for evolution trigger cadence.
+        self._completed_session_count: int = 0
 
         # Pending reflection embedding tasks — reflect/tool.py registers tasks here
         # so asyncio doesn't GC them before they complete.
@@ -203,9 +210,7 @@ class NanoHermesHook(AgentHook):
 
         # Schedule retention purge as a non-blocking background task on first iteration.
         if context.iteration == 0:
-            self._purge_task = asyncio.get_event_loop().create_task(
-                self._background_purge()
-            )
+            self._purge_task = asyncio.create_task(self._background_purge())
 
         # Keep current_session_id in sync with archiver (lazy-bootstrap on first call).
         self._sync_session(context.messages)
@@ -293,10 +298,60 @@ class NanoHermesHook(AgentHook):
     # Internals
     # ------------------------------------------------------------------
 
-    async def _background_purge(self) -> None:
-        """Run retention purge. Scheduled as a background task (non-blocking)."""
+    def _maybe_schedule_evolution(self) -> None:
+        """Schedule a GEPA+rewriter background task if the cadence config fires."""
+        interval = self.config.skill_stats.rewrite_session_interval
+        if interval <= 0:
+            return
+        if self._completed_session_count % interval != 0:
+            return
+        # Don't stack tasks — wait for the previous cycle to finish first.
+        if self._evolution_task and not self._evolution_task.done():
+            log.debug("evolution cycle still running — skipping this session boundary")
+            return
+        self._evolution_task = asyncio.create_task(self._run_evolution_cycle())
+
+    async def _run_evolution_cycle(self) -> None:
+        """Run GEPA (if enabled) then the failure-driven rewriter, non-blocking."""
+        from .skills.gepa import run_gepa  # noqa: PLC0415
+        from .skills.rewriter import run_rewriter  # noqa: PLC0415
+
+        gepa_evolved: list[str] = []
         try:
-            purge_older_than(self.db, self.config.trajectory_retention_days)
+            gepa_evolved = await run_gepa(self)
+            if gepa_evolved:
+                log.info("evolution cycle: GEPA updated %d skill(s): %s", len(gepa_evolved), gepa_evolved)
+        except Exception:
+            log.exception("evolution cycle: GEPA failed")
+
+        try:
+            rewritten = await run_rewriter(self, skip=frozenset(gepa_evolved))
+            if rewritten:
+                log.info("evolution cycle: rewriter updated %d skill(s): %s", len(rewritten), rewritten)
+        except Exception:
+            log.exception("evolution cycle: rewriter failed")
+
+    async def _background_purge(self) -> None:
+        """Run retention purge off the event loop via a short-lived DB connection."""
+        db_path = state_db(self.workspace)
+        days = self.config.trajectory_retention_days
+
+        def _run() -> None:
+            import sqlite3  # noqa: PLC0415
+            import sqlite_vec  # noqa: PLC0415
+
+            conn = sqlite3.connect(db_path)
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            try:
+                purge_older_than(conn, days)
+            finally:
+                conn.close()
+
+        try:
+            await asyncio.to_thread(_run)
         except Exception:
             log.exception("nano-hermes purge failed")
 
@@ -313,3 +368,5 @@ class NanoHermesHook(AgentHook):
             self._session_coord.finalize(completed_id, skills_used, had_errors)
             self._reflection_coord.on_new_session(completed_id)
             self.archiver.prune_session_by_id(completed_id)
+            self._completed_session_count += 1
+            self._maybe_schedule_evolution()

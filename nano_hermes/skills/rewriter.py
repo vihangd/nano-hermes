@@ -184,11 +184,17 @@ async def rewrite_skill(
     return new_body
 
 
-async def run_rewriter(hook: "NanoHermesHook") -> list[str]:
+async def run_rewriter(
+    hook: "NanoHermesHook",
+    skip: frozenset[str] = frozenset(),
+) -> list[str]:
     """Identify failing skills, rewrite them, and submit via propose_skill edit.
 
     Returns list of skill names that were successfully rewritten.
     Designed to be called from the dream/cron cycle, not per-turn.
+
+    *skip* names skills already evolved by GEPA this cycle so they are not
+    double-rewritten in the same pass.
     """
     cfg = hook.config.skill_stats
     candidates = get_rewrite_candidates(
@@ -196,6 +202,8 @@ async def run_rewriter(hook: "NanoHermesHook") -> list[str]:
         failure_threshold=cfg.rewrite_failure_threshold,
         min_uses=cfg.rewrite_min_uses,
     )
+    if skip:
+        candidates = [c for c in candidates if c.skill_name not in skip]
     if not candidates:
         return []
 
