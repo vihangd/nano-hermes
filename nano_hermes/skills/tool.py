@@ -88,5 +88,7 @@ class SkillSearchTool(Tool):
             partners = get_compositions(self._hook.db, h.name)
             if partners:
                 line += f" [often used with: {', '.join(partners)}]"
+            if h.siblings:
+                line += f" [also similar: {', '.join(h.siblings)}]"
             lines.append(line)
         return "\n".join(lines)

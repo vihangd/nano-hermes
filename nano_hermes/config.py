@@ -105,6 +105,11 @@ class SkillStatsConfig(BaseModel):
     # from promotion (FactorMiner insight: uncurated duplicates hurt retrieval quality).
     # 0.88 blocks near-duplicates while allowing meaningfully distinct variants.
     diversity_similarity_threshold: float = 0.88
+    # Search-time greedy diversity dedup (GoSkills pattern).
+    # After ranking, hits with cosine similarity >= threshold to a higher-ranked
+    # kept hit are suppressed and surfaced as siblings. 0.82 keeps semantically
+    # distinct skills while collapsing near-identical variants.
+    skill_search_dedup_threshold: float = 0.82
     # GEPA (Genetic-Pareto Prompt Evolution) — iterative skill text evolution.
     # Off by default; enable once you have ≥5 sessions worth of failure data.
     # Each run costs 2 LLM calls × gepa_max_mutations rounds per eligible skill.

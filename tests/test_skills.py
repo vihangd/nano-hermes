@@ -755,8 +755,12 @@ class TestProposeSkill:
         # k=20 to avoid builtins crowding out the new draft skill when
         # fake embedder returns identical vectors for everything.
         hits = await hook.skill_indexer.search("useful helper", k=20)
-        names = [h.name for h in hits]
-        assert "my-helper" in names
+        # With fake identical embeddings, my-helper may land as a sibling of
+        # a higher-ranked skill — check direct hits and siblings together.
+        all_seen = {h.name for h in hits}
+        for h in hits:
+            all_seen.update(h.siblings)
+        assert "my-helper" in all_seen
 
     async def test_invalid_name_rejected(
         self, loop: AgentLoop, tmp_path: Path

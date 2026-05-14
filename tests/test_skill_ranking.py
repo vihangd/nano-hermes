@@ -33,6 +33,9 @@ def _make_hook(tmp_path, ranking_mode="ucb1", ucb1_coefficient=0.05):
             "skill_stats": {
                 "ranking_mode": ranking_mode,
                 "ucb1_coefficient": ucb1_coefficient,
+                # Disable search-time dedup so ranking tests can use
+                # identical vectors without one being collapsed as a sibling.
+                "skill_search_dedup_threshold": 1.0,
             }
         },
     )

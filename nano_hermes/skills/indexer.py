@@ -29,7 +29,7 @@ import logging
 import math
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -49,6 +49,7 @@ class SkillHit:
     description: str
     location: str
     distance: float
+    siblings: list[str] = field(default_factory=list)
 
 
 def _content_text(name: str, description: str) -> str:
@@ -297,4 +298,38 @@ class SkillIndexer:
             )
 
         hits.sort(key=lambda h: h.distance)
+
+        # Greedy diversity dedup: suppress near-duplicate skills from lower-ranked
+        # positions so the agent sees a more diverse result set.
+        dedup_threshold = cfg.skill_search_dedup_threshold if cfg else 1.0
+        if dedup_threshold < 1.0 and len(hits) > 1:
+            name_to_id = {v: k for k, v in id_to_name.items()}
+            hit_ids = [name_to_id[h.name] for h in hits if h.name in name_to_id]
+            if hit_ids:
+                placeholders = ",".join("?" * len(hit_ids))
+                emb_rows = self._db.execute(
+                    f"SELECT skill_id, embedding FROM skill_vec "
+                    f"WHERE skill_id IN ({placeholders})",
+                    hit_ids,
+                ).fetchall()
+                emb_by_id = {
+                    r[0]: np.frombuffer(r[1], dtype=np.float32) for r in emb_rows
+                }
+                kept: list[SkillHit] = []
+                kept_embs: list[np.ndarray | None] = []
+                for h in hits:
+                    sid = name_to_id.get(h.name)
+                    emb = emb_by_id.get(sid) if sid is not None else None  # type: ignore[arg-type]
+                    dominated = False
+                    if emb is not None:
+                        for i, ke in enumerate(kept_embs):
+                            if ke is not None and float(np.dot(emb, ke)) >= dedup_threshold:
+                                kept[i].siblings.append(h.name)
+                                dominated = True
+                                break
+                    if not dominated:
+                        kept.append(h)
+                        kept_embs.append(emb)
+                hits = kept
+
         return hits[:k]
