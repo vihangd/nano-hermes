@@ -324,6 +324,47 @@ Auto-evolution (if rewrite_session_interval > 0):
 
 ---
 
+## Self-evolution
+
+nano-hermes can automatically improve skills that are chronically failing, without any agent involvement. The pipeline has two stages and runs in the background at session boundaries.
+
+### Trigger
+
+Set `rewrite_session_interval` to a non-zero value (e.g. 5). After every N completed sessions, nano-hermes schedules a background evolution cycle. The cycle runs GEPA first, then the SkillForge rewriter — skills improved by GEPA are excluded from the rewriter in the same pass to avoid double-rewriting.
+
+```json
+{ "skill_stats": { "rewrite_session_interval": 5 } }
+```
+
+### Stage 1 — GEPA (off by default)
+
+GEPA (Genetic-Pareto Prompt Evolution) is a gentler iterative pass. It targets active skills with failure rate ≥ `gepa_failure_threshold` (default 40%) and ≥ `gepa_min_uses` uses. For each candidate it runs up to `gepa_max_mutations` rounds of LLM mutation, scores each mutant on a Pareto frontier over (estimated improvement, token count), and promotes the best one via `propose_skill edit`.
+
+Enable once you have ≥5 sessions of failure data:
+
+```json
+{
+  "skill_stats": {
+    "gepa_enabled": true,
+    "gepa_failure_threshold": 0.4,
+    "gepa_min_uses": 5,
+    "gepa_max_mutations": 3
+  }
+}
+```
+
+### Stage 2 — SkillForge rewriter (always runs when triggered)
+
+The rewriter targets skills with failure rate ≥ `rewrite_failure_threshold` (default 60%) and ≥ `rewrite_min_uses` uses. It gathers the `rewrite_context_chunks` most recent failed-session chunks for the skill, sends them to the LLM with an immutable judge prompt, safety-scans the output, and saves it as a draft via the normal `propose_skill edit` path. The original text is preserved in the `skill_versions` table for diff history.
+
+The judge prompt is a module-level constant and cannot be overwritten by skill content — this prevents the metric-gaming failure mode where an optimized skill learns to game its own evaluator.
+
+### Safety
+
+All rewritten skill text passes through the same injection scanner (`skills/guard.py`) that `propose_skill` uses. A rewrite that contains prompt-injection patterns is logged and discarded; the original skill is unchanged.
+
+---
+
 ## Verifying it's wired in
 
 ```python
