@@ -9,10 +9,11 @@ Usage::
     loop = AgentLoop(bus=bus, provider=provider, workspace=ws)
     hook = nano_hermes.install(loop)
 
-``install`` attaches a lifecycle hook and registers ten agent-facing
-tools: ``memory_patch``, ``session_search``, ``trajectory_search``,
-``skill_search``, ``skill_stats``, ``propose_skill``, ``skill_rate``,
-``reflect``, ``nano_status``, and ``workflow_suggest``.
+``install`` attaches a lifecycle hook and registers twelve agent-facing
+tools: ``memory_patch``, ``session_browse``, ``session_search``,
+``trajectory_search``, ``skill_search``, ``skill_stats``, ``propose_skill``,
+``skill_rate``, ``reflect``, ``nano_status``, ``record_principle``, and
+``workflow_suggest``.
 
 It does NOT duplicate nanobot's existing memory/skill prompt injection —
 nanobot's ContextBuilder already handles that via
@@ -32,9 +33,11 @@ log = logging.getLogger(__name__)
 from .hook import NanoHermesHook
 from .memory.tool import MemoryPatchTool
 from .reflect.tool import ReflectTool
+from .session.browse import SessionBrowseTool
 from .session.search import SessionSearchTool
 from .session.trajectory_search import TrajectorySearchTool
 from .session.workflow_suggest import WorkflowSuggestTool
+from .skills.principle_tool import PrincipleTool
 from .skills.propose_tool import ProposeSkillTool
 from .skills.rate_tool import SkillRateTool
 from .skills.stats_tool import SkillStatsTool
@@ -50,6 +53,7 @@ __all__ = [
     "NanoHermesHook",
     "NanoHermesConfig",
     "MemoryPatchTool",
+    "SessionBrowseTool",
     "SessionSearchTool",
     "TrajectorySearchTool",
     "SkillSearchTool",
@@ -58,6 +62,7 @@ __all__ = [
     "SkillRateTool",
     "ReflectTool",
     "NanoStatusTool",
+    "PrincipleTool",
     "WorkflowSuggestTool",
     "__version__",
 ]
@@ -129,10 +134,12 @@ def install(
     hook = NanoHermesHook(config=cfg, loop=loop)
     loop._extra_hooks.append(hook)
     loop.tools.register(MemoryPatchTool(hook=hook))
+    loop.tools.register(SessionBrowseTool(hook=hook))
     loop.tools.register(SessionSearchTool(hook=hook))
     loop.tools.register(TrajectorySearchTool(hook=hook))
     loop.tools.register(SkillSearchTool(hook=hook))
     loop.tools.register(SkillStatsTool(hook=hook))
+    loop.tools.register(PrincipleTool(hook=hook))
     loop.tools.register(ProposeSkillTool(hook=hook))
     loop.tools.register(SkillRateTool(hook=hook))
     loop.tools.register(ReflectTool(hook=hook))

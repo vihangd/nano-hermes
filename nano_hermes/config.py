@@ -141,6 +141,10 @@ class SkillStatsConfig(BaseModel):
     # before it is committed (covers-use-case, avoids-cited-failure, not-overfit).
     # Default ON — adds one LLM call per rewrite candidate but prevents regressions.
     rewrite_critic_enabled: bool = True
+    # MIND-Skill reconstruction check: before draft→active promotion, ask an LLM
+    # to verify the skill body actually implements what the description claims.
+    # Fails open on LLM error (promotion allowed). Default ON.
+    reconstruction_check_enabled: bool = True
 
 
 class SkillsConfig(BaseModel):

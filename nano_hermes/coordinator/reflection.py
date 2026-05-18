@@ -175,6 +175,9 @@ class ReflectionCoordinator:
           - Success (no errors): utility += α * (1.0 - utility)
           - Failure (had errors): utility += α * (0.0 - utility)
         α = 0.1 (conservative step size to avoid oscillation).
+
+        Also records co-activation edges between every pair of reflections
+        injected together in this session (associative graph, item 10).
         """
         if not self._injected_reflection_ids:
             return
@@ -200,6 +203,39 @@ class ReflectionCoordinator:
             )
         except Exception:
             log.debug("utility back-propagation failed", exc_info=True)
+
+        self._record_coactivations()
+
+    def _record_coactivations(self) -> None:
+        """Record pairwise co-activation edges for all injected reflection IDs.
+
+        Uses INSERT OR IGNORE + UPDATE to upsert each pair.  Pairs are stored
+        with the smaller ID first so each undirected edge is stored once.
+        """
+        ids = sorted(self._injected_reflection_ids)
+        if len(ids) < 2:
+            return
+        import itertools
+        import time as _time
+        now = _time.time()
+        try:
+            for a, b in itertools.combinations(ids, 2):
+                self._db.execute(
+                    "INSERT OR IGNORE INTO reflection_coactivations "
+                    "(reflection_a_id, reflection_b_id, coactivation_count, last_at) "
+                    "VALUES (?, ?, 1, ?)",
+                    (a, b, now),
+                )
+                self._db.execute(
+                    "UPDATE reflection_coactivations "
+                    "SET coactivation_count = coactivation_count + 1, last_at = ? "
+                    "WHERE reflection_a_id = ? AND reflection_b_id = ?",
+                    (now, a, b),
+                )
+            self._db.commit()
+            log.debug("co-activation edges recorded: %d pairs", len(ids) * (len(ids) - 1) // 2)
+        except Exception:
+            log.debug("co-activation recording failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Global (cross-session) reflections
@@ -416,6 +452,86 @@ class ReflectionCoordinator:
         except Exception:
             log.debug("trajectory context injection failed", exc_info=True)
             return None
+
+
+    # ------------------------------------------------------------------
+    # Principle injection (EvolveR)
+    # ------------------------------------------------------------------
+
+    def get_principle_injections(self, messages: list[dict], limit: int = 3) -> list[dict]:
+        """Return stored principles whose condition FTS5-matches the current task.
+
+        Called on iteration 0 of each session. Uses keyword search (no embedding)
+        so it never blocks on provider availability.  Returns a list of system
+        message dicts (may be empty).
+        """
+        import re as _re  # noqa: PLC0415
+        from ..session.archiver import _extract_text  # noqa: PLC0415
+
+        task_text = next(
+            (
+                _extract_text(m)
+                for m in messages
+                if m.get("role") == "user" and _extract_text(m)
+            ),
+            None,
+        )
+        if not task_text:
+            return []
+
+        # Build an FTS5 OR query from the unique substantive words in the task
+        # text (>= 4 chars), so partial matches surface relevant principles.
+        words = _re.findall(r"[a-zA-Z][a-zA-Z0-9_]*", task_text[:500])
+        terms = list(dict.fromkeys(w.lower() for w in words if len(w) >= 4))[:12]
+        if not terms:
+            return []
+        fts_query = " OR ".join(terms)
+        try:
+            rows = self._db.execute(
+                "SELECT p.id, p.condition, p.action, p.expected_outcome "
+                "FROM principles_fts pf "
+                "JOIN principles p ON p.id = pf.content_id "
+                "WHERE principles_fts MATCH ? "
+                "ORDER BY pf.rank "
+                "LIMIT ?",
+                (fts_query, limit),
+            ).fetchall()
+        except Exception:
+            log.debug("principle injection FTS5 query failed", exc_info=True)
+            return []
+
+        if not rows:
+            return []
+
+        # Increment use_count for matched principles
+        ids = [r[0] for r in rows]
+        try:
+            ph = ",".join("?" * len(ids))
+            self._db.execute(
+                f"UPDATE principles SET use_count = use_count + 1 WHERE id IN ({ph})",
+                ids,
+            )
+            self._db.commit()
+        except Exception:
+            pass
+
+        lines: list[str] = []
+        for _, condition, action, expected_outcome in rows:
+            parts = [f"• If: {condition}", f"  Then: {action}"]
+            if expected_outcome:
+                parts.append(f"  Outcome: {expected_outcome}")
+            lines.append("\n".join(parts))
+
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "## Relevant principles\n"
+                    "These if-then rules apply to your current task:\n"
+                    + "\n\n".join(lines)
+                ),
+            }
+        ]
 
 
 def _format_reflection_reminder(contents: list[str]) -> str:

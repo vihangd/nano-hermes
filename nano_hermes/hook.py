@@ -174,8 +174,10 @@ class NanoHermesHook(AgentHook):
         """Called by SkillRateTool to register a rated skill for trajectory."""
         self._skill_tracker.record_rating(name)
 
-    def _check_promotions(self, names: list[str]) -> None:
+    async def _check_promotions(self, names: list[str]) -> None:
         """Delegate to SkillUsageTracker. Called by rate_tool.py."""
+        if self.config.skill_stats.reconstruction_check_enabled:
+            names = await self._filter_reconstruction_blocked(names)
         self._skill_tracker.check_promotions(names)
         from .skills.reflection_trigger import check_skill_reflection_triggers  # noqa: PLC0415
         suggestions = check_skill_reflection_triggers(
@@ -183,6 +185,57 @@ class NanoHermesHook(AgentHook):
         )
         if suggestions:
             self._reflection_coord.queue_skill_suggestions(suggestions)
+
+    async def _filter_reconstruction_blocked(self, names: list[str]) -> list[str]:
+        """Remove names whose draft skill body doesn't match their description.
+
+        Only runs the check for draft skills at or above the promotion threshold
+        — passing skills and active/deprecated skills are returned unchanged.
+        """
+        from .skills.reconstruction import check_reconstruction  # noqa: PLC0415
+
+        cfg = self.config.skill_stats
+        passed: list[str] = []
+        for name in names:
+            row = self.db.execute(
+                "SELECT status, success_count FROM skill_stats WHERE name = ?",
+                (name,),
+            ).fetchone()
+            if row is None or row[0] != "draft" or row[1] < cfg.promotion_threshold:
+                passed.append(name)
+                continue
+
+            skill_path = self.workspace / "skills" / name / "SKILL.md"
+            if not skill_path.exists():
+                passed.append(name)
+                continue
+
+            raw = skill_path.read_text(encoding="utf-8")
+            # Extract frontmatter description and body
+            description = ""
+            body = raw
+            if raw.startswith("---"):
+                end = raw.find("\n---", 3)
+                if end != -1:
+                    fm_text = raw[4:end]
+                    for line in fm_text.splitlines():
+                        if line.startswith("description:"):
+                            description = line.partition(":")[2].strip()
+                    body = raw[end + len("\n---"):].lstrip("\n")
+
+            ok = await check_reconstruction(
+                self,
+                skill_name=name,
+                description=description,
+                body=body,
+            )
+            if ok:
+                passed.append(name)
+            else:
+                log.info(
+                    "hook: reconstruction check blocked promotion of '%s'", name
+                )
+        return passed
 
     # ------------------------------------------------------------------
     # Injection timing mechanism (unchanged)
@@ -214,6 +267,11 @@ class NanoHermesHook(AgentHook):
 
         # Keep current_session_id in sync with archiver (lazy-bootstrap on first call).
         self._sync_session(context.messages)
+
+        # Inject matching principles on iteration 0 (pure FTS5, always fast).
+        if context.iteration == 0:
+            for msg in self._reflection_coord.get_principle_injections(context.messages):
+                self._inject(context.messages, msg)
 
         # Inject a matching past trajectory on iteration 0 (opt-in via config).
         if context.iteration == 0 and self.config.trajectory.inject_context:

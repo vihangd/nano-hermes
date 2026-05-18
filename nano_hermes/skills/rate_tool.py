@@ -113,7 +113,7 @@ class SkillRateTool(Tool):
             return f"Error: {e}"
 
         # Lifecycle check: this is the only place promotion/deprecation fires.
-        self._hook._check_promotions([skill_name])
+        await self._hook._check_promotions([skill_name])
 
         # Register for trajectory tracking.
         self._hook.record_skill_rating(skill_name)

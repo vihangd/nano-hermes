@@ -117,6 +117,40 @@ CREATE TABLE IF NOT EXISTS skill_compositions (
     UNIQUE(skill_a, skill_b)
 );
 CREATE INDEX IF NOT EXISTS idx_skill_compositions_a ON skill_compositions(skill_a, count DESC);
+
+-- Phase 5: Structured principles (EvolveR pattern).
+-- Generalised agent-authored rules with condition/action/expected_outcome.
+-- Principles are discovered by FTS5 match of the current task against condition text.
+CREATE TABLE IF NOT EXISTS principles (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    condition        TEXT NOT NULL,     -- "when X happens"
+    action           TEXT NOT NULL,     -- "do Y"
+    expected_outcome TEXT,              -- "so that Z"
+    confidence       REAL NOT NULL DEFAULT 0.5,
+    created_at       REAL NOT NULL,
+    use_count        INTEGER NOT NULL DEFAULT 0,
+    success_count    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS principles_fts USING fts5(
+    condition,
+    action,
+    content_id UNINDEXED,
+    tokenize='porter'
+);
+
+-- Phase 5: Associative reflection co-activation graph (HeLa-Mem-lite).
+-- When two reflections are injected together in the same session iteration,
+-- their co-activation is recorded. Highly co-activated pairs signal thematic
+-- associations useful for future retrieval ranking or pruning.
+CREATE TABLE IF NOT EXISTS reflection_coactivations (
+    reflection_a_id  INTEGER NOT NULL,
+    reflection_b_id  INTEGER NOT NULL,
+    coactivation_count INTEGER NOT NULL DEFAULT 1,
+    last_at          REAL NOT NULL,
+    PRIMARY KEY (reflection_a_id, reflection_b_id)
+);
+CREATE INDEX IF NOT EXISTS idx_reflection_coact_a ON reflection_coactivations(reflection_a_id, coactivation_count DESC);
 """
 
 # vec0 takes dims as a literal at CREATE time, so it has to be formatted
