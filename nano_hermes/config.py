@@ -137,6 +137,10 @@ class SkillStatsConfig(BaseModel):
     # Auto-evolution trigger: run GEPA (if enabled) then rewriter every N completed sessions.
     # 0 = disabled (off by default). Recommended starting value: 5–10.
     rewrite_session_interval: int = 0
+    # SkillForge critic: second independent LLM call that must approve a rewrite
+    # before it is committed (covers-use-case, avoids-cited-failure, not-overfit).
+    # Default ON — adds one LLM call per rewrite candidate but prevents regressions.
+    rewrite_critic_enabled: bool = True
 
 
 class SkillsConfig(BaseModel):

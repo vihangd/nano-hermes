@@ -138,3 +138,172 @@ class TestOnNewSession:
         coord._last_injected_global_reflection_id = 999
         coord.on_new_session(1)
         assert coord._last_injected_global_reflection_id == 0
+
+    def test_clears_injected_ids_accumulator(
+        self, coord: ReflectionCoordinator
+    ) -> None:
+        coord._injected_reflection_ids = {1, 2, 3}
+        coord.on_new_session(5)
+        assert coord._injected_reflection_ids == set()
+
+
+class TestBackPropagateUtility:
+    def _seed_reflection(self, hook, content: str, utility: float = 0.5) -> int:
+        cur = hook.db.execute(
+            "INSERT INTO sessions (session_key, started_at) VALUES (?, ?)",
+            ("test:bp", time.time()),
+        )
+        sid = cur.lastrowid
+        cur = hook.db.execute(
+            "INSERT INTO reflections (session_id, content, created_at, utility) "
+            "VALUES (?, ?, ?, ?)",
+            (sid, content, time.time(), utility),
+        )
+        hook.db.commit()
+        return int(cur.lastrowid)
+
+    def test_success_increases_utility(self, hook, coord):
+        rid = self._seed_reflection(hook, "good reflection", utility=0.5)
+        coord._injected_reflection_ids = {rid}
+        coord.back_propagate_utility(had_errors=False)
+
+        row = hook.db.execute("SELECT utility FROM reflections WHERE id = ?", (rid,)).fetchone()
+        assert row[0] > 0.5  # utility moves toward 1.0
+
+    def test_failure_decreases_utility(self, hook, coord):
+        rid = self._seed_reflection(hook, "bad reflection", utility=0.5)
+        coord._injected_reflection_ids = {rid}
+        coord.back_propagate_utility(had_errors=True)
+
+        row = hook.db.execute("SELECT utility FROM reflections WHERE id = ?", (rid,)).fetchone()
+        assert row[0] < 0.5  # utility moves toward 0.0
+
+    def test_no_ids_is_noop(self, hook, coord):
+        coord._injected_reflection_ids = set()
+        # Must not raise
+        coord.back_propagate_utility(had_errors=False)
+
+    def test_non_injected_reflections_unchanged(self, hook, coord):
+        rid_injected = self._seed_reflection(hook, "injected", utility=0.5)
+        rid_other = self._seed_reflection(hook, "not injected", utility=0.5)
+        coord._injected_reflection_ids = {rid_injected}
+        coord.back_propagate_utility(had_errors=False)
+
+        row = hook.db.execute("SELECT utility FROM reflections WHERE id = ?", (rid_other,)).fetchone()
+        assert row[0] == pytest.approx(0.5)  # unaffected
+
+    def test_injected_ids_accumulated_from_get_session_injections(self, hook, coord):
+        cur = hook.db.execute(
+            "INSERT INTO sessions (session_key, started_at) VALUES (?, ?)",
+            ("test:acc", time.time()),
+        )
+        sid = cur.lastrowid
+        cur = hook.db.execute(
+            "INSERT INTO reflections (session_id, content, created_at) VALUES (?, ?, ?)",
+            (sid, "accumulated reflection", time.time()),
+        )
+        rid = int(cur.lastrowid)
+        hook.db.commit()
+
+        assert rid not in coord._injected_reflection_ids
+        coord.get_session_injections(sid)
+        assert rid in coord._injected_reflection_ids
+
+
+class TestMMRTrajectoryInjection:
+    """Tests for get_trajectory_injection with MMR diversity selection."""
+
+    def _seed_trajectory(self, hook, task: str, outcome: str = "ok", skills: list | None = None) -> int:
+        import json
+        cur = hook.db.execute(
+            "INSERT INTO sessions (session_key, started_at) VALUES (?, ?)",
+            (f"s_{task[:10]}", time.time()),
+        )
+        sid = cur.lastrowid
+        cur = hook.db.execute(
+            "INSERT INTO trajectories (session_id, task, skills_used, outcome, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (sid, task, json.dumps(skills or []), outcome, time.time()),
+        )
+        hook.db.commit()
+        return int(cur.lastrowid)
+
+    async def test_returns_none_when_no_trajectories(self, hook, coord, monkeypatch):
+        from conftest import _patch_embedding
+        _patch_embedding(monkeypatch)
+
+        result = await coord.get_trajectory_injection(
+            [{"role": "user", "content": "search the web for news"}]
+        )
+        assert result is None
+
+    async def test_returns_single_when_only_one_candidate(self, hook, coord, monkeypatch):
+        from conftest import _patch_embedding, _FAKE_DIMS
+        import numpy as np
+        _patch_embedding(monkeypatch)
+
+        tid = self._seed_trajectory(hook, "search the web for python docs", outcome="ok")
+        # Write an embedding that will match "search the web" queries
+        vec = np.zeros(_FAKE_DIMS, dtype=np.float32)
+        vec[0] = 1.0  # same as _FAKE_VEC_SEARCH
+        hook.db.execute(
+            "INSERT INTO trajectories_vec (trajectory_id, embedding) VALUES (?, ?)",
+            (tid, vec.tobytes()),
+        )
+        hook.db.commit()
+
+        result = await coord.get_trajectory_injection(
+            [{"role": "user", "content": "search the web for latest news"}]
+        )
+        assert result is not None
+        assert "Past session" in result["content"]
+
+    async def test_injects_two_sessions_with_mmr(self, hook, coord, monkeypatch):
+        from conftest import _patch_embedding, _FAKE_DIMS
+        import numpy as np
+        _patch_embedding(monkeypatch)
+
+        # Two trajectories with similar-but-distinct tasks
+        t1 = self._seed_trajectory(hook, "search the web for news articles", outcome="ok", skills=["search"])
+        t2 = self._seed_trajectory(hook, "search the web for blog posts on AI", outcome="partial", skills=["search"])
+
+        vec_search = np.zeros(_FAKE_DIMS, dtype=np.float32)
+        vec_search[0] = 1.0  # matches "search the web" query
+        for tid in (t1, t2):
+            hook.db.execute(
+                "INSERT INTO trajectories_vec (trajectory_id, embedding) VALUES (?, ?)",
+                (tid, vec_search.tobytes()),
+            )
+        hook.db.commit()
+
+        result = await coord.get_trajectory_injection(
+            [{"role": "user", "content": "search the web for information"}]
+        )
+        assert result is not None
+        # Both sessions should appear in the output
+        assert "Past session 1" in result["content"]
+        assert "Past session 2" in result["content"]
+
+    async def test_below_min_similarity_returns_none(self, hook, coord, monkeypatch):
+        from conftest import _patch_embedding, _FAKE_DIMS
+        import numpy as np
+        _patch_embedding(monkeypatch)
+
+        # Trajectory indexed with a perpendicular vector — distance=1.0, similarity=0.0
+        tid = self._seed_trajectory(hook, "unrelated task xyz", outcome="ok")
+        vec = np.zeros(_FAKE_DIMS, dtype=np.float32)
+        vec[99] = 1.0  # orthogonal to any query vector
+        hook.db.execute(
+            "INSERT INTO trajectories_vec (trajectory_id, embedding) VALUES (?, ?)",
+            (tid, vec.tobytes()),
+        )
+        hook.db.commit()
+
+        # Query with inject_min_similarity=0.75 (default) — orthogonal vector won't pass
+        result = await coord.get_trajectory_injection(
+            [{"role": "user", "content": "search the web for news"}]
+        )
+        # The orthogonal trajectory should not appear regardless of the query match
+        # (this tests the threshold filter, not the MMR algo specifically)
+        # We just verify no exception is raised and result is either None or only matching ones
+        assert result is None or "unrelated task xyz" not in (result or {}).get("content", "")

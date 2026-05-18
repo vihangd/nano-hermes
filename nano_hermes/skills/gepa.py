@@ -232,6 +232,7 @@ async def evolve_skill(
         try:
             resp = await hook._loop.provider.chat_with_retry(
                 messages=[{"role": "user", "content": mutation_prompt}],
+                model=getattr(hook._loop, "model", None),
                 max_tokens=2048,
             )
             new_body = (resp.content or "").strip()
@@ -259,6 +260,7 @@ async def evolve_skill(
         try:
             eval_resp = await hook._loop.provider.chat_with_retry(
                 messages=[{"role": "user", "content": eval_prompt}],
+                model=getattr(hook._loop, "model", None),
                 max_tokens=len(failure_contexts) * 4 + 20,
             )
             improvements = _parse_yn_response(

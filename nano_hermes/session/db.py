@@ -144,6 +144,23 @@ CREATE VIRTUAL TABLE IF NOT EXISTS reflections_vec USING vec0(
 """
 
 
+_MIGRATIONS = [
+    # Phase 5: MemRL utility scores on reflections and trajectories.
+    "ALTER TABLE reflections ADD COLUMN utility REAL NOT NULL DEFAULT 0.5",
+    "ALTER TABLE trajectories ADD COLUMN utility REAL NOT NULL DEFAULT 0.5",
+]
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Apply additive ALTER TABLE migrations idempotently."""
+    for sql in _MIGRATIONS:
+        try:
+            conn.execute(sql)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+
 def open_db(workspace: Path, target_dims: int) -> sqlite3.Connection:
     path = state_db(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -154,6 +171,7 @@ def open_db(workspace: Path, target_dims: int) -> sqlite3.Connection:
     conn.enable_load_extension(False)
     conn.executescript(_SCHEMA)
     conn.executescript(_VEC_SCHEMA.format(dims=target_dims))
+    _apply_migrations(conn)
     conn.commit()
     return conn
 

@@ -365,6 +365,7 @@ class NanoHermesHook(AgentHook):
             if len(skills_loaded) >= 2:
                 from .skills.composition import record_composition  # noqa: PLC0415
                 record_composition(self.db, skills_loaded)
+            self._reflection_coord.back_propagate_utility(had_errors)
             self._session_coord.finalize(completed_id, skills_used, had_errors)
             self._reflection_coord.on_new_session(completed_id)
             self.archiver.prune_session_by_id(completed_id)

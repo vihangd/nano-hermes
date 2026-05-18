@@ -55,6 +55,10 @@ class ReflectionCoordinator:
         self._last_injected_reflection_id: dict[int, int] = {}
         # Watermark for global (cross-session) reflections.
         self._last_injected_global_reflection_id: int = 0
+        # MemRL: set of reflection IDs injected during the current session.
+        # Populated by get_session_injections / get_global_injections.
+        # Back-propagated at session boundary via back_propagate_utility().
+        self._injected_reflection_ids: set[int] = set()
 
     # ------------------------------------------------------------------
     # Salience
@@ -139,6 +143,8 @@ class ReflectionCoordinator:
             return []
         rows = [(int(r[0]), r[1]) for r in rows]
         self._last_injected_reflection_id[session_id] = max(r[0] for r in rows)
+        for rid, _ in rows:
+            self._injected_reflection_ids.add(rid)
         contents = [r[1] for r in rows]
         return [
             {
@@ -159,6 +165,41 @@ class ReflectionCoordinator:
         """
         self._last_injected_reflection_id.pop(completed_session_id, None)
         self._last_injected_global_reflection_id = 0
+        self._injected_reflection_ids.clear()
+
+    def back_propagate_utility(self, had_errors: bool) -> None:
+        """MemRL: update utility scores for reflections injected this session.
+
+        Called at session boundary with the session's outcome. Applies a
+        simple temporal-difference update:
+          - Success (no errors): utility += α * (1.0 - utility)
+          - Failure (had errors): utility += α * (0.0 - utility)
+        α = 0.1 (conservative step size to avoid oscillation).
+        """
+        if not self._injected_reflection_ids:
+            return
+        alpha = 0.1
+        reward = 0.0 if had_errors else 1.0
+        placeholders = ",".join("?" * len(self._injected_reflection_ids))
+        try:
+            rows = self._db.execute(
+                f"SELECT id, utility FROM reflections WHERE id IN ({placeholders})",
+                list(self._injected_reflection_ids),
+            ).fetchall()
+            for rid, current_utility in rows:
+                new_utility = current_utility + alpha * (reward - current_utility)
+                self._db.execute(
+                    "UPDATE reflections SET utility = ? WHERE id = ?",
+                    (new_utility, rid),
+                )
+            self._db.commit()
+            log.debug(
+                "utility back-propagated: %d reflections reward=%.1f",
+                len(rows),
+                reward,
+            )
+        except Exception:
+            log.debug("utility back-propagation failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Global (cross-session) reflections
@@ -199,6 +240,8 @@ class ReflectionCoordinator:
                 return []
             context_contents = [content for _, content in fresh]
             self._last_injected_global_reflection_id = max(rid for rid, _ in fresh)
+            for rid, _ in fresh:
+                self._injected_reflection_ids.add(rid)
             log.debug("global reflections injected: %d entries", len(fresh))
             return [
                 {
@@ -240,27 +283,37 @@ class ReflectionCoordinator:
         placeholders = ",".join("?" * len(vec_rows))
         id_to_distance = {r[0]: r[1] for r in vec_rows}
         ref_rows = self._db.execute(
-            f"SELECT id, content, session_id FROM reflections WHERE id IN ({placeholders})",
+            f"SELECT id, content, session_id, utility FROM reflections WHERE id IN ({placeholders})",
             [r[0] for r in vec_rows],
         ).fetchall()
 
         min_sim = getattr(self._config.reflection, "global_inject_min_similarity", 0.60)
-        results = sorted(
-            [
-                (r[0], r[1], r[2])
-                for r in ref_rows
-                if (1.0 - id_to_distance.get(r[0], 999.0)) >= min_sim
-            ],
-            key=lambda x: id_to_distance.get(x[0], 999.0),
-        )
-        return results[:limit]
+        utility_weight = 0.3
+        scored = []
+        for r in ref_rows:
+            rid, content, sid, utility = r[0], r[1], r[2], r[3] if len(r) > 3 else 0.5
+            cosine_sim = 1.0 - id_to_distance.get(rid, 999.0)
+            if cosine_sim < min_sim:
+                continue
+            # Combined score: cosine similarity + utility bonus.
+            combined = cosine_sim + utility_weight * utility
+            scored.append((rid, content, sid, combined))
+
+        results = sorted(scored, key=lambda x: -x[3])
+        return [(r[0], r[1], r[2]) for r in results[:limit]]
 
     # ------------------------------------------------------------------
     # Trajectory injection
     # ------------------------------------------------------------------
 
     async def get_trajectory_injection(self, messages: list[dict]) -> dict | None:
-        """Embed the first user message and return a matching past trajectory message.
+        """Embed the first user message and return up to 2 relevant past trajectories.
+
+        Uses MMR (Maximal Marginal Relevance) to select a diverse pair:
+        - d1 = most similar to current task
+        - d2 = highest MMR score among remaining candidates (relevance - diversity penalty)
+        Diversity is measured by Jaccard similarity on tokenized task text, requiring
+        no extra embedding round-trips.
 
         Returns None when no match is found or similarity is below threshold.
         """
@@ -285,43 +338,81 @@ class ReflectionCoordinator:
                 [vec] = await chain.embed([task_text])
 
             vec_blob = vec.astype(np.float32).tobytes()
+            mmr_lambda = self._config.retrieval.mmr_lambda
+            min_sim = self._config.trajectory.inject_min_similarity
+            fetch_k = 6
+
             rows = self._db.execute(
                 "SELECT trajectory_id, distance FROM trajectories_vec "
-                "WHERE embedding MATCH ? AND k = 1 ORDER BY distance",
-                (vec_blob,),
+                "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                (vec_blob, fetch_k),
             ).fetchall()
             if not rows:
                 return None
 
-            traj_id, distance = rows[0]
-            similarity = 1.0 - float(distance)
-            if similarity < self._config.trajectory.inject_min_similarity:
-                return None
-
-            row = self._db.execute(
-                "SELECT task, skills_used, outcome, reflection FROM trajectories WHERE id = ?",
-                (traj_id,),
-            ).fetchone()
-            if not row:
-                return None
-
-            task, skills_used_json, outcome, reflection = row
-            skills = _json.loads(skills_used_json) if skills_used_json else []
-            skill_str = ", ".join(skills) if skills else "none"
-
-            lines = [
-                "## Relevant past session",
-                f"A similar task previously ended with outcome: {outcome}.",
-                f"Task: {task[:200]}",
-                f"Skills used: {skill_str}",
+            # Filter by minimum similarity threshold.
+            candidates = [
+                (int(r[0]), 1.0 - float(r[1]))
+                for r in rows
+                if (1.0 - float(r[1])) >= min_sim
             ]
-            if reflection:
-                lines.append(f"Reflection: {reflection.splitlines()[0][:300]}")
+            if not candidates:
+                return None
+
+            # Load trajectory details for all candidates.
+            placeholders = ",".join("?" * len(candidates))
+            traj_rows = self._db.execute(
+                f"SELECT id, task, skills_used, outcome, reflection FROM trajectories "
+                f"WHERE id IN ({placeholders})",
+                [c[0] for c in candidates],
+            ).fetchall()
+            detail = {r[0]: r[1:] for r in traj_rows}
+
+            # d1 = highest similarity candidate.
+            d1_id, d1_sim = candidates[0]
+            if d1_id not in detail:
+                return None
+
+            selected = [d1_id]
+            d1_task = detail[d1_id][0] or ""
+
+            # d2 = best MMR score among remaining candidates.
+            d1_tokens = set(d1_task.lower().split())
+            best_mmr, best_id = -1.0, None
+            for cid, csim in candidates[1:]:
+                if cid not in detail:
+                    continue
+                c_task = detail[cid][0] or ""
+                c_tokens = set(c_task.lower().split())
+                union = d1_tokens | c_tokens
+                jaccard = len(d1_tokens & c_tokens) / len(union) if union else 0.0
+                mmr_score = mmr_lambda * csim - (1.0 - mmr_lambda) * jaccard
+                if mmr_score > best_mmr:
+                    best_mmr, best_id = mmr_score, cid
+            if best_id is not None:
+                selected.append(best_id)
+
+            # Build injection message.
+            sections: list[str] = []
+            for i, tid in enumerate(selected, start=1):
+                task_txt, skills_used_json, outcome, reflection = detail[tid]
+                skills = _json.loads(skills_used_json) if skills_used_json else []
+                skill_str = ", ".join(skills) if skills else "none"
+                label = "Most similar" if i == 1 else "Contrasting"
+                lines = [
+                    f"### Past session {i} ({label})",
+                    f"Outcome: {outcome}  |  Skills: {skill_str}",
+                    f"Task: {task_txt[:200]}",
+                ]
+                if reflection:
+                    lines.append(f"Reflection: {reflection.splitlines()[0][:300]}")
+                sections.append("\n".join(lines))
 
             log.debug(
-                "trajectory context injected: id=%d similarity=%.3f", traj_id, similarity
+                "trajectory context injected: %d sessions (MMR)", len(selected)
             )
-            return {"role": "system", "content": "\n".join(lines)}
+            header = "## Relevant past sessions"
+            return {"role": "system", "content": header + "\n" + "\n\n".join(sections)}
         except Exception:
             log.debug("trajectory context injection failed", exc_info=True)
             return None

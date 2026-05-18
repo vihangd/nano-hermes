@@ -10,8 +10,12 @@ from unittest.mock import AsyncMock, MagicMock
 import nano_hermes
 from conftest import _make_loop
 from nano_hermes.hook import NanoHermesHook
+from unittest.mock import patch
+
 from nano_hermes.skills.rewriter import (
     RewriteCandidate,
+    _parse_critic_response,
+    _run_critic,
     gather_failure_context,
     get_rewrite_candidates,
     rewrite_skill,
@@ -134,6 +138,129 @@ class TestSaveSkillVersion:
         assert "test reason" in row[2]
 
 
+def _critic_approved():
+    """Patch _run_critic to always approve — use in tests that don't focus on the critic."""
+    return patch("nano_hermes.skills.rewriter._run_critic", new=AsyncMock(return_value=True))
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for critic helpers
+# ---------------------------------------------------------------------------
+
+class TestCriticHelpers:
+    def test_parse_all_yes(self):
+        assert _parse_critic_response("YES\nYES\nYES") is True
+
+    def test_parse_rejects_one_no(self):
+        assert _parse_critic_response("YES\nNO\nYES") is False
+
+    def test_parse_case_insensitive(self):
+        assert _parse_critic_response("yes\nYes\nYES") is True
+
+    def test_parse_too_few_lines(self):
+        assert _parse_critic_response("YES\nYES") is False
+
+    def test_parse_empty(self):
+        assert _parse_critic_response("") is False
+
+
+class TestRunCritic:
+    async def test_approves_when_all_yes(self, tmp_path):
+        loop = _make_loop(tmp_path)
+        hook = nano_hermes.install(loop)
+
+        mock_resp = MagicMock()
+        mock_resp.content = "YES\nYES\nYES"
+        hook._loop.provider = MagicMock()
+        hook._loop.provider.chat_with_retry = AsyncMock(return_value=mock_resp)
+
+        result = await _run_critic(
+            hook,
+            skill_name="my-skill",
+            original_body="original",
+            new_body="improved",
+            failure_context="it failed",
+        )
+        assert result is True
+
+    async def test_rejects_when_no_in_response(self, tmp_path):
+        loop = _make_loop(tmp_path)
+        hook = nano_hermes.install(loop)
+
+        mock_resp = MagicMock()
+        mock_resp.content = "YES\nNO\nYES"
+        hook._loop.provider = MagicMock()
+        hook._loop.provider.chat_with_retry = AsyncMock(return_value=mock_resp)
+
+        result = await _run_critic(
+            hook,
+            skill_name="my-skill",
+            original_body="original",
+            new_body="overfit",
+            failure_context="it failed",
+        )
+        assert result is False
+        # Rejection is final — no retry on clear NO.
+        assert hook._loop.provider.chat_with_retry.call_count == 1
+
+    async def test_retries_on_llm_exception(self, tmp_path):
+        loop = _make_loop(tmp_path)
+        hook = nano_hermes.install(loop)
+
+        hook._loop.provider = MagicMock()
+        hook._loop.provider.chat_with_retry = AsyncMock(
+            side_effect=RuntimeError("network error")
+        )
+
+        result = await _run_critic(
+            hook,
+            skill_name="my-skill",
+            original_body="original",
+            new_body="new",
+            failure_context="failed",
+        )
+        assert result is False
+        assert hook._loop.provider.chat_with_retry.call_count == 2
+
+    async def test_critic_disabled_in_rewrite_when_flag_off(self, tmp_path):
+        loop = _make_loop(tmp_path)
+        hook = nano_hermes.install(loop, config={"skill_stats": {"rewrite_critic_enabled": False}})
+
+        skill_name = "no-critic-skill"
+        old_body = f"# {skill_name}\n## Steps\n1. Old"
+        new_body = f"# {skill_name}\n## Steps\n1. New"
+
+        skill_dir = hook.workspace / "skills" / skill_name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(old_body)
+
+        cur = hook.db.execute(
+            "INSERT INTO sessions (session_key, started_at) VALUES (?, ?)", ("s1", 1.0)
+        )
+        hook.db.execute(
+            "INSERT INTO chunks (session_id, turn_index, role, content, created_at) "
+            "VALUES (?, 0, 'user', 'task', 1.0)", (cur.lastrowid,)
+        )
+        hook.db.execute(
+            "INSERT INTO trajectories (session_id, task, skills_used, outcome, created_at) "
+            "VALUES (?, 'do thing', ?, 'fail', 1.0)",
+            (cur.lastrowid, json.dumps([skill_name])),
+        )
+        hook.db.commit()
+
+        mock_resp = MagicMock()
+        mock_resp.content = new_body
+        hook._loop.provider = MagicMock()
+        hook._loop.provider.chat_with_retry = AsyncMock(return_value=mock_resp)
+
+        candidate = RewriteCandidate(skill_name=skill_name, use_count=10, success_count=2)
+        result = await rewrite_skill(hook, candidate)
+
+        # Only one LLM call (rewrite only, no critic).
+        assert hook._loop.provider.chat_with_retry.call_count == 1
+        assert result == new_body
+
+
 # ---------------------------------------------------------------------------
 # Integration: rewrite_skill pipeline
 # ---------------------------------------------------------------------------
@@ -167,7 +294,8 @@ class TestRewriteSkill:
         hook._loop.provider = MagicMock()
         hook._loop.provider.chat_with_retry = AsyncMock(return_value=mock_response)
 
-        result = asyncio.run(rewrite_skill(hook, candidate))
+        with _critic_approved():
+            result = asyncio.run(rewrite_skill(hook, candidate))
 
         assert result == new_body
 
@@ -263,7 +391,8 @@ class TestRunRewriter:
         hook._loop.provider = MagicMock()
         hook._loop.provider.chat_with_retry = AsyncMock(return_value=mock_response)
 
-        rewritten = asyncio.run(run_rewriter(hook))
+        with _critic_approved():
+            rewritten = asyncio.run(run_rewriter(hook))
 
         assert skill_name in rewritten, "run_rewriter should return the rewritten skill name"
         skill_path = hook.workspace / "skills" / skill_name / "SKILL.md"
@@ -280,7 +409,8 @@ class TestRunRewriter:
         hook._loop.provider = MagicMock()
         hook._loop.provider.chat_with_retry = AsyncMock(return_value=mock_response)
 
-        asyncio.run(run_rewriter(hook))
+        with _critic_approved():
+            asyncio.run(run_rewriter(hook))
 
         row = hook.db.execute(
             "SELECT body FROM skill_versions WHERE skill_name = ?", (skill_name,)

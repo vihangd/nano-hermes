@@ -49,6 +49,37 @@ Output ONLY the new SKILL.md content — no preamble, no explanation.
 """
 
 
+_CRITIC_SYSTEM = """\
+You are a strict AI skill-quality auditor. Your job is to judge whether a \
+rewritten skill is safe to deploy. Answer EXACTLY three lines, each "YES" or "NO":
+
+1. Does the rewrite still cover the original skill's intended use case?
+2. Does the rewrite address at least one of the cited failure modes?
+3. Is the rewrite free from obvious overfitting to the provided failure examples \
+   (i.e. it would still be useful on unseen tasks)?
+
+Output format — three lines, nothing else:
+YES or NO
+YES or NO
+YES or NO"""
+
+_CRITIC_PROMPT = """\
+ORIGINAL SKILL ({skill_name}):
+---
+{original_body}
+---
+
+REWRITTEN SKILL:
+---
+{new_body}
+---
+
+FAILURE EXAMPLES USED IN REWRITE:
+---
+{failure_context}
+---"""
+
+
 @dataclass
 class RewriteCandidate:
     skill_name: str
@@ -119,6 +150,64 @@ def save_skill_version(
     db.commit()
 
 
+def _parse_critic_response(text: str) -> bool:
+    """Return True only if all three critic lines are YES."""
+    lines = [ln.strip().upper() for ln in text.strip().splitlines() if ln.strip()]
+    if len(lines) < 3:
+        return False
+    return all(ln.startswith("YES") for ln in lines[:3])
+
+
+async def _run_critic(
+    hook: "NanoHermesHook",
+    *,
+    skill_name: str,
+    original_body: str,
+    new_body: str,
+    failure_context: str,
+) -> bool:
+    """Ask an independent LLM call to approve the rewrite.
+
+    Returns True if the critic approves (all three rubric questions answered YES).
+    Retries once on network/parse failure; rejects on second failure.
+    """
+    prompt = _CRITIC_PROMPT.format(
+        skill_name=skill_name,
+        original_body=original_body,
+        new_body=new_body,
+        failure_context=failure_context,
+    )
+    last_raw: str | None = None
+    for attempt in range(2):
+        try:
+            resp = await hook._loop.provider.chat_with_retry(
+                messages=[
+                    {"role": "system", "content": _CRITIC_SYSTEM},
+                    {"role": "user", "content": prompt},
+                ],
+                model=getattr(hook._loop, "model", None),
+                max_tokens=20,
+            )
+            last_raw = (resp.content or "").strip()
+            approved = _parse_critic_response(last_raw)
+            if approved:
+                return True
+            # Unambiguous rejection — no point retrying.
+            log.info(
+                "rewriter: critic rejected %s — %r", skill_name, last_raw
+            )
+            return False
+        except Exception:
+            log.warning(
+                "rewriter: critic LLM call failed for %s (attempt %d/2)",
+                skill_name,
+                attempt + 1,
+                exc_info=True,
+            )
+    log.warning("rewriter: critic gave up on %s after 2 failures — rejecting", skill_name)
+    return False
+
+
 async def rewrite_skill(
     hook: "NanoHermesHook",
     candidate: RewriteCandidate,
@@ -156,6 +245,7 @@ async def rewrite_skill(
     try:
         response = await hook._loop.provider.chat_with_retry(
             messages=[{"role": "user", "content": prompt}],
+            model=getattr(hook._loop, "model", None),
             max_tokens=2048,
         )
         new_body = (response.content or "").strip()
@@ -172,6 +262,19 @@ async def rewrite_skill(
     if err:
         log.warning("rewriter: security scan blocked rewrite of %s — %s", candidate.skill_name, err)
         return None
+
+    # Critic gate — independent LLM call with immutable system prompt.
+    if cfg.rewrite_critic_enabled:
+        approved = await _run_critic(
+            hook,
+            skill_name=candidate.skill_name,
+            original_body=current_body,
+            new_body=new_body,
+            failure_context=context_text,
+        )
+        if not approved:
+            log.info("rewriter: critic blocked rewrite of %s", candidate.skill_name)
+            return None
 
     # Preserve the old version before overwriting.
     save_skill_version(
