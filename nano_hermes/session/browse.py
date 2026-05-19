@@ -127,8 +127,9 @@ def fts_discovery(
         if session_id not in seen_sessions or rank < seen_sessions[session_id][1]:
             seen_sessions[session_id] = (chunk_id, rank)
 
-    # Pick up to `limit` distinct sessions
-    top_sessions = list(seen_sessions.items())[:limit]
+    # Sort by best rank (FTS5 uses negative BM25 scores — smaller is better)
+    # before slicing so the highest-ranked sessions are always selected.
+    top_sessions = sorted(seen_sessions.items(), key=lambda kv: kv[1][1])[:limit]
 
     arcs: list[_SessionArc] = []
     for session_id, (anchor_id, _rank) in top_sessions:

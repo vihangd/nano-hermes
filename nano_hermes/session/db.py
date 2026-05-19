@@ -139,6 +139,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS principles_fts USING fts5(
     tokenize='porter'
 );
 
+CREATE TRIGGER IF NOT EXISTS principles_ad AFTER DELETE ON principles BEGIN
+    INSERT INTO principles_fts(principles_fts, rowid, condition, action, content_id)
+    VALUES ('delete', old.id, old.condition, old.action, old.id);
+END;
+
 -- Phase 5: Associative reflection co-activation graph (HeLa-Mem-lite).
 -- When two reflections are injected together in the same session iteration,
 -- their co-activation is recorded. Highly co-activated pairs signal thematic

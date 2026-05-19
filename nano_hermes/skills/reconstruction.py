@@ -58,10 +58,15 @@ async def check_reconstruction(
         log.debug("reconstruction: %s — body too short, skipping check", skill_name)
         return True
 
+    provider = getattr(hook._loop, "provider", None)
+    if provider is None:
+        log.debug("reconstruction: %s — no LLM provider, skipping check", skill_name)
+        return True
+
     prompt = _AUDIT_PROMPT.format(description=description, body=body[:4000])
     for attempt in range(2):
         try:
-            resp = await hook._loop.provider.chat_with_retry(
+            resp = await provider.chat_with_retry(
                 messages=[
                     {"role": "system", "content": _AUDIT_SYSTEM},
                     {"role": "user", "content": prompt},

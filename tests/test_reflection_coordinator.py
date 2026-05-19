@@ -210,6 +210,86 @@ class TestBackPropagateUtility:
         assert rid in coord._injected_reflection_ids
 
 
+class TestCoActivation:
+    """Tests for _record_coactivations — the associative reflection graph."""
+
+    def _seed_reflection(self, hook, content: str) -> int:
+        cur = hook.db.execute(
+            "INSERT INTO sessions (session_key, started_at) VALUES (?, ?)",
+            (f"s_{content[:8]}", time.time()),
+        )
+        sid = cur.lastrowid
+        cur = hook.db.execute(
+            "INSERT INTO reflections (session_id, content, created_at) VALUES (?, ?, ?)",
+            (sid, content, time.time()),
+        )
+        hook.db.commit()
+        return int(cur.lastrowid)
+
+    def test_first_coactivation_count_is_one(self, hook, coord):
+        rid_a = self._seed_reflection(hook, "reflection A")
+        rid_b = self._seed_reflection(hook, "reflection B")
+        coord._injected_reflection_ids = {rid_a, rid_b}
+        coord.back_propagate_utility(had_errors=False)
+
+        a, b = min(rid_a, rid_b), max(rid_a, rid_b)
+        row = hook.db.execute(
+            "SELECT coactivation_count FROM reflection_coactivations "
+            "WHERE reflection_a_id = ? AND reflection_b_id = ?",
+            (a, b),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 1  # first occurrence — must not be 2 (double-count bug)
+
+    def test_repeated_coactivation_increments_count(self, hook, coord):
+        rid_a = self._seed_reflection(hook, "reflection X")
+        rid_b = self._seed_reflection(hook, "reflection Y")
+        a, b = min(rid_a, rid_b), max(rid_a, rid_b)
+
+        for _ in range(3):
+            coord._injected_reflection_ids = {rid_a, rid_b}
+            coord.back_propagate_utility(had_errors=False)
+
+        row = hook.db.execute(
+            "SELECT coactivation_count FROM reflection_coactivations "
+            "WHERE reflection_a_id = ? AND reflection_b_id = ?",
+            (a, b),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 3
+
+    def test_pairs_stored_with_smaller_id_first(self, hook, coord):
+        rid_a = self._seed_reflection(hook, "first reflection")
+        rid_b = self._seed_reflection(hook, "second reflection")
+        # rid_b > rid_a since AUTOINCREMENT; verify smaller is always column a
+        coord._injected_reflection_ids = {rid_a, rid_b}
+        coord.back_propagate_utility(had_errors=False)
+
+        row = hook.db.execute(
+            "SELECT reflection_a_id, reflection_b_id FROM reflection_coactivations"
+        ).fetchone()
+        assert row is not None
+        assert row[0] < row[1]
+
+    def test_single_injection_produces_no_edges(self, hook, coord):
+        rid = self._seed_reflection(hook, "lone reflection")
+        coord._injected_reflection_ids = {rid}
+        coord.back_propagate_utility(had_errors=False)
+
+        rows = hook.db.execute("SELECT * FROM reflection_coactivations").fetchall()
+        assert rows == []
+
+    def test_three_reflections_produce_three_edges(self, hook, coord):
+        rid_a = self._seed_reflection(hook, "refl A")
+        rid_b = self._seed_reflection(hook, "refl B")
+        rid_c = self._seed_reflection(hook, "refl C")
+        coord._injected_reflection_ids = {rid_a, rid_b, rid_c}
+        coord.back_propagate_utility(had_errors=False)
+
+        rows = hook.db.execute("SELECT * FROM reflection_coactivations").fetchall()
+        assert len(rows) == 3  # C(3,2) = 3 pairs
+
+
 class TestMMRTrajectoryInjection:
     """Tests for get_trajectory_injection with MMR diversity selection."""
 

@@ -211,17 +211,25 @@ class NanoHermesHook(AgentHook):
                 continue
 
             raw = skill_path.read_text(encoding="utf-8")
-            # Extract frontmatter description and body
+            # Extract frontmatter description and body.
+            # If frontmatter is malformed (missing closing ---), skip the check
+            # rather than passing an empty description that biases LLM toward YES.
             description = ""
             body = raw
             if raw.startswith("---"):
                 end = raw.find("\n---", 3)
-                if end != -1:
-                    fm_text = raw[4:end]
-                    for line in fm_text.splitlines():
-                        if line.startswith("description:"):
-                            description = line.partition(":")[2].strip()
-                    body = raw[end + len("\n---"):].lstrip("\n")
+                if end == -1:
+                    log.warning(
+                        "hook: %s — malformed SKILL.md frontmatter, skipping reconstruction check",
+                        name,
+                    )
+                    passed.append(name)
+                    continue
+                fm_text = raw[4:end]
+                for line in fm_text.splitlines():
+                    if line.startswith("description:"):
+                        description = line.partition(":")[2].strip()
+                body = raw[end + len("\n---"):].lstrip("\n")
 
             ok = await check_reconstruction(
                 self,

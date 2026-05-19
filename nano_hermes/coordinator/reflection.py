@@ -220,10 +220,13 @@ class ReflectionCoordinator:
         now = _time.time()
         try:
             for a, b in itertools.combinations(ids, 2):
+                # INSERT with count=0 so the UPDATE below always produces the
+                # correct final value (1 for first occurrence, N+1 for repeats).
+                # If INSERT OR IGNORE is a no-op (existing row), UPDATE still runs.
                 self._db.execute(
                     "INSERT OR IGNORE INTO reflection_coactivations "
                     "(reflection_a_id, reflection_b_id, coactivation_count, last_at) "
-                    "VALUES (?, ?, 1, ?)",
+                    "VALUES (?, ?, 0, ?)",
                     (a, b, now),
                 )
                 self._db.execute(

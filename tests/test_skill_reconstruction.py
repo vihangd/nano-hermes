@@ -188,6 +188,41 @@ class TestReconstructionGateIntegration:
         self._setup_draft_skill(
             hook, "no-check-skill", "Something", "A" * _MIN_BODY_CHARS
         )
+        # Seed enough successes to hit promotion threshold
+        hook.db.execute(
+            "UPDATE skill_stats SET success_count = 3 WHERE name = 'no-check-skill'"
+        )
+        hook.db.commit()
 
         await hook._check_promotions(["no-check-skill"])
+        hook._loop.provider.chat_with_retry.assert_not_called()
+        # Promotion logic must still fire — skill should be active despite no reconstruction check
+        row = hook.db.execute(
+            "SELECT status FROM skill_stats WHERE name = 'no-check-skill'"
+        ).fetchone()
+        assert row[0] == "active"
+
+    async def test_malformed_frontmatter_skips_reconstruction_check(self, tmp_path):
+        loop = _make_loop(tmp_path)
+        hook = nano_hermes.install(loop)
+        hook._loop.provider = MagicMock()
+        hook._loop.provider.chat_with_retry = AsyncMock()
+
+        skill_name = "malformed-skill"
+        skill_dir = hook.workspace / "skills" / skill_name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        # Frontmatter with no closing ---
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: malformed-skill\ndescription: something\n\nbody without closing fence\n"
+        )
+        hook.db.execute(
+            "INSERT OR REPLACE INTO skill_stats "
+            "(name, status, use_count, success_count) VALUES (?, 'draft', 10, 3)",
+            (skill_name,),
+        )
+        hook.db.commit()
+
+        result = await hook._filter_reconstruction_blocked([skill_name])
+        # Malformed frontmatter → skip check, pass skill through
+        assert skill_name in result
         hook._loop.provider.chat_with_retry.assert_not_called()
