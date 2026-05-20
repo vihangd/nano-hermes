@@ -37,6 +37,7 @@ from .session.browse import SessionBrowseTool
 from .session.search import SessionSearchTool
 from .session.trajectory_search import TrajectorySearchTool
 from .session.workflow_suggest import WorkflowSuggestTool
+from .skills.export_tool import SkillExportTool
 from .skills.principle_tool import PrincipleTool
 from .skills.propose_tool import ProposeSkillTool
 from .skills.rate_tool import SkillRateTool
@@ -60,6 +61,7 @@ __all__ = [
     "SkillStatsTool",
     "ProposeSkillTool",
     "SkillRateTool",
+    "SkillExportTool",
     "ReflectTool",
     "NanoStatusTool",
     "PrincipleTool",
@@ -145,4 +147,5 @@ def install(
     loop.tools.register(ReflectTool(hook=hook))
     loop.tools.register(NanoStatusTool(hook=hook))
     loop.tools.register(WorkflowSuggestTool(hook=hook))
+    loop.tools.register(SkillExportTool(hook=hook))
     return hook

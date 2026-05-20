@@ -149,6 +149,10 @@ class SkillStatsConfig(BaseModel):
     # to verify the skill body actually implements what the description claims.
     # Fails open on LLM error (promotion allowed). Default ON.
     reconstruction_check_enabled: bool = True
+    # Phase 4.4: minimum distinct sessions before a skill is exported for
+    # offline GEPA/MIPROv2 optimisation. Kept high (50) so early-corpus noise
+    # doesn't pollute the training set.
+    export_min_sessions: int = 50
 
 
 class SkillsConfig(BaseModel):
