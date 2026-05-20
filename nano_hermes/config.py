@@ -19,7 +19,7 @@ class EmbeddingProvider(BaseModel):
 class EmbeddingConfig(BaseModel):
     model: str = "BAAI/bge-m3"
     native_dims: int = 1024
-    target_dims: int = 512
+    target_dims: int = Field(default=512, gt=0)
     normalize_after_truncate: bool = True
     timeout_seconds: float = 20.0
     # How long (seconds) to skip a provider after an HTTP 402/429/5xx error.
@@ -67,10 +67,10 @@ class MemoryBudgets(BaseModel):
 
 
 class RetrievalConfig(BaseModel):
-    fts_k: int = 25       # FTS5 candidate pool
-    vec_k: int = 25       # vector candidate pool
+    fts_k: int = Field(default=25, gt=0)       # FTS5 candidate pool
+    vec_k: int = Field(default=25, gt=0)       # vector candidate pool
     rrf_k: int = 60       # RRF smoothing constant (Cormack et al. default)
-    final_k: int = 8
+    final_k: int = Field(default=8, gt=0)
     # MMR diversity reranking applied after RRF fusion.
     # λ=1.0 disables MMR (pure relevance). λ=0.7 recommended balance.
     mmr_lambda: float = 0.7
@@ -107,7 +107,7 @@ class SkillStatsConfig(BaseModel):
     use_stat_weighting: bool = True
     success_rate_boost: float = 0.3
     # Phase 4: two-phase skill promotion thresholds.
-    promotion_threshold: int = 3          # successful uses to promote draft -> active
+    promotion_threshold: int = Field(default=3, gt=0)  # successful uses to promote draft -> active
     deprecation_min_uses: int = 5         # minimum uses before deprecation check
     deprecation_max_success_rate: float = 0.2  # below this rate -> deprecated
     # Maximum total bytes (body + companion files) allowed per propose_skill call.

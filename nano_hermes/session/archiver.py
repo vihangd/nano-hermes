@@ -240,11 +240,10 @@ class SessionArchiver:
             return
 
         try:
-            for cid, vec in zip(chunk_ids, vecs):
-                self._db.execute(
-                    "INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)",
-                    (cid, vec.astype(np.float32).tobytes()),
-                )
+            self._db.executemany(
+                "INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)",
+                [(cid, vec.astype(np.float32).tobytes()) for cid, vec in zip(chunk_ids, vecs)],
+            )
             self._db.commit()
         except Exception:
             log.exception("vec write failed for %d chunks", len(chunk_ids))

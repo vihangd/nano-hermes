@@ -127,13 +127,14 @@ def gather_failure_context(
         """
         SELECT c.content
         FROM chunks c
-        JOIN trajectories t ON t.session_id = c.session_id
+        JOIN trajectories t ON t.session_id = c.session_id,
+             json_each(t.skills_used) j
         WHERE t.outcome IN ('fail', 'partial')
-          AND t.skills_used LIKE ?
+          AND j.value = ?
         ORDER BY t.created_at DESC, c.turn_index ASC
         LIMIT ?
         """,
-        (f'%"{skill_name}"%', limit),
+        (skill_name, limit),
     ).fetchall()
     return [r[0] for r in rows]
 

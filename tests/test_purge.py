@@ -168,6 +168,52 @@ class TestPurgeChunksVecCleanup:
 
 
 # ---------------------------------------------------------------------------
+# GAP-2: purge reflections_vec orphan cleanup
+# ---------------------------------------------------------------------------
+
+class TestPurgeReflectionsVecCleanup:
+    async def test_purge_cleans_reflections_vec_orphans(
+        self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time as _time
+        from nano_hermes.session.db import purge_older_than
+
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop)
+
+        old_ts = _time.time() - 60 * 86400
+        cur = hook.db.execute(
+            "INSERT INTO sessions (session_key, started_at, ended_at) VALUES (?, ?, ?)",
+            ("old:reflections:vec", old_ts, old_ts),
+        )
+        old_sid = cur.lastrowid
+        cur2 = hook.db.execute(
+            "INSERT INTO reflections (session_id, content, created_at) VALUES (?, ?, ?)",
+            (old_sid, "old reflection", old_ts),
+        )
+        old_ref_id = cur2.lastrowid
+
+        dims = hook.config.embedding.target_dims
+        fake_vec = np.ones(dims, dtype=np.float32)
+        fake_vec /= np.linalg.norm(fake_vec)
+        hook.db.execute(
+            "INSERT INTO reflections_vec (reflection_id, embedding) VALUES (?, ?)",
+            (old_ref_id, fake_vec.tobytes()),
+        )
+        hook.db.commit()
+
+        assert hook.db.execute(
+            "SELECT COUNT(*) FROM reflections_vec WHERE reflection_id = ?", (old_ref_id,)
+        ).fetchone()[0] == 1
+
+        purge_older_than(hook.db, days=30)
+
+        assert hook.db.execute(
+            "SELECT COUNT(*) FROM reflections_vec WHERE reflection_id = ?", (old_ref_id,)
+        ).fetchone()[0] == 0, "reflections_vec orphan not cleaned by purge"
+
+
+# ---------------------------------------------------------------------------
 # Phase 0.4: purge_older_than uses batched IN-clause DELETEs (not N+1)
 # ---------------------------------------------------------------------------
 

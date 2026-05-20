@@ -21,12 +21,15 @@ per turn.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
 import sqlite_vec
 
 from ..paths import state_db
+
+log = logging.getLogger(__name__)
 
 
 _SCHEMA = """
@@ -173,22 +176,22 @@ CREATE TABLE IF NOT EXISTS semantic_facts (
 _VEC_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
     chunk_id  INTEGER PRIMARY KEY,
-    embedding FLOAT[{dims}]
+    embedding FLOAT[{dims}] distance_metric=cosine
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS skill_vec USING vec0(
     skill_id  INTEGER PRIMARY KEY,
-    embedding FLOAT[{dims}]
+    embedding FLOAT[{dims}] distance_metric=cosine
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS trajectories_vec USING vec0(
     trajectory_id  INTEGER PRIMARY KEY,
-    embedding      FLOAT[{dims}]
+    embedding      FLOAT[{dims}] distance_metric=cosine
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS reflections_vec USING vec0(
     reflection_id  INTEGER PRIMARY KEY,
-    embedding      FLOAT[{dims}]
+    embedding      FLOAT[{dims}] distance_metric=cosine
 );
 """
 
@@ -219,6 +222,45 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
             pass  # column already exists
 
 
+def _migrate_vec0_to_cosine(conn: sqlite3.Connection, target_dims: int) -> None:
+    """Migrate vec0 tables to distance_metric=cosine if they were created without it.
+
+    vec0 virtual tables cannot be ALTER TABLE'd — the only migration path is to
+    read existing data, DROP the table, CREATE with the new metric, and re-INSERT.
+    This is idempotent: tables that already have distance_metric=cosine are skipped.
+    """
+    tables = {
+        "chunks_vec": ("chunk_id", "chunk_id INTEGER PRIMARY KEY, embedding FLOAT[{dims}] distance_metric=cosine"),
+        "skill_vec": ("skill_id", "skill_id INTEGER PRIMARY KEY, embedding FLOAT[{dims}] distance_metric=cosine"),
+        "trajectories_vec": ("trajectory_id", "trajectory_id INTEGER PRIMARY KEY, embedding FLOAT[{dims}] distance_metric=cosine"),
+        "reflections_vec": ("reflection_id", "reflection_id INTEGER PRIMARY KEY, embedding FLOAT[{dims}] distance_metric=cosine"),
+    }
+    for table, (pk_col, col_def) in tables.items():
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if row is None:
+            continue  # table doesn't exist yet — _VEC_SCHEMA will create it correctly
+        if "distance_metric=cosine" in (row[0] or ""):
+            continue  # already correct
+        log.info("migrating %s to distance_metric=cosine", table)
+        existing = conn.execute(
+            f"SELECT {pk_col}, embedding FROM {table}"
+        ).fetchall()
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+        conn.execute(
+            f"CREATE VIRTUAL TABLE {table} USING vec0({col_def.format(dims=target_dims)})"
+        )
+        if existing:
+            conn.executemany(
+                f"INSERT INTO {table} ({pk_col}, embedding) VALUES (?, ?)",
+                existing,
+            )
+        conn.commit()
+        log.info("migrated %s: %d rows preserved", table, len(existing))
+
+
 def open_db(workspace: Path, target_dims: int) -> sqlite3.Connection:
     path = state_db(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -231,6 +273,7 @@ def open_db(workspace: Path, target_dims: int) -> sqlite3.Connection:
     conn.enable_load_extension(False)
     conn.executescript(_SCHEMA)
     conn.executescript(_VEC_SCHEMA.format(dims=target_dims))
+    _migrate_vec0_to_cosine(conn, target_dims)
     _apply_migrations(conn)
     conn.commit()
     return conn

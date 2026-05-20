@@ -135,11 +135,15 @@ class SkillUsageTracker:
     # Promotion / deprecation
     # ------------------------------------------------------------------
 
-    def _is_too_similar_to_active(self, name: str, threshold: float) -> bool:
-        """Return True if the draft skill is too semantically similar to any active skill.
+    def _is_too_similar_to_active(
+        self,
+        name: str,
+        threshold: float,
+        active_embeddings: list[np.ndarray],
+    ) -> bool:
+        """Return True if draft skill embedding is too similar to any active skill.
 
-        Uses already-stored skill_vec embeddings — no API call needed.
-        Normalized embeddings → dot product == cosine similarity.
+        *active_embeddings* is pre-fetched by the caller to avoid repeated DB scans.
         """
         row = self._db.execute(
             "SELECT sv.embedding FROM skill_vec sv "
@@ -151,17 +155,9 @@ class SkillUsageTracker:
             return False  # not yet indexed — allow promotion, indexer will catch up
 
         candidate = np.frombuffer(row[0], dtype=np.float32)
-        active_rows = self._db.execute(
-            "SELECT sv.embedding FROM skill_vec sv "
-            "JOIN skill_stats ss ON ss.id = sv.skill_id "
-            "WHERE ss.status = 'active' AND ss.name != ?",
-            (name,),
-        ).fetchall()
-        for ar in active_rows:
-            sim = float(np.dot(candidate, np.frombuffer(ar[0], dtype=np.float32)))
-            if sim >= threshold:
-                return True
-        return False
+        return any(
+            float(np.dot(candidate, ae)) >= threshold for ae in active_embeddings
+        )
 
     def check_promotions(self, names: list[str]) -> None:
         """Promote draft skills to active, or deprecate skills with low success."""
@@ -170,6 +166,15 @@ class SkillUsageTracker:
             return
         try:
             with self._db:
+                # Fetch all active skill embeddings once — reused per candidate.
+                active_emb_rows = self._db.execute(
+                    "SELECT sv.embedding FROM skill_vec sv "
+                    "JOIN skill_stats ss ON ss.id = sv.skill_id "
+                    "WHERE ss.status = 'active'",
+                ).fetchall()
+                active_embeddings = [
+                    np.frombuffer(r[0], dtype=np.float32) for r in active_emb_rows
+                ]
                 for name in names:
                     row = self._db.execute(
                         "SELECT status, use_count, success_count FROM skill_stats WHERE name = ?",
@@ -184,7 +189,7 @@ class SkillUsageTracker:
                         threshold = getattr(
                             cfg, "diversity_similarity_threshold", 0.88
                         )
-                        if self._is_too_similar_to_active(name, threshold):
+                        if self._is_too_similar_to_active(name, threshold, active_embeddings):
                             log.info(
                                 "skill '%s' promotion blocked: too similar to an "
                                 "existing active skill (threshold=%.2f)",

@@ -439,3 +439,53 @@ class TestRunRewriter:
 
         assert skill_name not in rewritten
         hook._loop.provider.chat_with_retry.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# GAP-1: underscore wildcard regression
+# ---------------------------------------------------------------------------
+
+class TestGatherFailureContextNoWildcard:
+    def test_underscore_skill_does_not_match_similar_name(self, tmp_path):
+        """'foo_bar' must not match sessions where 'fooXbar' was used."""
+        import json
+        import time as _time
+
+        loop = _make_loop(tmp_path)
+        hook = nano_hermes.install(loop)
+        db = hook.db
+
+        # Insert a session that used "foo_bar"
+        cur = db.execute(
+            "INSERT INTO sessions (session_key, started_at) VALUES (?, ?)",
+            ("s1", _time.time()),
+        )
+        sid1 = cur.lastrowid
+        db.execute(
+            "INSERT INTO trajectories (session_id, task, skills_used, outcome, created_at) VALUES (?, ?, ?, ?, ?)",
+            (sid1, "task1", json.dumps(["foo_bar"]), "fail", _time.time()),
+        )
+        db.execute(
+            "INSERT INTO chunks (session_id, turn_index, role, content, created_at) VALUES (?, 0, 'user', ?, ?)",
+            (sid1, "chunk for foo_bar", _time.time()),
+        )
+
+        # Insert a session that used "fooXbar" (different skill — _ wildcard would match it with LIKE)
+        cur = db.execute(
+            "INSERT INTO sessions (session_key, started_at) VALUES (?, ?)",
+            ("s2", _time.time()),
+        )
+        sid2 = cur.lastrowid
+        db.execute(
+            "INSERT INTO trajectories (session_id, task, skills_used, outcome, created_at) VALUES (?, ?, ?, ?, ?)",
+            (sid2, "task2", json.dumps(["fooXbar"]), "fail", _time.time()),
+        )
+        db.execute(
+            "INSERT INTO chunks (session_id, turn_index, role, content, created_at) VALUES (?, 0, 'user', ?, ?)",
+            (sid2, "chunk for fooXbar", _time.time()),
+        )
+        db.commit()
+
+        results = gather_failure_context(db, "foo_bar", limit=10)
+        assert all("fooXbar" not in r for r in results), "wildcard false-positive: fooXbar matched foo_bar"
+        assert any("foo_bar" in r for r in results), "foo_bar session not found"

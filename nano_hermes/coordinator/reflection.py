@@ -189,12 +189,14 @@ class ReflectionCoordinator:
                 f"SELECT id, utility FROM reflections WHERE id IN ({placeholders})",
                 list(self._injected_reflection_ids),
             ).fetchall()
-            for rid, current_utility in rows:
-                new_utility = current_utility + alpha * (reward - current_utility)
-                self._db.execute(
-                    "UPDATE reflections SET utility = ? WHERE id = ?",
-                    (new_utility, rid),
-                )
+            updates = [
+                (current_utility + alpha * (reward - current_utility), rid)
+                for rid, current_utility in rows
+            ]
+            self._db.executemany(
+                "UPDATE reflections SET utility = ? WHERE id = ?",
+                updates,
+            )
             self._db.commit()
             log.debug(
                 "utility back-propagated: %d reflections reward=%.1f",

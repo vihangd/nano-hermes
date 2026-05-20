@@ -197,15 +197,25 @@ class NanoHermesHook(AgentHook):
         — passing skills and active/deprecated skills are returned unchanged.
         """
         from .skills.reconstruction import check_reconstruction  # noqa: PLC0415
+        import asyncio  # noqa: PLC0415
+
+        if not names:
+            return []
 
         cfg = self.config.skill_stats
+
+        # Batch fetch statuses for all candidates at once.
+        placeholders = ",".join("?" * len(names))
+        rows = self.db.execute(
+            f"SELECT name, status, success_count FROM skill_stats WHERE name IN ({placeholders})",
+            names,
+        ).fetchall()
+        status_map = {r[0]: (r[1], r[2]) for r in rows}
+
         passed: list[str] = []
         for name in names:
-            row = self.db.execute(
-                "SELECT status, success_count FROM skill_stats WHERE name = ?",
-                (name,),
-            ).fetchone()
-            if row is None or row[0] != "draft" or row[1] < cfg.promotion_threshold:
+            info = status_map.get(name)
+            if info is None or info[0] != "draft" or info[1] < cfg.promotion_threshold:
                 passed.append(name)
                 continue
 
@@ -214,7 +224,7 @@ class NanoHermesHook(AgentHook):
                 passed.append(name)
                 continue
 
-            raw = skill_path.read_text(encoding="utf-8")
+            raw = await asyncio.to_thread(skill_path.read_text, encoding="utf-8")
             # Extract frontmatter description and body.
             # If frontmatter is malformed (missing closing ---), skip the check
             # rather than passing an empty description that biases LLM toward YES.
