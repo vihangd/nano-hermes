@@ -204,6 +204,8 @@ def open_db(workspace: Path, target_dims: int) -> sqlite3.Connection:
     path = state_db(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)

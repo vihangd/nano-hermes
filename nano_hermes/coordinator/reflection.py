@@ -206,35 +206,31 @@ class ReflectionCoordinator:
 
         self._record_coactivations()
 
+    _MAX_COACTIVATION_IDS = 20  # cap to keep O(N²) bounded per session
+
     def _record_coactivations(self) -> None:
         """Record pairwise co-activation edges for all injected reflection IDs.
 
-        Uses INSERT OR IGNORE + UPDATE to upsert each pair.  Pairs are stored
-        with the smaller ID first so each undirected edge is stored once.
+        Single upsert per pair via ON CONFLICT DO UPDATE — avoids the
+        two-statement INSERT OR IGNORE + UPDATE pattern.  Pairs stored with
+        smaller ID first so each undirected edge is stored once.
         """
-        ids = sorted(self._injected_reflection_ids)
+        # Cap to prevent O(N²) blow-up on very long sessions.
+        ids = sorted(self._injected_reflection_ids)[-self._MAX_COACTIVATION_IDS:]
         if len(ids) < 2:
             return
         import itertools
         import time as _time
         now = _time.time()
         try:
-            for a, b in itertools.combinations(ids, 2):
-                # INSERT with count=0 so the UPDATE below always produces the
-                # correct final value (1 for first occurrence, N+1 for repeats).
-                # If INSERT OR IGNORE is a no-op (existing row), UPDATE still runs.
-                self._db.execute(
-                    "INSERT OR IGNORE INTO reflection_coactivations "
-                    "(reflection_a_id, reflection_b_id, coactivation_count, last_at) "
-                    "VALUES (?, ?, 0, ?)",
-                    (a, b, now),
-                )
-                self._db.execute(
-                    "UPDATE reflection_coactivations "
-                    "SET coactivation_count = coactivation_count + 1, last_at = ? "
-                    "WHERE reflection_a_id = ? AND reflection_b_id = ?",
-                    (now, a, b),
-                )
+            self._db.executemany(
+                "INSERT INTO reflection_coactivations "
+                "(reflection_a_id, reflection_b_id, coactivation_count, last_at) "
+                "VALUES (?, ?, 1, ?) "
+                "ON CONFLICT(reflection_a_id, reflection_b_id) DO UPDATE SET "
+                "coactivation_count = coactivation_count + 1, last_at = excluded.last_at",
+                ((a, b, now) for a, b in itertools.combinations(ids, 2)),
+            )
             self._db.commit()
             log.debug("co-activation edges recorded: %d pairs", len(ids) * (len(ids) - 1) // 2)
         except Exception:

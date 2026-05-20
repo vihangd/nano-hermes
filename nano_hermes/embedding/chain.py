@@ -40,6 +40,21 @@ _last_skip_logged: dict[tuple[str, str], float] = {}
 _UNHEALTHY_TTL = 600.0       # 10 min default; configurable in EmbeddingConfig
 _SKIP_LOG_THROTTLE = 60.0    # 1 min between skip-log lines per provider
 
+# Shared TCP connector — keeps connections alive across embed calls so we don't
+# pay TLS handshake overhead (50-300ms on ARM) on every request.
+_shared_connector: aiohttp.TCPConnector | None = None
+
+
+def _get_connector() -> aiohttp.TCPConnector:
+    global _shared_connector
+    if _shared_connector is None or _shared_connector.closed:
+        _shared_connector = aiohttp.TCPConnector(
+            limit=4,
+            ttl_dns_cache=300,
+            enable_cleanup_closed=True,
+        )
+    return _shared_connector
+
 
 class AllProvidersFailed(RuntimeError):
     pass
@@ -52,7 +67,9 @@ class EmbeddingChain:
 
     async def __aenter__(self) -> "EmbeddingChain":
         self._session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=self.config.timeout_seconds)
+            connector=_get_connector(),
+            connector_owner=False,  # don't close the shared connector on exit
+            timeout=aiohttp.ClientTimeout(total=self.config.timeout_seconds),
         )
         return self
 
