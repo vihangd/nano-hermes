@@ -60,6 +60,10 @@ class MemoryBudgets(BaseModel):
     # Cosine similarity threshold for hub clustering. Tighter than consolidation
     # (0.92) — hubs are genuinely recurring topics, not just near-duplicate text.
     distill_cluster_threshold: float = 0.88
+    # When True, call the LLM to distill each hub into a semantic fact and
+    # write the result to semantic_facts. When False, surface hubs to the
+    # agent for manual review only (no LLM call, no DB write).
+    distill_llm_enabled: bool = True
 
 
 class RetrievalConfig(BaseModel):

@@ -10,6 +10,7 @@ Vectors from EmbeddingChain are L2-normalised, so np.dot == cosine sim.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -17,6 +18,8 @@ import numpy as np
 
 if TYPE_CHECKING:
     from ..embedding.chain import EmbeddingChain
+
+log = logging.getLogger(__name__)
 
 _DEFAULT_THRESHOLD = 0.92
 
@@ -140,9 +143,54 @@ async def find_hub_clusters(
         if len(cl_sessions) < min_sessions:
             continue
         samples = [aligned[i][2][:500] for i in cl[:3]]
-        hubs.append({"sessions": sorted(cl_sessions), "samples": samples})
+        cl_chunk_ids = sorted(aligned[i][0] for i in cl)
+        hubs.append({
+            "sessions": sorted(cl_sessions),
+            "samples": samples,
+            "chunk_ids": cl_chunk_ids,
+        })
 
     return hubs
+
+
+_DISTILL_PROMPT = """\
+Below are {n} representative memory chunks from a recurring theme across {n_sess} sessions.
+Distill them into a single durable semantic fact in ≤100 words. Output ONLY the fact — no preamble.
+
+CHUNKS:
+{chunks}
+"""
+
+
+async def distill_hub_to_fact(hook: Any, hub: dict) -> str | None:
+    """Distill a hub cluster's samples into a ≤100-word semantic fact via LLM.
+
+    Returns the stripped fact string on success, or None on any failure.
+    Fail-closed: caller must not write a partial result when None is returned.
+    """
+    provider = getattr(hook._loop, "provider", None)
+    if provider is None:
+        return None
+    model = getattr(hook._loop, "model", None)
+    if model is None:
+        log.warning("distill_hub_to_fact: no model configured on hook._loop — skipping hub")
+        return None
+    chunks_text = "\n---\n".join(hub["samples"])
+    prompt = _DISTILL_PROMPT.format(
+        n=len(hub["samples"]),
+        n_sess=len(hub["sessions"]),
+        chunks=chunks_text,
+    )
+    try:
+        resp = await provider.chat_with_retry(
+            messages=[{"role": "user", "content": prompt}],
+            model=model,
+            max_tokens=200,
+        )
+        content = (resp.content or "").strip()
+        return content if content else None
+    except Exception:
+        return None
 
 
 async def consolidate_entries(

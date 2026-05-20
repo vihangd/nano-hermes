@@ -102,6 +102,10 @@ class TestFindHubClusters:
         hub = result[0]
         assert len(hub["sessions"]) >= 2
         assert len(hub["samples"]) >= 1
+        assert "chunk_ids" in hub
+        assert isinstance(hub["chunk_ids"], list)
+        assert len(hub["chunk_ids"]) >= 2
+        assert hub["chunk_ids"] == sorted(hub["chunk_ids"])
 
     async def test_distinct_content_no_hub(self, tmp_path):
         from nano_hermes.memory.consolidation import find_hub_clusters
@@ -186,8 +190,9 @@ class TestMemoryDistillTool:
         assert "ok" in result.lower()
 
     async def test_distill_returns_hub_report(self, tmp_path):
+        # distill_llm_enabled=False: surface-only mode; no LLM call needed.
         loop = _make_loop(tmp_path)
-        hook = nano_hermes.install(loop)
+        hook = nano_hermes.install(loop, config={"memory": {"distill_llm_enabled": False}})
         db = hook.db
 
         for i in range(2):

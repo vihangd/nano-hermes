@@ -123,7 +123,9 @@ class MemoryPatchTool(Tool):
             return f"Error: {e}"
 
     async def _distill(self) -> str:
-        from .consolidation import find_hub_clusters  # noqa: PLC0415
+        import json as _json  # noqa: PLC0415
+        import time as _time  # noqa: PLC0415
+        from .consolidation import distill_hub_to_fact, find_hub_clusters  # noqa: PLC0415
 
         cfg = self._hook.config.memory
         try:
@@ -134,7 +136,7 @@ class MemoryPatchTool(Tool):
                 cluster_threshold=cfg.distill_cluster_threshold,
             )
         except Exception as e:
-            return f"Error: embedding failed during distillation — {e}"
+            return f"Error: clustering failed — {e}"
 
         if not hubs:
             return (
@@ -142,17 +144,53 @@ class MemoryPatchTool(Tool):
                 "(need ≥2 successful sessions with thematically overlapping content)"
             )
 
-        lines = [f"Found {len(hubs)} hub cluster(s) from episodic memory:\n"]
-        for i, hub in enumerate(hubs, 1):
-            n_sess = len(hub["sessions"])
-            lines.append(f"Hub {i} — spans {n_sess} session(s):")
-            for j, sample in enumerate(hub["samples"], 1):
-                snippet = sample.replace("\n", " ")[:200]
-                lines.append(f"  [{j}] {snippet}")
-            lines.append("")
+        if not cfg.distill_llm_enabled:
+            lines = [f"Found {len(hubs)} hub cluster(s) from episodic memory:\n"]
+            for i, hub in enumerate(hubs, 1):
+                n_sess = len(hub["sessions"])
+                ids_preview = hub["chunk_ids"][:5]
+                lines.append(
+                    f"Hub {i} — spans {n_sess} session(s), "
+                    f"chunk_ids (first 5): {ids_preview}:"
+                )
+                for j, sample in enumerate(hub["samples"], 1):
+                    snippet = sample.replace("\n", " ")[:200]
+                    lines.append(f"  [{j}] {snippet}")
+                lines.append("")
+            lines.append(
+                "Review these hubs and distill durable facts with:\n"
+                '  memory_patch(action="add", slot="memory", content="<fact>")'
+            )
+            return "\n".join(lines)
 
+        distilled: list[tuple[str, list[int]]] = []
+        for hub in hubs:
+            fact = await distill_hub_to_fact(self._hook, hub)
+            if fact is None:
+                continue
+            chunk_ids = hub["chunk_ids"]
+            self._hook.db.execute(
+                "INSERT INTO semantic_facts (content, source_chunk_ids, created_at) "
+                "VALUES (?, ?, ?)",
+                (fact, _json.dumps(chunk_ids), _time.time()),
+            )
+            self._hook.db.commit()
+            distilled.append((fact, chunk_ids))
+
+        if not distilled:
+            return (
+                "ok: distillation found hubs but produced no usable facts "
+                "(LLM call failed or returned empty for all hubs)"
+            )
+
+        lines = [f"Distilled {len(distilled)} semantic fact(s) from {len(hubs)} hub(s):\n"]
+        for i, (fact, chunk_ids) in enumerate(distilled, 1):
+            ids_preview = chunk_ids[:5]
+            lines.append(f"Fact {i} [chunk_ids: {ids_preview}]:")
+            lines.append(f"  {fact}")
+            lines.append("")
         lines.append(
-            "Review these hubs and distill durable facts with:\n"
+            "Facts saved to semantic_facts table. Promote to long-term memory with:\n"
             '  memory_patch(action="add", slot="memory", content="<fact>")'
         )
         return "\n".join(lines)

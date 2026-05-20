@@ -156,6 +156,16 @@ CREATE TABLE IF NOT EXISTS reflection_coactivations (
     PRIMARY KEY (reflection_a_id, reflection_b_id)
 );
 CREATE INDEX IF NOT EXISTS idx_reflection_coact_a ON reflection_coactivations(reflection_a_id, coactivation_count DESC);
+
+-- Phase 4.3: Episodic→semantic distillation output.
+-- LLM-distilled facts from hub clusters; source_chunk_ids is a JSON array
+-- of chunk_id ints for poisoning traceability.
+CREATE TABLE IF NOT EXISTS semantic_facts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    content          TEXT NOT NULL,
+    source_chunk_ids TEXT NOT NULL,
+    created_at       REAL NOT NULL
+);
 """
 
 # vec0 takes dims as a literal at CREATE time, so it has to be formatted
@@ -187,6 +197,15 @@ _MIGRATIONS = [
     # Phase 5: MemRL utility scores on reflections and trajectories.
     "ALTER TABLE reflections ADD COLUMN utility REAL NOT NULL DEFAULT 0.5",
     "ALTER TABLE trajectories ADD COLUMN utility REAL NOT NULL DEFAULT 0.5",
+    # Phase 4.3: Episodic→semantic distillation output table.
+    # CREATE IF NOT EXISTS is a no-op on fresh DBs (already in _SCHEMA);
+    # on existing DBs without the table it creates it.
+    """CREATE TABLE IF NOT EXISTS semantic_facts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    content          TEXT NOT NULL,
+    source_chunk_ids TEXT NOT NULL,
+    created_at       REAL NOT NULL
+)""",
 ]
 
 
