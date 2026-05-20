@@ -188,7 +188,7 @@ class SkillIndexer:
                 # they must pass skill_rate to promote.
                 # ON CONFLICT preserves the existing status — only set it on INSERT.
                 status = "active" if source in ("builtin", "external") else "draft"
-                self._db.execute(
+                cur = self._db.execute(
                     "INSERT INTO skill_stats (name, status, content_hash, indexed_at) "
                     "VALUES (?, ?, ?, ?) "
                     "ON CONFLICT(name) DO UPDATE SET "
@@ -196,9 +196,7 @@ class SkillIndexer:
                     "indexed_at = excluded.indexed_at",
                     (name, status, digest, now),
                 )
-                skill_id = self._db.execute(
-                    "SELECT id FROM skill_stats WHERE name = ?", (name,)
-                ).fetchone()[0]
+                skill_id = cur.lastrowid
                 # vec0 doesn't support ON CONFLICT — delete then insert.
                 self._db.execute(
                     "DELETE FROM skill_vec WHERE skill_id = ?", (skill_id,)

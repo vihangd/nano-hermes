@@ -111,6 +111,10 @@ class NanoHermesHook(AgentHook):
         # so asyncio doesn't GC them before they complete.
         self._reflection_embed_tasks: set[asyncio.Task] = set()
 
+        # Cache for last_user_text: (id(messages), len(messages), result).
+        # Avoids a full reverse scan every after_iteration when nothing changed.
+        self._last_user_text_cache: tuple[int, int, str | None] = (0, 0, None)
+
     # ------------------------------------------------------------------
     # Public API surface (unchanged for external callers)
     # ------------------------------------------------------------------
@@ -348,9 +352,13 @@ class NanoHermesHook(AgentHook):
 
         # Score error and correction salience (tool-burst already accumulated
         # in before_execute_tools via record_tool_burst).
+        msgs = context.messages
+        cache_key = (id(msgs), len(msgs))
+        if (self._last_user_text_cache[0], self._last_user_text_cache[1]) != cache_key:
+            self._last_user_text_cache = (*cache_key, last_user_text(msgs))
         self._reflection_coord.score_iteration(
             had_error=context.error is not None,
-            user_text=last_user_text(context.messages),
+            user_text=self._last_user_text_cache[2],
         )
 
         log.debug(
