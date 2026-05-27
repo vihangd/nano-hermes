@@ -106,6 +106,9 @@ class MemoryPatchTool(Tool):
                 result = mem.add(slot, content)  # type: ignore[arg-type]
                 if result == "duplicate":
                     return f"ok: entry already exists in {slot} (not re-added)"
+                # Reset the cadence counter so the nudge doesn't fire
+                # immediately after the agent already saved.
+                self._hook._reflection_coord.note_memory_save()
                 return f"ok: added {len(content.strip())} chars to {slot}{redaction_note}"
             if action == "replace":
                 if needle is None or replacement is None:

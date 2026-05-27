@@ -82,6 +82,14 @@ CREATE TABLE IF NOT EXISTS skill_stats (
     indexed_at      REAL                               -- last time we embedded this skill
 );
 
+-- Small key/value store for one-off metadata that doesn't justify its
+-- own table (curator cooldown, etc). Values are stored as TEXT — callers
+-- coerce as needed.
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS trajectories (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id      INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
@@ -262,6 +270,11 @@ _MIGRATIONS = [
     # Smoothed win-rate (cite_count + 1) / (view_count + 2) feeds retrieval.
     "ALTER TABLE reflections ADD COLUMN view_count INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE reflections ADD COLUMN cite_count INTEGER NOT NULL DEFAULT 0",
+    # Phase 8: small KV metadata table (curator cooldown, etc).
+    """CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+)""",
 ]
 
 

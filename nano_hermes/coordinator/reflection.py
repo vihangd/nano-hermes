@@ -63,6 +63,11 @@ class ReflectionCoordinator:
         # iteration. Reset at iteration boundary. record_iteration_citations
         # uses it to bump view_count / cite_count against the next response.
         self._injected_this_iteration: list[tuple[int, str]] = []
+        # Memory-save nudge cadence counter. Incremented per user turn,
+        # reset when the cadence nudge fires or memory_patch(action=add)
+        # is invoked.
+        self._user_turns_since_save: int = 0
+        self._save_nudge_pending: bool = False
 
     # ------------------------------------------------------------------
     # Salience
@@ -181,6 +186,66 @@ class ReflectionCoordinator:
         self._last_injected_reflection_id.pop(completed_session_id, None)
         self._last_injected_global_reflection_id = 0
         self._injected_reflection_ids.clear()
+
+    # ------------------------------------------------------------------
+    # Memory-save nudge cadence
+    # ------------------------------------------------------------------
+
+    def note_user_turn(self) -> None:
+        """Increment the user-turn counter; arm the nudge at the cadence.
+
+        Called once per iteration that includes a fresh user turn. The
+        nudge fires by being marked pending — `take_save_nudge` delivers
+        it on the next iteration boundary.
+        """
+        interval = getattr(self._config.reflection, "memory_save_nudge_interval", 0)
+        if interval <= 0:
+            return
+        self._user_turns_since_save += 1
+        if self._user_turns_since_save >= interval:
+            self._save_nudge_pending = True
+            self._user_turns_since_save = 0
+
+    def note_memory_save(self) -> None:
+        """Reset the counter after the agent saves to memory.
+
+        Prevents the cadence prompt from firing immediately after the
+        agent already wrote something — call from memory_patch on add.
+        """
+        self._user_turns_since_save = 0
+        self._save_nudge_pending = False
+
+    def take_save_nudge(self) -> dict | None:
+        """Return the memory-save nudge message and clear the flag, or None."""
+        if not self._save_nudge_pending:
+            return None
+        self._save_nudge_pending = False
+        return {
+            "role": "system",
+            "content": (
+                "## Memory check-in\n"
+                "Several user turns have passed since you last updated memory. "
+                "Anything worth saving with memory_patch — a preference, decision, "
+                "or a fact that should outlast this session? "
+                "Skip if nothing genuinely durable came up."
+            ),
+        }
+
+    def hydrate_save_counter_from_history(
+        self, *, recent_user_turns: int
+    ) -> None:
+        """Restore the counter from observed history on session resume.
+
+        Hermes-style invariant: counters survive restarts. Clamps to
+        interval-1 so a long-resumed conversation can't fire the cadence
+        nudge on its very first turn — the agent gets at least one
+        normal turn to settle before the nudge surfaces.
+        """
+        interval = getattr(self._config.reflection, "memory_save_nudge_interval", 0)
+        if interval <= 0:
+            return
+        self._user_turns_since_save = min(max(0, recent_user_turns), interval - 1)
+        self._save_nudge_pending = False
 
     def reset_iteration_citations(self) -> None:
         """Drop any per-iteration retrieval log without recording it.

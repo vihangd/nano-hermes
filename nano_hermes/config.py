@@ -89,6 +89,10 @@ class ReflectionConfig(BaseModel):
     # reflection injection. Prevents injecting unrelated reflections when
     # reflection_scope = "global".
     global_inject_min_similarity: float = 0.60
+    # Memory-save nudge: every N user turns, deliver a system prompt asking
+    # the agent whether anything is worth saving via memory_patch. Cadence
+    # complement to the reactive salience-threshold nudge. 0 = disabled.
+    memory_save_nudge_interval: int = 8
 
 
 class SkillStatsConfig(BaseModel):
@@ -156,6 +160,17 @@ class SkillStatsConfig(BaseModel):
     rewrite_replay_gate_enabled: bool = True
     rewrite_replay_min_pass_rate: float = 0.6
     rewrite_replay_max_trajectories: int = 3
+    # Curator (Phase 8): periodic stale-skill maintenance.
+    # On a new session's iteration 0, deprecate active skills that have been
+    # unused for *curator_stale_after_days* (no last_used_at update in N days)
+    # provided they've already been exercised at least *curator_min_uses*
+    # times — never touches untested skills. Cooldown prevents firing more
+    # than once per *curator_cooldown_hours*.
+    # Set curator_enabled=False or curator_stale_after_days=0 to disable.
+    curator_enabled: bool = True
+    curator_stale_after_days: int = 30
+    curator_min_uses: int = 3
+    curator_cooldown_hours: int = 24
     # MIND-Skill reconstruction check: before draft→active promotion, ask an LLM
     # to verify the skill body actually implements what the description claims.
     # Fails open on LLM error (promotion allowed). Default ON.

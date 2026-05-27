@@ -114,6 +114,10 @@ class NanoHermesHook(AgentHook):
         # Cache for last_user_text: (id(messages), len(messages), result).
         # Avoids a full reverse scan every after_iteration when nothing changed.
         self._last_user_text_cache: tuple[int, int, str | None] = (0, 0, None)
+        # Count of user-role messages seen — drives the save-nudge cadence by
+        # detecting new turns via list growth (text equality misses repeated
+        # identical prompts like "go", "again").
+        self._last_user_msg_count: int = 0
 
     # ------------------------------------------------------------------
     # Public API surface (unchanged for external callers)
@@ -287,6 +291,7 @@ class NanoHermesHook(AgentHook):
         # Schedule retention purge as a non-blocking background task on first iteration.
         if context.iteration == 0:
             self._purge_task = asyncio.create_task(self._background_purge())
+            self._curator_task = asyncio.create_task(self._background_curator())
 
         # Keep current_session_id in sync with archiver (lazy-bootstrap on first call).
         self._sync_session(context.messages)
@@ -295,6 +300,16 @@ class NanoHermesHook(AgentHook):
         if context.iteration == 0:
             for msg in self._reflection_coord.get_principle_injections(context.messages):
                 self._inject(context.messages, msg)
+            # Memory-save nudge hydration: count prior user turns in the
+            # resumed conversation so the cadence picks up where it left
+            # off rather than firing instantly on restart.
+            recent_user_turns = sum(
+                1 for m in context.messages if m.get("role") == "user"
+            )
+            self._last_user_msg_count = recent_user_turns
+            self._reflection_coord.hydrate_save_counter_from_history(
+                recent_user_turns=recent_user_turns,
+            )
 
         # Inject a matching past trajectory on iteration 0 (opt-in via config).
         if context.iteration == 0 and self.config.trajectory.inject_context:
@@ -325,6 +340,11 @@ class NanoHermesHook(AgentHook):
         nudge = self._reflection_coord.take_nudge()
         if nudge:
             self._inject(context.messages, nudge)
+
+        # Deliver memory-save cadence nudge if armed last iteration.
+        save_nudge = self._reflection_coord.take_save_nudge()
+        if save_nudge:
+            self._inject(context.messages, save_nudge)
 
         # Deliver queued skill-quality reflection suggestions.
         skill_suggestions = self._reflection_coord.take_skill_suggestions()
@@ -367,10 +387,21 @@ class NanoHermesHook(AgentHook):
         cache_key = (id(msgs), len(msgs))
         if (self._last_user_text_cache[0], self._last_user_text_cache[1]) != cache_key:
             self._last_user_text_cache = (*cache_key, last_user_text(msgs))
+        current_user_text = self._last_user_text_cache[2]
         self._reflection_coord.score_iteration(
             had_error=context.error is not None,
-            user_text=self._last_user_text_cache[2],
+            user_text=current_user_text,
         )
+
+        # Memory-save cadence: count fresh user turns by user-message count
+        # growth, not text equality — two identical "go" messages should
+        # advance the counter by two, not one.
+        user_msg_count = sum(1 for m in msgs if m.get("role") == "user")
+        new_user_turns = user_msg_count - self._last_user_msg_count
+        if new_user_turns > 0:
+            for _ in range(new_user_turns):
+                self._reflection_coord.note_user_turn()
+            self._last_user_msg_count = user_msg_count
 
         # RMM: bump view/cite counters for reflections injected this iteration
         # against the assistant response text.
@@ -420,6 +451,22 @@ class NanoHermesHook(AgentHook):
                 log.info("evolution cycle: rewriter updated %d skill(s): %s", len(rewritten), rewritten)
         except Exception:
             log.exception("evolution cycle: rewriter failed")
+
+    async def _background_curator(self) -> None:
+        """Run the curator on the main loop after a short delay.
+
+        sqlite3 connections aren't thread-safe by default so we stay on
+        the event loop; the curator is pure SQL (one SELECT, a few
+        UPDATEs) and takes sub-millisecond time even on Pi 3B+.
+        """
+        await asyncio.sleep(3)  # let iteration 0's session sync finish
+        try:
+            from .skills.curator import run_curator  # noqa: PLC0415
+            archived = run_curator(self)
+            if archived:
+                log.info("curator: archived %d stale skill(s): %s", len(archived), archived)
+        except Exception:
+            log.exception("nano-hermes curator failed")
 
     async def _background_purge(self) -> None:
         """Run retention purge off the event loop via a short-lived DB connection."""
