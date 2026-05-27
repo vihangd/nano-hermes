@@ -91,6 +91,11 @@ class NanoHermesHook(AgentHook):
             db=self.db,
             trajectory_writer=self.trajectory_writer,
         )
+        # Tracks nanobot /goal transitions; emits "started" / "completed"
+        # events from observable runtime-context markers (no SessionManager
+        # internals — survives nanobot version drift).
+        from .coordinator.goal import GoalTracker  # noqa: PLC0415
+        self._goal_tracker = GoalTracker()
 
         # Per-iteration tool call counter (accumulated across before_execute_tools).
         self._tool_calls = 0
@@ -346,6 +351,11 @@ class NanoHermesHook(AgentHook):
         if save_nudge:
             self._inject(context.messages, save_nudge)
 
+        # Deliver goal-completion nudge if a /goal wrapped up last iteration.
+        goal_nudge = self._reflection_coord.take_goal_completion()
+        if goal_nudge:
+            self._inject(context.messages, goal_nudge)
+
         # Deliver queued skill-quality reflection suggestions.
         skill_suggestions = self._reflection_coord.take_skill_suggestions()
         if skill_suggestions:
@@ -407,6 +417,21 @@ class NanoHermesHook(AgentHook):
         # against the assistant response text.
         response_text = context.final_content or ""
         self._reflection_coord.record_iteration_citations(response_text)
+
+        # /goal transitions: when a sustained goal completes, the runtime
+        # context drops the "Goal (active):" marker. Promote that into a
+        # reflection nudge so the agent distils what was learned while
+        # the objective is still fresh in the conversation.
+        transition = self._goal_tracker.update(context.messages)
+        if transition == "completed":
+            objective = self._goal_tracker.last_objective or "(objective text unavailable)"
+            log.info("nano-hermes: /goal completed — queuing goal-completion nudge")
+            # Push enough salience to arm the Reflexion nudge on the next
+            # iteration's score_iteration call even on an otherwise quiet turn.
+            self._reflection_coord.add_salience(
+                self.config.reflection.threshold + 1.0
+            )
+            self._reflection_coord.queue_goal_completion(objective)
 
         log.debug(
             "after_iteration: iter=%d tool_calls=%d session=%s",

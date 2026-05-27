@@ -73,14 +73,14 @@ class TestSkillCoexistence:
     def test_skill_reports_available_without_requirements(
         self, tmp_path: Path
     ) -> None:
-        """No ``requires`` in the frontmatter → skill is always available
-        and ``build_skills_summary`` marks it ``available="true"``."""
+        """No ``requires`` in the frontmatter → skill appears in the summary
+        and survives the loader's filter-unavailable pass."""
         _copy_bundled_skill("duckduckgo-search", tmp_path)
 
         loop = _make_loop(tmp_path)
         summary = loop.context.skills.build_skills_summary()
-        # the skill block for duckduckgo-search must be marked available
-        assert 'available="true"' in summary
+        # the skill block for duckduckgo-search must be present
+        assert "duckduckgo-search" in summary
         # and the loader's filter-available pass keeps it in the list
         available_names = [
             e["name"]

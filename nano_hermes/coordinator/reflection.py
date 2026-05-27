@@ -68,6 +68,10 @@ class ReflectionCoordinator:
         # is invoked.
         self._user_turns_since_save: int = 0
         self._save_nudge_pending: bool = False
+        # Goal-completion drop-target. Populated when /goal transitions
+        # active → completed; delivered as a system message on the next
+        # iteration via take_goal_completion.
+        self._goal_completion_objective: str | None = None
 
     # ------------------------------------------------------------------
     # Salience
@@ -121,6 +125,33 @@ class ReflectionCoordinator:
     def queue_skill_suggestions(self, suggestions: list[str]) -> None:
         """Queue skill-quality reflection suggestions for next injection."""
         self._skill_suggestions.extend(suggestions)
+
+    def queue_goal_completion(self, objective: str) -> None:
+        """Stash the just-completed goal so the next iteration can prompt
+        a memory write while the context is still fresh.
+
+        Has its own delivery channel rather than reusing skill_suggestions
+        so the next-iteration system message can frame it as a goal
+        boundary, not a degraded skill.
+        """
+        self._goal_completion_objective = objective
+
+    def take_goal_completion(self) -> dict | None:
+        """Return a goal-completion nudge message and clear it, or None."""
+        objective = getattr(self, "_goal_completion_objective", None)
+        if not objective:
+            return None
+        self._goal_completion_objective = None
+        return {
+            "role": "system",
+            "content": (
+                "## Goal completed\n"
+                f"The sustained goal just wrapped up: \"{objective}\"\n"
+                "If anything durable came out of it — a working approach, a "
+                "pitfall to remember, a user preference — save it now with "
+                "memory_patch or reflect() while it's still in context."
+            ),
+        }
 
     def take_skill_suggestions(self) -> dict | None:
         """Return queued skill suggestions as a system message, or None."""
