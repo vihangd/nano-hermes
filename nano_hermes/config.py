@@ -145,6 +145,17 @@ class SkillStatsConfig(BaseModel):
     # before it is committed (covers-use-case, avoids-cited-failure, not-overfit).
     # Default ON — adds one LLM call per rewrite candidate but prevents regressions.
     rewrite_critic_enabled: bool = True
+    # AgentPRM-lite (arXiv 2511.08325): localize the failing step with one
+    # LLM judge call before rewriting; the resulting one-liner is spliced
+    # into the rewrite prompt. Default ON — one extra cheap call per rewrite.
+    rewrite_step_localization_enabled: bool = True
+    # ASG-SI replay gate (arXiv 2512.23760): after the critic approves, replay
+    # the last N failing trajectories against the new body via an LLM judge.
+    # Default ON. min_pass_rate is the fraction of replays that must judge
+    # IMPROVED (any single WORSE verdict vetoes regardless of rate).
+    rewrite_replay_gate_enabled: bool = True
+    rewrite_replay_min_pass_rate: float = 0.6
+    rewrite_replay_max_trajectories: int = 3
     # MIND-Skill reconstruction check: before draft→active promotion, ask an LLM
     # to verify the skill body actually implements what the description claims.
     # Fails open on LLM error (promotion allowed). Default ON.

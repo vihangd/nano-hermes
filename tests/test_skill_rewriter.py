@@ -224,7 +224,16 @@ class TestRunCritic:
 
     async def test_critic_disabled_in_rewrite_when_flag_off(self, tmp_path):
         loop = _make_loop(tmp_path)
-        hook = nano_hermes.install(loop, config={"skill_stats": {"rewrite_critic_enabled": False}})
+        # Disable critic, step localization, and replay gate to verify the
+        # base rewrite path takes exactly one LLM call.
+        hook = nano_hermes.install(
+            loop,
+            config={"skill_stats": {
+                "rewrite_critic_enabled": False,
+                "rewrite_step_localization_enabled": False,
+                "rewrite_replay_gate_enabled": False,
+            }},
+        )
 
         skill_name = "no-critic-skill"
         old_body = f"# {skill_name}\n## Steps\n1. Old"

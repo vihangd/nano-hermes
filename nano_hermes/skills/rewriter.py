@@ -41,7 +41,7 @@ CONTEXT FROM FAILED SESSIONS (most recent first):
 ---
 {failure_context}
 ---
-
+{localized_critique_block}
 Task: analyse why this skill fails on these tasks, then produce a
 rewritten SKILL.md that fixes the issues.  Keep the same markdown
 structure (# name, description block, ## Usage, ## Steps sections).
@@ -237,10 +237,33 @@ async def rewrite_skill(
         return None
 
     context_text = "\n---\n".join(failure_contexts)
+
+    # AgentPRM-lite: localize the failing step before rewriting so the
+    # rewrite prompt knows what to target. Fail-soft — empty critique
+    # falls back to the legacy "no localization" flow.
+    localized_critique_block = ""
+    if cfg.rewrite_step_localization_enabled:
+        from .step_localize import localize_failure_step  # noqa: PLC0415
+        critique = await localize_failure_step(
+            hook,
+            skill_name=candidate.skill_name,
+            current_body=current_body,
+            failure_context=context_text,
+        )
+        if critique:
+            log.info(
+                "rewriter: %s — localized defect: %s",
+                candidate.skill_name, critique,
+            )
+            localized_critique_block = (
+                f"\nLOCALIZED DEFECT (from prior step-judge pass):\n{critique}\n"
+            )
+
     prompt = _JUDGE_PROMPT.format(
         skill_name=candidate.skill_name,
         current_body=current_body,
         failure_context=context_text,
+        localized_critique_block=localized_critique_block,
     )
 
     try:
@@ -275,6 +298,22 @@ async def rewrite_skill(
         )
         if not approved:
             log.info("rewriter: critic blocked rewrite of %s", candidate.skill_name)
+            return None
+
+    # ASG-SI replay gate — counterfactually replay failing trajectories
+    # against the candidate body. Blocks promotion on any WORSE verdict.
+    if cfg.rewrite_replay_gate_enabled:
+        from .replay_gate import replay_passes_gate  # noqa: PLC0415
+        passed = await replay_passes_gate(
+            hook,
+            skill_name=candidate.skill_name,
+            original_body=current_body,
+            new_body=new_body,
+            min_pass_rate=cfg.rewrite_replay_min_pass_rate,
+            max_trajectories=cfg.rewrite_replay_max_trajectories,
+        )
+        if not passed:
+            log.info("rewriter: replay gate blocked rewrite of %s", candidate.skill_name)
             return None
 
     # Preserve the old version before overwriting.
