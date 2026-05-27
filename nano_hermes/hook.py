@@ -417,6 +417,9 @@ class NanoHermesHook(AgentHook):
 
     async def _background_purge(self) -> None:
         """Run retention purge off the event loop via a short-lived DB connection."""
+        # Defer briefly so iteration 0's session sync finishes before the
+        # follow-up VACUUM (when needed) takes its short exclusive lock.
+        await asyncio.sleep(2)
         db_path = state_db(self.workspace)
         days = self.config.trajectory_retention_days
 
@@ -430,7 +433,17 @@ class NanoHermesHook(AgentHook):
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
             try:
-                purge_older_than(conn, days)
+                result = purge_older_than(conn, days)
+                # Reclaim space when rows were actually removed. FTS5 and vec0
+                # shadow tables don't return pages without an explicit VACUUM.
+                if result["sessions"] or result["trajectories"]:
+                    conn.isolation_level = None  # VACUUM cannot run in a transaction
+                    conn.execute("VACUUM")
+                    log.info(
+                        "nano-hermes purge: %d sessions, %d trajectories — VACUUMed",
+                        result["sessions"],
+                        result["trajectories"],
+                    )
             finally:
                 conn.close()
 
