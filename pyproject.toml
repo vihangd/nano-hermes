@@ -18,7 +18,10 @@ dev = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
   "ruff>=0.4",
-  "nanobot-ai",
+  # 0.2.0 ships nanobot.session.goal_state and a larger built-in skill
+  # catalog (long-goal, weather, tmux, github, summarize, etc.) that
+  # nano-hermes' coordinator/goal.py keys on. See README for upgrade notes.
+  "nanobot-ai>=0.2.0",
 ]
 
 # Wrapper CLI. Delegates to nanobot's Typer app after monkey-patching

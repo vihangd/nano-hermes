@@ -108,7 +108,7 @@ class TestSkillSearch:
 
         tool = loop.tools.get("skill_search")
         assert tool is not None
-        out = await tool.execute(query="I want to search the web")
+        out = await tool.execute(query="I want to search via duckduckgo")
         assert "duckduckgo-search" in out
         assert "DuckDuckGo" in out  # description surfaces alongside the name
 
@@ -134,7 +134,7 @@ class TestSkillSearch:
         nano_hermes.install(loop)
 
         tool = loop.tools.get("skill_search")
-        out = await tool.execute(query="I want to search the web")
+        out = await tool.execute(query="I want to search via duckduckgo")
         lines = out.splitlines()
         assert "duckduckgo-search" in lines[0], (
             f"expected duckduckgo-search first, got:\n{out}"
@@ -389,12 +389,12 @@ class TestSkillSearchIntegration:
         _patch_embedding(monkeypatch)
         hook = nano_hermes.install(loop)
 
-        messages: list[dict] = [{"role": "user", "content": "search the web"}]
+        messages: list[dict] = [{"role": "user", "content": "duckduckgo search"}]
         await hook.before_iteration(AgentHookContext(iteration=0, messages=messages))
 
         # skill_search populates _candidate_skills for trajectory
         skill_tool = loop.tools.get("skill_search")
-        await skill_tool.execute(query="I want to search the web")
+        await skill_tool.execute(query="I want to search via duckduckgo")
         assert "duckduckgo-search" in hook._candidate_skills
 
         # skill_search alone does NOT write stats — agent calls skill_rate
@@ -625,16 +625,16 @@ class TestStatWeightedSkillSearch:
         Both skills get the same embedding (identical fake vec), so the
         stat-weighted tiebreaker is the only differentiator.
         """
-        # Same "search the web" keyword → both get _FAKE_VEC_SEARCH → equal distance
+        # Same "duckduckgo" keyword → both get _FAKE_VEC_SEARCH → equal distance
         skill_a_dir = tmp_path / "skills" / "skill-alpha"
         skill_a_dir.mkdir(parents=True)
         (skill_a_dir / "SKILL.md").write_text(
-            "---\nname: skill-alpha\ndescription: search the web results\n---\nBody.\n"
+            "---\nname: skill-alpha\ndescription: duckduckgo results\n---\nBody.\n"
         )
         skill_b_dir = tmp_path / "skills" / "skill-beta"
         skill_b_dir.mkdir(parents=True)
         (skill_b_dir / "SKILL.md").write_text(
-            "---\nname: skill-beta\ndescription: search the web news\n---\nBody.\n"
+            "---\nname: skill-beta\ndescription: duckduckgo news\n---\nBody.\n"
         )
         _patch_embedding(monkeypatch)
         hook = nano_hermes.install(
@@ -661,7 +661,7 @@ class TestStatWeightedSkillSearch:
         )
         hook.db.commit()
 
-        hits = await hook.skill_indexer.search("search the web", k=2)
+        hits = await hook.skill_indexer.search("duckduckgo query", k=2)
         names = [h.name for h in hits]
         # skill-alpha should rank first: same distance but boosted by success rate
         assert names[0] == "skill-alpha", f"expected skill-alpha first, got {names}"
@@ -675,12 +675,12 @@ class TestStatWeightedSkillSearch:
         skill_a_dir = tmp_path / "skills" / "skill-alpha"
         skill_a_dir.mkdir(parents=True)
         (skill_a_dir / "SKILL.md").write_text(
-            "---\nname: skill-alpha\ndescription: search the web results\n---\nBody.\n"
+            "---\nname: skill-alpha\ndescription: duckduckgo results\n---\nBody.\n"
         )
         skill_b_dir = tmp_path / "skills" / "skill-beta"
         skill_b_dir.mkdir(parents=True)
         (skill_b_dir / "SKILL.md").write_text(
-            "---\nname: skill-beta\ndescription: search the web news\n---\nBody.\n"
+            "---\nname: skill-beta\ndescription: duckduckgo news\n---\nBody.\n"
         )
         _patch_embedding(monkeypatch)
         hook = nano_hermes.install(
@@ -689,9 +689,9 @@ class TestStatWeightedSkillSearch:
         )
         await hook.skill_indexer.refresh()
 
-        # Both skills get same fake vector (both match "search the web") —
+        # Both skills get same fake vector (both match "duckduckgo") —
         # just verify no crash and k results returned
-        hits = await hook.skill_indexer.search("search the web", k=2)
+        hits = await hook.skill_indexer.search("duckduckgo query", k=2)
         assert len(hits) == 2
 
 
@@ -959,7 +959,7 @@ class TestSkillPromotion:
             skill_dir = tmp_path / "skills" / skill_name
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
-                f"---\nname: {skill_name}\ndescription: search the web\n---\nBody.\n"
+                f"---\nname: {skill_name}\ndescription: duckduckgo\n---\nBody.\n"
             )
 
         # Index both
@@ -971,7 +971,7 @@ class TestSkillPromotion:
         )
         hook.db.commit()
 
-        hits = await hook.skill_indexer.search("search the web", k=5)
+        hits = await hook.skill_indexer.search("duckduckgo", k=5)
         names = [h.name for h in hits]
         assert "bad-skill" not in names, f"deprecated skill appeared in results: {names}"
         assert "good-skill" in names

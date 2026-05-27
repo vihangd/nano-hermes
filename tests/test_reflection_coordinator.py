@@ -313,7 +313,7 @@ class TestMMRTrajectoryInjection:
         _patch_embedding(monkeypatch)
 
         result = await coord.get_trajectory_injection(
-            [{"role": "user", "content": "search the web for news"}]
+            [{"role": "user", "content": "duckduckgo search for news"}]
         )
         assert result is None
 
@@ -322,8 +322,8 @@ class TestMMRTrajectoryInjection:
         import numpy as np
         _patch_embedding(monkeypatch)
 
-        tid = self._seed_trajectory(hook, "search the web for python docs", outcome="ok")
-        # Write an embedding that will match "search the web" queries
+        tid = self._seed_trajectory(hook, "duckduckgo search for python docs", outcome="ok")
+        # Write an embedding that will match "duckduckgo search" queries
         vec = np.zeros(_FAKE_DIMS, dtype=np.float32)
         vec[0] = 1.0  # same as _FAKE_VEC_SEARCH
         hook.db.execute(
@@ -333,7 +333,7 @@ class TestMMRTrajectoryInjection:
         hook.db.commit()
 
         result = await coord.get_trajectory_injection(
-            [{"role": "user", "content": "search the web for latest news"}]
+            [{"role": "user", "content": "duckduckgo search for latest news"}]
         )
         assert result is not None
         assert "Past session" in result["content"]
@@ -344,11 +344,11 @@ class TestMMRTrajectoryInjection:
         _patch_embedding(monkeypatch)
 
         # Two trajectories with similar-but-distinct tasks
-        t1 = self._seed_trajectory(hook, "search the web for news articles", outcome="ok", skills=["search"])
-        t2 = self._seed_trajectory(hook, "search the web for blog posts on AI", outcome="partial", skills=["search"])
+        t1 = self._seed_trajectory(hook, "duckduckgo search for news articles", outcome="ok", skills=["search"])
+        t2 = self._seed_trajectory(hook, "duckduckgo search for blog posts on AI", outcome="partial", skills=["search"])
 
         vec_search = np.zeros(_FAKE_DIMS, dtype=np.float32)
-        vec_search[0] = 1.0  # matches "search the web" query
+        vec_search[0] = 1.0  # matches "duckduckgo search" query
         for tid in (t1, t2):
             hook.db.execute(
                 "INSERT INTO trajectories_vec (trajectory_id, embedding) VALUES (?, ?)",
@@ -357,7 +357,7 @@ class TestMMRTrajectoryInjection:
         hook.db.commit()
 
         result = await coord.get_trajectory_injection(
-            [{"role": "user", "content": "search the web for information"}]
+            [{"role": "user", "content": "duckduckgo search for information"}]
         )
         assert result is not None
         # Both sessions should appear in the output
@@ -381,7 +381,7 @@ class TestMMRTrajectoryInjection:
 
         # Query with inject_min_similarity=0.75 (default) — orthogonal vector won't pass
         result = await coord.get_trajectory_injection(
-            [{"role": "user", "content": "search the web for news"}]
+            [{"role": "user", "content": "duckduckgo search for news"}]
         )
         # The orthogonal trajectory should not appear regardless of the query match
         # (this tests the threshold filter, not the MMR algo specifically)

@@ -109,13 +109,14 @@ _FAKE_VEC_ACADEMIC[1] = 1.0
 _FAKE_VEC_UNRELATED = np.zeros(_FAKE_DIMS, dtype=np.float32)
 _FAKE_VEC_UNRELATED[2] = 1.0
 
+# Keep only markers UNIQUE to our test skills. Earlier entries like
+# "search the web" / "web search" collide with nanobot 0.2.0's built-in
+# 'my' skill, whose description contains the phrase "search the web?" as
+# a diagnostic example. The fake embedder must distinguish test skills
+# from built-ins; substring-matching on common phrases doesn't.
 _FAKE_KEYWORDS: list[tuple[str, np.ndarray]] = [
     ("duckduckgo", _FAKE_VEC_SEARCH),
-    ("search the web", _FAKE_VEC_SEARCH),
-    ("web search", _FAKE_VEC_SEARCH),
     ("arxiv", _FAKE_VEC_ACADEMIC),
-    ("academic", _FAKE_VEC_ACADEMIC),
-    ("papers", _FAKE_VEC_ACADEMIC),
 ]
 
 

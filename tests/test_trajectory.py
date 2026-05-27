@@ -243,12 +243,12 @@ class TestTrajectorySearch:
         cur = hook.db.execute(
             "INSERT INTO trajectories (task, skills_used, outcome, reflection, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            ("search the web for news", '["duckduckgo-search"]', "ok", "worked fine", _time.time()),
+            ("duckduckgo search for news", '["duckduckgo-search"]', "ok", "worked fine", _time.time()),
         )
         traj_id = cur.lastrowid
         hook.db.commit()
 
-        # Insert its embedding (the fake embed for "search the web" keyword)
+        # Insert its embedding (the fake embed for "duckduckgo search" keyword)
         vec = _FAKE_VEC_SEARCH.astype("float32")
         hook.db.execute(
             "INSERT INTO trajectories_vec (trajectory_id, embedding) VALUES (?, ?)",
@@ -257,8 +257,8 @@ class TestTrajectorySearch:
         hook.db.commit()
 
         tool = loop.tools.get("trajectory_search")
-        out = await tool.execute(query="search the web for something")
-        assert "search the web" in out
+        out = await tool.execute(query="duckduckgo search for something")
+        assert "duckduckgo search" in out
         assert "OK" in out
         assert "duckduckgo-search" in out
 
@@ -293,7 +293,7 @@ class TestTrajectorySearch:
         _patch_embedding(monkeypatch)
         hook = nano_hermes.install(loop)
 
-        msgs_a: list[dict] = [{"role": "user", "content": "search the web for news"}]
+        msgs_a: list[dict] = [{"role": "user", "content": "duckduckgo search for news"}]
         await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs_a))
         await hook.after_iteration(AgentHookContext(iteration=0, messages=msgs_a))
 
@@ -326,7 +326,7 @@ class TestTrajectoryContextInjection:
         _patch_embedding(monkeypatch)
         hook = nano_hermes.install(loop)  # inject_context defaults to False
 
-        msgs: list[dict] = [{"role": "user", "content": "search the web"}]
+        msgs: list[dict] = [{"role": "user", "content": "duckduckgo search"}]
         before_len = len(msgs)
         await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
         # No trajectory injection should have happened
@@ -350,7 +350,7 @@ class TestTrajectoryContextInjection:
         cur = hook.db.execute(
             "INSERT INTO trajectories (task, skills_used, outcome, created_at) "
             "VALUES (?, ?, ?, ?)",
-            ("search the web for news", '["duckduckgo-search"]', "ok", _time.time()),
+            ("duckduckgo search for news", '["duckduckgo-search"]', "ok", _time.time()),
         )
         traj_id = cur.lastrowid
         hook.db.commit()
@@ -361,7 +361,7 @@ class TestTrajectoryContextInjection:
         )
         hook.db.commit()
 
-        msgs: list[dict] = [{"role": "user", "content": "search the web"}]
+        msgs: list[dict] = [{"role": "user", "content": "duckduckgo search"}]
         before_len = len(msgs)
         await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
 
@@ -398,7 +398,7 @@ class TestTrajectoryContextInjection:
         )
         hook.db.commit()
 
-        msgs: list[dict] = [{"role": "user", "content": "search the web"}]
+        msgs: list[dict] = [{"role": "user", "content": "duckduckgo search"}]
         before_len = len(msgs)
         await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
 
@@ -421,7 +421,7 @@ class TestTrajectoryContextInjection:
         cur = hook.db.execute(
             "INSERT INTO trajectories (task, skills_used, outcome, created_at) "
             "VALUES (?, ?, ?, ?)",
-            ("search the web", '[]', "ok", _time.time()),
+            ("duckduckgo search", '[]', "ok", _time.time()),
         )
         hook.db.execute(
             "INSERT INTO trajectories_vec (trajectory_id, embedding) VALUES (?, ?)",
@@ -429,7 +429,7 @@ class TestTrajectoryContextInjection:
         )
         hook.db.commit()
 
-        msgs: list[dict] = [{"role": "user", "content": "search the web"}]
+        msgs: list[dict] = [{"role": "user", "content": "duckduckgo search"}]
         await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
         msgs.append({"role": "assistant", "content": "ok"})
 
