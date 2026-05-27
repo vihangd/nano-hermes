@@ -59,6 +59,10 @@ class ReflectionCoordinator:
         # Populated by get_session_injections / get_global_injections.
         # Back-propagated at session boundary via back_propagate_utility().
         self._injected_reflection_ids: set[int] = set()
+        # RMM: list of (reflection_id, content) injected during the CURRENT
+        # iteration. Reset at iteration boundary. record_iteration_citations
+        # uses it to bump view_count / cite_count against the next response.
+        self._injected_this_iteration: list[tuple[int, str]] = []
 
     # ------------------------------------------------------------------
     # Salience
@@ -153,8 +157,9 @@ class ReflectionCoordinator:
             return []
         rows = [(int(r[0]), r[1]) for r in rows]
         self._last_injected_reflection_id[session_id] = max(r[0] for r in rows)
-        for rid, _ in rows:
+        for rid, content in rows:
             self._injected_reflection_ids.add(rid)
+            self._injected_this_iteration.append((rid, content))
         contents = [r[1] for r in rows]
         return [
             {
@@ -176,6 +181,60 @@ class ReflectionCoordinator:
         self._last_injected_reflection_id.pop(completed_session_id, None)
         self._last_injected_global_reflection_id = 0
         self._injected_reflection_ids.clear()
+
+    def reset_iteration_citations(self) -> None:
+        """Drop any per-iteration retrieval log without recording it.
+
+        Hook calls this at iteration start so a previous iteration that
+        crashed before record_iteration_citations ran doesn't bleed its
+        injections into the next iteration's counters.
+        """
+        self._injected_this_iteration = []
+
+    def record_iteration_citations(self, response_text: str) -> None:
+        """RMM: bump view_count for each reflection injected this iteration,
+        and cite_count for those whose content shows token overlap with the
+        next assistant response. Clears the per-iteration list so subsequent
+        iterations only count their own injections.
+
+        Best-effort: any DB or import failure is logged at debug and silently
+        swallowed; never raises out of the hook.
+        """
+        if not self._injected_this_iteration:
+            return
+        injected = self._injected_this_iteration
+        self._injected_this_iteration = []
+        try:
+            from .citation import is_cited  # noqa: PLC0415
+
+            cited_ids = {
+                rid for rid, content in injected
+                if is_cited(content, response_text or "")
+            }
+            view_ids = [rid for rid, _ in injected]
+            view_placeholders = ",".join("?" * len(view_ids))
+            # Wrap both UPDATEs in a single transaction so a mid-method
+            # failure doesn't leave view_count bumped without cite_count.
+            with self._db:
+                self._db.execute(
+                    f"UPDATE reflections SET view_count = view_count + 1 "
+                    f"WHERE id IN ({view_placeholders})",
+                    view_ids,
+                )
+                if cited_ids:
+                    cite_placeholders = ",".join("?" * len(cited_ids))
+                    self._db.execute(
+                        f"UPDATE reflections SET cite_count = cite_count + 1 "
+                        f"WHERE id IN ({cite_placeholders})",
+                        list(cited_ids),
+                    )
+            log.debug(
+                "RMM: %d view(s), %d cite(s) recorded",
+                len(view_ids),
+                len(cited_ids),
+            )
+        except Exception:
+            log.debug("RMM citation recording failed", exc_info=True)
 
     def back_propagate_utility(self, had_errors: bool) -> None:
         """MemRL: update utility scores for reflections injected this session.
@@ -287,8 +346,9 @@ class ReflectionCoordinator:
                 return []
             context_contents = [content for _, content in fresh]
             self._last_injected_global_reflection_id = max(rid for rid, _ in fresh)
-            for rid, _ in fresh:
+            for rid, content in fresh:
                 self._injected_reflection_ids.add(rid)
+                self._injected_this_iteration.append((rid, content))
             log.debug("global reflections injected: %d entries", len(fresh))
             return [
                 {
@@ -330,20 +390,32 @@ class ReflectionCoordinator:
         placeholders = ",".join("?" * len(vec_rows))
         id_to_distance = {r[0]: r[1] for r in vec_rows}
         ref_rows = self._db.execute(
-            f"SELECT id, content, session_id, utility FROM reflections WHERE id IN ({placeholders})",
+            f"SELECT id, content, session_id, utility, view_count, cite_count "
+            f"FROM reflections WHERE id IN ({placeholders})",
             [r[0] for r in vec_rows],
         ).fetchall()
 
         min_sim = getattr(self._config.reflection, "global_inject_min_similarity", 0.60)
         utility_weight = 0.3
+        # RMM: Laplace-smoothed citation-rate prior, bounded contribution.
+        # The smoothing means a never-injected reflection starts at 0.5
+        # (neither rewarded nor penalised) so newcomers can still surface.
+        citation_weight = 0.2
         scored = []
         for r in ref_rows:
-            rid, content, sid, utility = r[0], r[1], r[2], r[3] if len(r) > 3 else 0.5
+            rid, content, sid = r[0], r[1], r[2]
+            utility = r[3] if len(r) > 3 else 0.5
+            view_count = int(r[4]) if len(r) > 4 and r[4] is not None else 0
+            cite_count = int(r[5]) if len(r) > 5 and r[5] is not None else 0
             cosine_sim = 1.0 - id_to_distance.get(rid, 999.0)
             if cosine_sim < min_sim:
                 continue
-            # Combined score: cosine similarity + utility bonus.
-            combined = cosine_sim + utility_weight * utility
+            cite_rate = (cite_count + 1) / (view_count + 2)
+            combined = (
+                cosine_sim
+                + utility_weight * utility
+                + citation_weight * cite_rate
+            )
             scored.append((rid, content, sid, combined))
 
         results = sorted(scored, key=lambda x: -x[3])

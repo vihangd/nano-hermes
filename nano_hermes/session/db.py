@@ -97,7 +97,9 @@ CREATE TABLE IF NOT EXISTS reflections (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id      INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
     content         TEXT NOT NULL,
-    created_at      REAL NOT NULL
+    created_at      REAL NOT NULL,
+    view_count      INTEGER NOT NULL DEFAULT 0,
+    cite_count      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_reflections_session ON reflections(session_id);
 
@@ -254,6 +256,12 @@ _MIGRATIONS = [
     # virtual table is created in _VEC_SCHEMA, which runs after _SCHEMA.
     """CREATE TRIGGER IF NOT EXISTS semantic_facts_ad AFTER DELETE ON semantic_facts
        BEGIN DELETE FROM semantic_facts_vec WHERE fact_id = old.id; END""",
+    # Phase 7 (RMM): citation feedback counters on reflections.
+    # view_count = times this reflection was injected; cite_count = times the
+    # next assistant response showed substantial token overlap with it.
+    # Smoothed win-rate (cite_count + 1) / (view_count + 2) feeds retrieval.
+    "ALTER TABLE reflections ADD COLUMN view_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE reflections ADD COLUMN cite_count INTEGER NOT NULL DEFAULT 0",
 ]
 
 

@@ -282,6 +282,7 @@ class NanoHermesHook(AgentHook):
         self._tool_calls = 0
         self._skill_tracker.reset_iteration()
         self._pending_injections = []  # clear stale entries from failed iteration
+        self._reflection_coord.reset_iteration_citations()
 
         # Schedule retention purge as a non-blocking background task on first iteration.
         if context.iteration == 0:
@@ -370,6 +371,11 @@ class NanoHermesHook(AgentHook):
             had_error=context.error is not None,
             user_text=self._last_user_text_cache[2],
         )
+
+        # RMM: bump view/cite counters for reflections injected this iteration
+        # against the assistant response text.
+        response_text = context.final_content or ""
+        self._reflection_coord.record_iteration_citations(response_text)
 
         log.debug(
             "after_iteration: iter=%d tool_calls=%d session=%s",
