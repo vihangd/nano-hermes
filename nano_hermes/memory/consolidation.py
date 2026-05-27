@@ -155,19 +155,35 @@ async def find_hub_clusters(
 
 _DISTILL_PROMPT = """\
 Below are {n} representative memory chunks from a recurring theme across {n_sess} sessions.
-Distill them into a single durable semantic fact in ≤100 words. Output ONLY the fact — no preamble.
+Distill them into a single durable semantic fact and annotate it for an A-MEM-style
+note graph. Reply with ONLY a JSON object, no preamble, no code fence:
+
+{{
+  "fact": "<=100 words, the durable lesson learned",
+  "keywords": ["3-7 lowercase single-word retrieval keys"],
+  "tags": ["1-4 broader category labels"],
+  "context": "one-line situational description (when this applies)",
+  "importance": <integer 1-10, 1=trivial, 5=routine, 10=foundational>
+}}
 
 CHUNKS:
 {chunks}
 """
 
 
-async def distill_hub_to_fact(hook: Any, hub: dict) -> str | None:
-    """Distill a hub cluster's samples into a ≤100-word semantic fact via LLM.
+_DEFAULT_IMPORTANCE = 5
 
-    Returns the stripped fact string on success, or None on any failure.
-    Fail-closed: caller must not write a partial result when None is returned.
+
+async def distill_hub_to_fact(hook: Any, hub: dict) -> dict | None:
+    """Distill a hub cluster into a fact + A-MEM annotations via LLM.
+
+    Returns a dict ``{"fact", "keywords", "tags", "context", "importance"}``
+    on success, or None on any failure. The LLM is asked for JSON; we
+    salvage a plain-text fall-back if the response is non-JSON so a single
+    misbehaving model doesn't break distillation entirely.
     """
+    import json as _json  # noqa: PLC0415
+
     provider = getattr(hook._loop, "provider", None)
     if provider is None:
         return None
@@ -185,12 +201,51 @@ async def distill_hub_to_fact(hook: Any, hub: dict) -> str | None:
         resp = await provider.chat_with_retry(
             messages=[{"role": "user", "content": prompt}],
             model=model,
-            max_tokens=200,
+            max_tokens=400,
         )
         content = (resp.content or "").strip()
-        return content if content else None
     except Exception:
         return None
+    if not content:
+        return None
+    # Tolerate ```json fences or trailing prose.
+    payload = content
+    if "```" in payload:
+        # Pull text between the first pair of backticks.
+        parts = payload.split("```")
+        if len(parts) >= 2:
+            payload = parts[1]
+            if payload.lstrip().lower().startswith("json"):
+                payload = payload.split("\n", 1)[1] if "\n" in payload else ""
+    try:
+        data = _json.loads(payload)
+        fact = str(data.get("fact") or "").strip()
+        if not fact:
+            return None
+        return {
+            "fact": fact,
+            "keywords": [str(x) for x in data.get("keywords") or []][:10],
+            "tags": [str(x) for x in data.get("tags") or []][:6],
+            "context": str(data.get("context") or "").strip()[:240],
+            "importance": _clamp_importance(data.get("importance")),
+        }
+    except (ValueError, TypeError):
+        # Non-JSON response — fall back to using the raw text as the fact.
+        return {
+            "fact": content,
+            "keywords": [],
+            "tags": [],
+            "context": "",
+            "importance": _DEFAULT_IMPORTANCE,
+        }
+
+
+def _clamp_importance(value: Any) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return _DEFAULT_IMPORTANCE
+    return max(1, min(10, n))
 
 
 async def consolidate_entries(

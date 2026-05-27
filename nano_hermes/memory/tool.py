@@ -5,7 +5,10 @@ subclass, registered via ``ToolRegistry.register(instance)``.
 """
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
+
+log = logging.getLogger(__name__)
 
 from nanobot.agent.tools.base import Tool, tool_parameters
 
@@ -163,19 +166,49 @@ class MemoryPatchTool(Tool):
             )
             return "\n".join(lines)
 
-        distilled: list[tuple[str, list[int]]] = []
+        from .links import link_new_fact  # noqa: PLC0415
+
+        distilled: list[dict] = []
         for hub in hubs:
-            fact = await distill_hub_to_fact(self._hook, hub)
-            if fact is None:
+            fact_data = await distill_hub_to_fact(self._hook, hub)
+            if fact_data is None:
                 continue
             chunk_ids = hub["chunk_ids"]
-            self._hook.db.execute(
-                "INSERT INTO semantic_facts (content, source_chunk_ids, created_at) "
-                "VALUES (?, ?, ?)",
-                (fact, _json.dumps(chunk_ids), _time.time()),
+            cur = self._hook.db.execute(
+                "INSERT INTO semantic_facts "
+                "(content, source_chunk_ids, created_at, keywords, tags, context, importance) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    fact_data["fact"],
+                    _json.dumps(chunk_ids),
+                    _time.time(),
+                    _json.dumps(fact_data["keywords"]),
+                    _json.dumps(fact_data["tags"]),
+                    fact_data["context"],
+                    fact_data["importance"],
+                ),
             )
+            fact_id = cur.lastrowid
             self._hook.db.commit()
-            distilled.append((fact, chunk_ids))
+
+            # Embed the fact + auto-link to similar prior facts (A-MEM).
+            try:
+                n_links = await link_new_fact(self._hook, fact_id, fact_data["fact"])
+            except Exception as e:
+                log.warning("link_new_fact failed for fact %s: %s", fact_id, e)
+                n_links = 0
+
+            # Feed importance into the salience nudge so foundational
+            # facts trigger a reflection prompt sooner.
+            self._hook._reflection_coord.add_salience(  # noqa: SLF001
+                fact_data["importance"] / 10.0
+            )
+
+            entry = dict(fact_data)
+            entry["fact_id"] = fact_id
+            entry["chunk_ids"] = chunk_ids
+            entry["n_links"] = n_links
+            distilled.append(entry)
 
         if not distilled:
             return (
@@ -184,10 +217,14 @@ class MemoryPatchTool(Tool):
             )
 
         lines = [f"Distilled {len(distilled)} semantic fact(s) from {len(hubs)} hub(s):\n"]
-        for i, (fact, chunk_ids) in enumerate(distilled, 1):
-            ids_preview = chunk_ids[:5]
-            lines.append(f"Fact {i} [chunk_ids: {ids_preview}]:")
-            lines.append(f"  {fact}")
+        for i, entry in enumerate(distilled, 1):
+            ids_preview = entry["chunk_ids"][:5]
+            tags = ",".join(entry["tags"]) or "—"
+            lines.append(
+                f"Fact {i} [id={entry['fact_id']} importance={entry['importance']} "
+                f"tags={tags} links={entry['n_links']} chunk_ids={ids_preview}]:"
+            )
+            lines.append(f"  {entry['fact']}")
             lines.append("")
         lines.append(
             "Facts saved to semantic_facts table. Promote to long-term memory with:\n"

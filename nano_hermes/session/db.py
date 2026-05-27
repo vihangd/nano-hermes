@@ -163,12 +163,30 @@ CREATE INDEX IF NOT EXISTS idx_reflection_coact_a ON reflection_coactivations(re
 -- Phase 4.3: Episodic→semantic distillation output.
 -- LLM-distilled facts from hub clusters; source_chunk_ids is a JSON array
 -- of chunk_id ints for poisoning traceability.
+-- A-MEM (Phase 6): keywords/tags/context are LLM-authored note attributes;
+-- importance is 1-10 (Generative-Agents-style).
 CREATE TABLE IF NOT EXISTS semantic_facts (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     content          TEXT NOT NULL,
     source_chunk_ids TEXT NOT NULL,
-    created_at       REAL NOT NULL
+    created_at       REAL NOT NULL,
+    keywords         TEXT NOT NULL DEFAULT '[]',  -- JSON array of strings
+    tags             TEXT NOT NULL DEFAULT '[]',  -- JSON array of strings
+    context          TEXT NOT NULL DEFAULT '',    -- one-line situational description
+    importance       INTEGER NOT NULL DEFAULT 5   -- 1-10, Generative-Agents-style
 );
+
+-- A-MEM (Phase 6): Zettelkasten-style semantic edges between facts.
+-- Undirected: callers normalise so fact_a_id < fact_b_id at insert time.
+CREATE TABLE IF NOT EXISTS semantic_fact_links (
+    fact_a_id    INTEGER NOT NULL REFERENCES semantic_facts(id) ON DELETE CASCADE,
+    fact_b_id    INTEGER NOT NULL REFERENCES semantic_facts(id) ON DELETE CASCADE,
+    similarity   REAL NOT NULL,
+    created_at   REAL NOT NULL,
+    PRIMARY KEY (fact_a_id, fact_b_id)
+);
+CREATE INDEX IF NOT EXISTS idx_semantic_fact_links_a ON semantic_fact_links(fact_a_id, similarity DESC);
+CREATE INDEX IF NOT EXISTS idx_semantic_fact_links_b ON semantic_fact_links(fact_b_id, similarity DESC);
 """
 
 # vec0 takes dims as a literal at CREATE time, so it has to be formatted
@@ -193,6 +211,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS reflections_vec USING vec0(
     reflection_id  INTEGER PRIMARY KEY,
     embedding      FLOAT[{dims}] distance_metric=cosine
 );
+
+CREATE VIRTUAL TABLE IF NOT EXISTS semantic_facts_vec USING vec0(
+    fact_id        INTEGER PRIMARY KEY,
+    embedding      FLOAT[{dims}] distance_metric=cosine
+);
 """
 
 
@@ -209,6 +232,28 @@ _MIGRATIONS = [
     source_chunk_ids TEXT NOT NULL,
     created_at       REAL NOT NULL
 )""",
+    # Phase 6: A-MEM note attributes on semantic_facts.
+    "ALTER TABLE semantic_facts ADD COLUMN keywords TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE semantic_facts ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE semantic_facts ADD COLUMN context TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE semantic_facts ADD COLUMN importance INTEGER NOT NULL DEFAULT 5",
+    # Phase 6: Zettelkasten-style edge table between facts.
+    """CREATE TABLE IF NOT EXISTS semantic_fact_links (
+    fact_a_id    INTEGER NOT NULL REFERENCES semantic_facts(id) ON DELETE CASCADE,
+    fact_b_id    INTEGER NOT NULL REFERENCES semantic_facts(id) ON DELETE CASCADE,
+    similarity   REAL NOT NULL,
+    created_at   REAL NOT NULL,
+    PRIMARY KEY (fact_a_id, fact_b_id)
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_semantic_fact_links_a ON semantic_fact_links(fact_a_id, similarity DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_semantic_fact_links_b ON semantic_fact_links(fact_b_id, similarity DESC)",
+    # Mirror an ON DELETE CASCADE into semantic_facts_vec — vec0 virtual
+    # tables don't participate in FK cascades, so a trigger keeps the
+    # vector table from accumulating orphans if a fact is ever deleted.
+    # Placed in migrations (not inline _SCHEMA) because the referenced
+    # virtual table is created in _VEC_SCHEMA, which runs after _SCHEMA.
+    """CREATE TRIGGER IF NOT EXISTS semantic_facts_ad AFTER DELETE ON semantic_facts
+       BEGIN DELETE FROM semantic_facts_vec WHERE fact_id = old.id; END""",
 ]
 
 

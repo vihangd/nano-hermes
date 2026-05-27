@@ -72,6 +72,16 @@ class ReflectionCoordinator:
         """
         self._salience_score += tool_burst_score(tool_count)
 
+    def add_salience(self, amount: float) -> None:
+        """Add an arbitrary salience contribution.
+
+        Used by ad-hoc producers (e.g. high-importance distillation) that
+        should hasten the next reflection nudge without crossing the
+        threshold themselves. Threshold-crossing is still checked at the
+        normal score_iteration call.
+        """
+        self._salience_score += max(0.0, float(amount))
+
     def score_iteration(
         self, had_error: bool, user_text: str | None
     ) -> None:
