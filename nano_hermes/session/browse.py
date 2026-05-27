@@ -1,6 +1,6 @@
 """``session_browse`` — session-arc navigation with bookends.
 
-Two modes designed for reading session history with full context, unlike
+Three modes designed for reading session history with full context, unlike
 ``session_search`` which returns isolated snippets.
 
 DISCOVERY:  FTS5 keyword search that deduplicates by session lineage and
@@ -12,6 +12,11 @@ DISCOVERY:  FTS5 keyword search that deduplicates by session lineage and
 EXPAND:     window slice around a specific chunk_id (no FTS5) — used to
             drill into a session whose chunk_id was surfaced by DISCOVERY
             or session_search.
+
+RECENT:     no-query browse — list the N most recently ended sessions with
+            turn count, age, and openers/closers. Useful when the agent
+            wants to recall "what was I working on last time" without a
+            keyword in mind.
 
 No LLM calls — pure SQL.
 """
@@ -140,6 +145,41 @@ def fts_discovery(
     return arcs
 
 
+def recent_sessions(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 5,
+) -> list[_SessionArc]:
+    """Return the N most recently ended sessions as compact arcs (no anchor).
+
+    Each arc has bookend_start and bookend_end populated; anchor_window is
+    empty since there's no query anchor. Sessions still in progress (NULL
+    ended_at) are ordered by started_at via COALESCE, so a very recently
+    active session will surface at the top.
+    """
+    rows = conn.execute(
+        "SELECT id FROM sessions "
+        "ORDER BY COALESCE(ended_at, started_at) DESC "
+        "LIMIT ?",
+        (limit,),
+    ).fetchall()
+    arcs: list[_SessionArc] = []
+    for (session_id,) in rows:
+        chunks = _fetch_session_chunks(conn, session_id)
+        if not chunks:
+            continue
+        # anchor_id=-1 means "no anchor"; bookends are still populated.
+        arc = _SessionArc(
+            session_id=session_id,
+            anchor_chunk_id=-1,
+            bookend_start=chunks[:_BOOKEND_N],
+            anchor_window=[],
+            bookend_end=chunks[max(0, len(chunks) - _BOOKEND_N):],
+        )
+        arcs.append(arc)
+    return arcs
+
+
 def expand_around(
     conn: sqlite3.Connection,
     chunk_id: int,
@@ -200,12 +240,14 @@ _SCHEMA: dict[str, Any] = {
     "properties": {
         "mode": {
             "type": "string",
-            "enum": ["discovery", "expand"],
+            "enum": ["discovery", "expand", "recent"],
             "description": (
                 "'discovery': FTS5 keyword search returning one session arc "
                 "per matching session (opener + match context + closer). "
                 "'expand': show chunks around a specific chunk_id surfaced by "
-                "session_search or a prior discovery call."
+                "session_search or a prior discovery call. "
+                "'recent': list the most recently ended sessions with bookends "
+                "(no query needed) — for recalling 'what was I working on last time'."
             ),
         },
         "query": {
@@ -241,7 +283,7 @@ _SCHEMA: dict[str, Any] = {
 class SessionBrowseTool(Tool):
     """Browse past session content with full conversational context.
 
-    Two modes:
+    Three modes:
 
     **discovery** — FTS5 keyword search. Returns one arc per matching session:
     session opener (first 3 turns), the part around the keyword match, and
@@ -251,6 +293,9 @@ class SessionBrowseTool(Tool):
     **expand** — show chunks surrounding a specific ``chunk_id`` (from
     ``session_search`` or a prior discovery call). Use when you need more
     context around a match you found elsewhere.
+
+    **recent** — list the N most recently ended sessions with bookends only.
+    No query needed — use to recall "what was I working on last time".
 
     No embedding calls — pure SQL, always fast.
     """
@@ -276,7 +321,9 @@ class SessionBrowseTool(Tool):
             return self._do_discovery(kwargs)
         if mode == "expand":
             return self._do_expand(kwargs)
-        return "Error: mode must be 'discovery' or 'expand'."
+        if mode == "recent":
+            return self._do_recent(kwargs)
+        return "Error: mode must be 'discovery', 'expand', or 'recent'."
 
     def _do_discovery(self, kwargs: dict) -> str:
         query = (kwargs.get("query") or "").strip()
@@ -295,6 +342,19 @@ class SessionBrowseTool(Tool):
 
         return "\n\n".join(
             _format_arc(arc, label=f"result {i + 1}")
+            for i, arc in enumerate(arcs)
+        )
+
+    def _do_recent(self, kwargs: dict) -> str:
+        limit = int(kwargs.get("limit") or 5)
+        try:
+            arcs = recent_sessions(self._hook.db, limit=limit)
+        except Exception as e:
+            return f"Error: recent failed: {e}"
+        if not arcs:
+            return "no sessions yet"
+        return "\n\n".join(
+            _format_arc(arc, label=f"recent {i + 1}")
             for i, arc in enumerate(arcs)
         )
 

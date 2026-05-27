@@ -13,6 +13,7 @@ from nano_hermes.session.browse import (
     _Chunk,
     expand_around,
     fts_discovery,
+    recent_sessions,
 )
 
 
@@ -200,3 +201,49 @@ class TestSessionBrowseTool:
         tool = SessionBrowseTool(hook=hook)
         result = await tool.execute(mode="invalid")
         assert result.startswith("Error")
+
+    async def test_recent_empty(self, tmp_path):
+        loop = _make_loop(tmp_path)
+        hook = nano_hermes.install(loop)
+        tool = SessionBrowseTool(hook=hook)
+        result = await tool.execute(mode="recent")
+        assert "no sessions" in result
+
+    async def test_recent_returns_arcs_newest_first(self, tmp_path):
+        loop = _make_loop(tmp_path)
+        hook = nano_hermes.install(loop)
+
+        # Seed two sessions; mark older one as ended earlier.
+        sid1 = _seed_session(hook, ["older session opener", "older session closer"])
+        hook.db.execute(
+            "UPDATE sessions SET ended_at = ? WHERE id = ?",
+            (time.time() - 100, sid1),
+        )
+        sid2 = _seed_session(hook, ["newer session opener", "newer session closer"])
+        hook.db.execute(
+            "UPDATE sessions SET ended_at = ? WHERE id = ?",
+            (time.time(), sid2),
+        )
+        hook.db.commit()
+
+        tool = SessionBrowseTool(hook=hook)
+        result = await tool.execute(mode="recent", limit=5)
+        # Newest first: sid2's text appears before sid1's.
+        assert "newer session" in result
+        assert "older session" in result
+        assert result.index("newer") < result.index("older")
+        # No anchor marker should appear (anchor_chunk_id = -1).
+        assert "◄" not in result
+
+    async def test_recent_helper_respects_limit(self, tmp_path):
+        loop = _make_loop(tmp_path)
+        hook = nano_hermes.install(loop)
+        for i in range(4):
+            sid = _seed_session(hook, [f"session {i} msg"])
+            hook.db.execute(
+                "UPDATE sessions SET ended_at = ? WHERE id = ?",
+                (time.time() + i, sid),
+            )
+        hook.db.commit()
+        arcs = recent_sessions(hook.db, limit=2)
+        assert len(arcs) == 2
