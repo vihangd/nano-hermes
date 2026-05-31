@@ -201,6 +201,21 @@ class MemoryPatchTool(Tool):
                 log.warning("link_new_fact failed for fact %s: %s", fact_id, e)
                 n_links = 0
 
+            # Bi-temporal: stamp invalid_at on any prior fact this one
+            # supersedes (runs after linking so the vector is already stored).
+            superseded: list[int] = []
+            try:
+                from .bitemporal import invalidate_superseded_facts  # noqa: PLC0415
+                superseded = await invalidate_superseded_facts(
+                    self._hook,
+                    fact_id,
+                    fact_data["fact"],
+                    enabled=cfg.bitemporal_invalidation_enabled,
+                    sim_threshold=cfg.bitemporal_supersede_threshold,
+                )
+            except Exception as e:
+                log.warning("supersession check failed for fact %s: %s", fact_id, e)
+
             # Feed importance into the salience nudge so foundational
             # facts trigger a reflection prompt sooner.
             self._hook._reflection_coord.add_salience(  # noqa: SLF001
@@ -211,6 +226,7 @@ class MemoryPatchTool(Tool):
             entry["fact_id"] = fact_id
             entry["chunk_ids"] = chunk_ids
             entry["n_links"] = n_links
+            entry["superseded"] = superseded
             distilled.append(entry)
 
         if not distilled:
@@ -228,6 +244,11 @@ class MemoryPatchTool(Tool):
                 f"tags={tags} links={entry['n_links']} chunk_ids={ids_preview}]:"
             )
             lines.append(f"  {entry['fact']}")
+            if entry.get("superseded"):
+                lines.append(
+                    f"  ⚠ supersedes outdated fact(s) {entry['superseded']} — "
+                    "update or remove the matching MEMORY.md entry if you promoted it."
+                )
             lines.append("")
         lines.append(
             "Facts saved to semantic_facts table. Promote to long-term memory with:\n"

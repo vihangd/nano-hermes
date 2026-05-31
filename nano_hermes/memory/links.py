@@ -61,9 +61,25 @@ async def link_new_fact(
         (vec_bytes, fact_id, top_k),
     ).fetchall()
 
+    # Don't link to facts already superseded (bi-temporal invalid_at) — a
+    # stale fact shouldn't accrue new edges.
+    valid_ids: set[int] = set()
+    if rows:
+        ph = ",".join("?" * len(rows))
+        valid_ids = {
+            r[0]
+            for r in db.execute(
+                f"SELECT id FROM semantic_facts "
+                f"WHERE id IN ({ph}) AND invalid_at IS NULL",
+                [r[0] for r in rows],
+            ).fetchall()
+        }
+
     now = time.time()
     written = 0
     for other_id, distance in rows:
+        if other_id not in valid_ids:
+            continue
         similarity = 1.0 - float(distance)
         if similarity < sim_threshold:
             continue
@@ -88,10 +104,14 @@ def neighbours_of(
     """
     rows = db.execute(
         """
-        SELECT CASE WHEN fact_a_id = ? THEN fact_b_id ELSE fact_a_id END AS other,
-               similarity
-        FROM semantic_fact_links
-        WHERE fact_a_id = ? OR fact_b_id = ?
+        SELECT other, similarity FROM (
+            SELECT CASE WHEN fact_a_id = ? THEN fact_b_id ELSE fact_a_id END AS other,
+                   similarity
+            FROM semantic_fact_links
+            WHERE fact_a_id = ? OR fact_b_id = ?
+        )
+        JOIN semantic_facts ON semantic_facts.id = other
+        WHERE semantic_facts.invalid_at IS NULL
         ORDER BY similarity DESC
         LIMIT ?
         """,
