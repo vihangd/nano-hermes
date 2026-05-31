@@ -279,3 +279,134 @@ class TestPurgeBatchedDelete:
             assert hook.db.execute(
                 "SELECT COUNT(*) FROM chunks_vec WHERE chunk_id = ?", (cid,)
             ).fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# Pi hardening: VACUUM cooldown gate + busy_timeout
+# ---------------------------------------------------------------------------
+
+class TestVacuumCooldown:
+    def _seed_old_trajectory(self, hook) -> None:
+        import time as _time
+
+        hook.db.execute(
+            "INSERT INTO trajectories (task, outcome, created_at) VALUES (?, ?, ?)",
+            ("old task", "ok", _time.time() - 60 * 86400),
+        )
+        hook.db.commit()
+
+    async def test_first_purge_with_deletions_records_vacuum(
+        self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nano_hermes.hook import _META_LAST_VACUUM
+
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop, config={"trajectory_retention_days": 30})
+        self._seed_old_trajectory(hook)
+
+        messages: list[dict] = [{"role": "user", "content": "new session"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=messages))
+        if hook._purge_task:
+            await hook._purge_task
+
+        row = hook.db.execute(
+            "SELECT value FROM meta WHERE key = ?", (_META_LAST_VACUUM,)
+        ).fetchone()
+        assert row is not None, "VACUUM timestamp not recorded after first purge"
+        assert float(row[0]) > 0
+
+    async def test_purge_within_cooldown_skips_vacuum(
+        self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time as _time
+        from nano_hermes.hook import _META_LAST_VACUUM
+
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(
+            loop,
+            config={
+                "trajectory_retention_days": 30,
+                "vacuum_min_interval_days": 7,
+            },
+        )
+        # Pretend a VACUUM ran one day ago — inside the 7-day cooldown.
+        recent = _time.time() - 1 * 86400
+        hook.db.execute(
+            "INSERT INTO meta(key, value) VALUES (?, ?)",
+            (_META_LAST_VACUUM, str(recent)),
+        )
+        hook.db.commit()
+        self._seed_old_trajectory(hook)
+
+        messages: list[dict] = [{"role": "user", "content": "new session"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=messages))
+        if hook._purge_task:
+            await hook._purge_task
+
+        # Cooldown branch must NOT overwrite the timestamp (VACUUM skipped),
+        # but the purge itself still removed the aged row.
+        row = hook.db.execute(
+            "SELECT value FROM meta WHERE key = ?", (_META_LAST_VACUUM,)
+        ).fetchone()
+        assert float(row[0]) == recent, "VACUUM ran despite cooldown"
+        assert hook.db.execute(
+            "SELECT COUNT(*) FROM trajectories"
+        ).fetchone()[0] == 0, "purge did not delete aged row"
+
+
+class TestBusyTimeout:
+    def test_busy_timeout_applied_to_main_connection(
+        self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(
+            loop, config={"sqlite_busy_timeout_ms": 7500}
+        )
+        assert hook.db.execute("PRAGMA busy_timeout").fetchone()[0] == 7500
+
+    async def test_busy_timeout_applied_to_purge_connection(
+        self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The short-lived purge connection holds the VACUUM exclusive lock,
+        so it must also honour busy_timeout."""
+        import sqlite3 as _sqlite3
+        import time as _time
+
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(
+            loop,
+            config={
+                "trajectory_retention_days": 30,
+                "sqlite_busy_timeout_ms": 6250,
+            },
+        )
+        hook.db.execute(
+            "INSERT INTO trajectories (task, outcome, created_at) VALUES (?, ?, ?)",
+            ("old task", "ok", _time.time() - 60 * 86400),
+        )
+        hook.db.commit()
+
+        seen: list[int] = []
+        real_connect = _sqlite3.connect
+
+        # Connection.execute is a read-only C slot; override it via a subclass
+        # factory so isolation_level assignment (used around VACUUM) still hits
+        # the real connection.
+        class _SpyConn(_sqlite3.Connection):
+            def execute(self, sql, *a, **k):  # type: ignore[override]
+                if "busy_timeout" in sql.lower():
+                    seen.append(int(sql.rsplit("=", 1)[1]))
+                return super().execute(sql, *a, **k)
+
+        def _spy_connect(*args, **kwargs):
+            kwargs.setdefault("factory", _SpyConn)
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(_sqlite3, "connect", _spy_connect)
+
+        messages: list[dict] = [{"role": "user", "content": "new session"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=messages))
+        if hook._purge_task:
+            await hook._purge_task
+
+        assert 6250 in seen, "busy_timeout not applied to purge connection"
