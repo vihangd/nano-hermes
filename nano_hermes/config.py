@@ -237,3 +237,8 @@ class NanoHermesConfig(BaseModel):
     # lands on disk (skill bodies, companion files, memory entries,
     # reflections). Default on — opt out only for debugging.
     redact_secrets: bool = True
+    # Scan MEMORY.md at prompt-load time and replace poisoned lines with
+    # [BLOCKED: …] placeholders. Closes the gap where a direct on-disk edit,
+    # a sync, or a DB restore reintroduces an entry that bypassed the
+    # write-time guard. The on-disk file is never modified.
+    memory_loadtime_scan: bool = True
