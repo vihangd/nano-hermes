@@ -10,7 +10,40 @@ import numpy as np
 import pytest
 
 from nano_hermes.config import EmbeddingConfig, EmbeddingProvider
-from nano_hermes.embedding.chain import AllProvidersFailed, EmbeddingChain
+from nano_hermes.embedding.chain import (
+    AllProvidersFailed,
+    EmbeddingChain,
+    _embeddings_in_index_order,
+)
+
+
+class TestEmbeddingsInIndexOrder:
+    """A provider may return batch rows out of order; we must re-sort by the
+    `index` field so positional zip-binding doesn't misbind vectors to texts."""
+
+    def test_reorders_by_index(self):
+        data = {
+            "data": [
+                {"index": 2, "embedding": [2.0]},
+                {"index": 0, "embedding": [0.0]},
+                {"index": 1, "embedding": [1.0]},
+            ]
+        }
+        assert _embeddings_in_index_order(data) == [[0.0], [1.0], [2.0]]
+
+    def test_already_ordered_unchanged(self):
+        data = {
+            "data": [
+                {"index": 0, "embedding": [0.0]},
+                {"index": 1, "embedding": [1.0]},
+            ]
+        }
+        assert _embeddings_in_index_order(data) == [[0.0], [1.0]]
+
+    def test_missing_index_falls_back_to_position(self):
+        # Defensive: a provider that omits `index` keeps response order.
+        data = {"data": [{"embedding": [9.0]}, {"embedding": [8.0]}]}
+        assert _embeddings_in_index_order(data) == [[9.0], [8.0]]
 
 
 def _config(*provider_names: str, target_dims: int = 4) -> EmbeddingConfig:
