@@ -418,65 +418,43 @@ def purge_older_than(conn: sqlite3.Connection, days: int) -> dict[str, int]:
     import time as _time  # noqa: PLC0415
     cutoff = _time.time() - days * 86400
 
-    # Collect vec IDs BEFORE cascade deletes remove the parent rows.
-    old_session_ids = [
-        r[0]
-        for r in conn.execute(
-            "SELECT id FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?",
-            (cutoff,),
-        ).fetchall()
-    ]
-    if old_session_ids:
-        ph = ",".join("?" * len(old_session_ids))
-        old_chunk_ids = [
-            r[0]
-            for r in conn.execute(
-                f"SELECT id FROM chunks WHERE session_id IN ({ph})",
-                old_session_ids,
-            ).fetchall()
-        ]
-        old_ref_ids = [
-            r[0]
-            for r in conn.execute(
-                f"SELECT id FROM reflections WHERE session_id IN ({ph})",
-                old_session_ids,
-            ).fetchall()
-        ]
-    else:
-        old_chunk_ids = []
-        old_ref_ids = []
-
+    # vec0 virtual tables don't participate in FK cascades, so their orphan
+    # rows must be deleted explicitly. Use nested subqueries (not a
+    # Python-materialised ``IN (?, ?, …)`` list) so a large purge can't blow
+    # past SQLite's SQLITE_MAX_VARIABLE_NUMBER cap (as low as 32766 on some
+    # builds) — which would raise OperationalError, get swallowed by the
+    # background purge, and silently stop both the purge and its VACUUM,
+    # letting the DB grow without bound on a swapless Pi.
+    #
+    # The vec0 cleanups must run BEFORE the parent DELETE: once sessions are
+    # gone their chunks/reflections cascade away and the subqueries find
+    # nothing.
+    _old_sessions = (
+        "SELECT id FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?"
+    )
+    conn.execute(
+        f"DELETE FROM chunks_vec WHERE chunk_id IN ("
+        f"  SELECT id FROM chunks WHERE session_id IN ({_old_sessions}))",
+        (cutoff,),
+    )
+    conn.execute(
+        f"DELETE FROM reflections_vec WHERE reflection_id IN ("
+        f"  SELECT id FROM reflections WHERE session_id IN ({_old_sessions}))",
+        (cutoff,),
+    )
     sess = conn.execute(
         "DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?",
         (cutoff,),
     ).rowcount
 
-    # Clean up orphaned vec0 rows for chunks and reflections (batched).
-    if old_chunk_ids:
-        ph = ",".join("?" * len(old_chunk_ids))
-        conn.execute(f"DELETE FROM chunks_vec WHERE chunk_id IN ({ph})", old_chunk_ids)
-    if old_ref_ids:
-        ph = ",".join("?" * len(old_ref_ids))
-        conn.execute(
-            f"DELETE FROM reflections_vec WHERE reflection_id IN ({ph})", old_ref_ids
-        )
-
-    # Collect trajectory IDs before deleting so we can clean up vec rows.
-    old_traj_ids = [
-        r[0]
-        for r in conn.execute(
-            "SELECT id FROM trajectories WHERE created_at < ?",
-            (cutoff,),
-        ).fetchall()
-    ]
+    conn.execute(
+        "DELETE FROM trajectories_vec WHERE trajectory_id IN ("
+        "  SELECT id FROM trajectories WHERE created_at < ?)",
+        (cutoff,),
+    )
     traj = conn.execute(
         "DELETE FROM trajectories WHERE created_at < ?",
         (cutoff,),
     ).rowcount
-    if old_traj_ids:
-        ph = ",".join("?" * len(old_traj_ids))
-        conn.execute(
-            f"DELETE FROM trajectories_vec WHERE trajectory_id IN ({ph})", old_traj_ids
-        )
     conn.commit()
     return {"sessions": sess, "trajectories": traj}
