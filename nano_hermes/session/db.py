@@ -101,6 +101,23 @@ CREATE TABLE IF NOT EXISTS trajectories (
 );
 CREATE INDEX IF NOT EXISTS idx_trajectories_created ON trajectories(created_at);
 
+-- FTS5 lexical mirror of trajectory task text, for hybrid (BM25 + dense)
+-- retrieval in trajectory_search. External content keyed to trajectories.id.
+CREATE VIRTUAL TABLE IF NOT EXISTS trajectories_fts USING fts5(
+    task,
+    content='trajectories',
+    content_rowid='id',
+    tokenize='porter'
+);
+
+CREATE TRIGGER IF NOT EXISTS trajectories_ai AFTER INSERT ON trajectories BEGIN
+    INSERT INTO trajectories_fts(rowid, task) VALUES (new.id, new.task);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trajectories_ad AFTER DELETE ON trajectories BEGIN
+    INSERT INTO trajectories_fts(trajectories_fts, rowid, task) VALUES ('delete', old.id, old.task);
+END;
+
 CREATE TABLE IF NOT EXISTS reflections (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id      INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
@@ -353,8 +370,39 @@ def open_db(
     conn.executescript(_VEC_SCHEMA.format(dims=target_dims))
     _migrate_vec0_to_cosine(conn, target_dims)
     _apply_migrations(conn)
+    _backfill_trajectories_fts(conn)
     conn.commit()
     return conn
+
+
+_FTS_BACKFILL_FLAG = "trajectories_fts_backfilled"
+
+
+def _backfill_trajectories_fts(conn: sqlite3.Connection) -> None:
+    """One-time populate of trajectories_fts for DBs created before it existed.
+
+    The table and triggers are in _SCHEMA (idempotent), but triggers only fire
+    on future inserts, so a pre-existing DB has trajectory rows with an empty
+    FTS index. We can't detect that via ``COUNT(*)`` — on an external-content
+    FTS5 table that reads the content (trajectories) table, not the index — so
+    we gate the one-time rebuild on a ``meta`` flag instead. On a fresh DB the
+    rebuild is a harmless no-op (no rows yet).
+    """
+    try:
+        done = conn.execute(
+            "SELECT 1 FROM meta WHERE key = ?", (_FTS_BACKFILL_FLAG,)
+        ).fetchone()
+        if done:
+            return
+        conn.execute("INSERT INTO trajectories_fts(trajectories_fts) VALUES('rebuild')")
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?, '1') "
+            "ON CONFLICT(key) DO NOTHING",
+            (_FTS_BACKFILL_FLAG,),
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # table missing on a partially-migrated DB — next open retries
 
 
 def purge_older_than(conn: sqlite3.Connection, days: int) -> dict[str, int]:
