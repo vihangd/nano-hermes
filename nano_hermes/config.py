@@ -232,6 +232,15 @@ class NanoHermesConfig(BaseModel):
     trajectory: TrajectoryConfig = Field(default_factory=TrajectoryConfig)
     workflow_induction: WorkflowInductionConfig = Field(default_factory=WorkflowInductionConfig)
     trajectory_retention_days: int = 45
+    # Minimum days between full VACUUMs. Once data ages past the retention
+    # window, every startup purges a fresh day of rows; without this gate
+    # each purge would trigger a whole-DB VACUUM (exclusive lock, slow on a
+    # Pi's microSD), contending with the live archiver. Reclaim space at most
+    # this often instead.
+    vacuum_min_interval_days: int = 7
+    # SQLite busy-wait before raising SQLITE_BUSY. Lets the archiver wait out
+    # a background VACUUM/purge lock instead of dropping the turn's archive.
+    sqlite_busy_timeout_ms: int = 10000
     reflection_scope: Literal["session", "global"] = "session"
     # Apply regex-based secret redaction to user-supplied content before it
     # lands on disk (skill bodies, companion files, memory entries,

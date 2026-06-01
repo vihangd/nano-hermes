@@ -327,13 +327,18 @@ def _migrate_vec0_to_cosine(conn: sqlite3.Connection, target_dims: int) -> None:
         log.info("migrated %s: %d rows preserved", table, len(existing))
 
 
-def open_db(workspace: Path, target_dims: int) -> sqlite3.Connection:
+def open_db(
+    workspace: Path, target_dims: int, busy_timeout_ms: int = 10000
+) -> sqlite3.Connection:
     path = state_db(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
+    # Wait out a background VACUUM/purge lock instead of immediately raising
+    # SQLITE_BUSY (which would silently drop the turn's archive write).
+    conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)

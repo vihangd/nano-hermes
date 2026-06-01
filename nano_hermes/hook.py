@@ -35,6 +35,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Meta-KV key tracking the last full VACUUM, for the purge cooldown gate.
+_META_LAST_VACUUM = "vacuum.last_run_at"
+
 # Re-export for backward compatibility with any code that imports from here.
 from .coordinator.reflection import _NUDGE_TEXT  # noqa: F401, E402
 
@@ -53,7 +56,9 @@ class NanoHermesHook(AgentHook):
             budgets=config.memory,
         )
         self.db: sqlite3.Connection = open_db(
-            loop.workspace, config.embedding.target_dims
+            loop.workspace,
+            config.embedding.target_dims,
+            busy_timeout_ms=config.sqlite_busy_timeout_ms,
         )
         self.archiver = SessionArchiver(
             db=self.db,
@@ -500,13 +505,20 @@ class NanoHermesHook(AgentHook):
         await asyncio.sleep(2)
         db_path = state_db(self.workspace)
         days = self.config.trajectory_retention_days
+        vacuum_interval_s = self.config.vacuum_min_interval_days * 86400
+        busy_timeout_ms = self.config.sqlite_busy_timeout_ms
 
         def _run() -> None:
             import sqlite3  # noqa: PLC0415
+            import time  # noqa: PLC0415
+
             import sqlite_vec  # noqa: PLC0415
+
+            from .skills.curator import meta_get, meta_set  # noqa: PLC0415
 
             conn = sqlite3.connect(db_path)
             conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
@@ -514,14 +526,31 @@ class NanoHermesHook(AgentHook):
                 result = purge_older_than(conn, days)
                 # Reclaim space when rows were actually removed. FTS5 and vec0
                 # shadow tables don't return pages without an explicit VACUUM.
+                # Gate behind a cooldown: once data ages past the retention
+                # window every startup removes a fresh day of rows, so an
+                # unconditional VACUUM would rewrite the whole DB on each boot,
+                # taking an exclusive lock that contends with the live archiver.
                 if result["sessions"] or result["trajectories"]:
-                    conn.isolation_level = None  # VACUUM cannot run in a transaction
-                    conn.execute("VACUUM")
-                    log.info(
-                        "nano-hermes purge: %d sessions, %d trajectories — VACUUMed",
-                        result["sessions"],
-                        result["trajectories"],
-                    )
+                    now = time.time()
+                    last_raw = meta_get(conn, _META_LAST_VACUUM)
+                    last = float(last_raw) if last_raw else 0.0
+                    if now - last >= vacuum_interval_s:
+                        conn.isolation_level = None  # VACUUM cannot run in a txn
+                        conn.execute("VACUUM")
+                        conn.isolation_level = ""  # restore default for meta_set
+                        meta_set(conn, _META_LAST_VACUUM, str(now))
+                        log.info(
+                            "nano-hermes purge: %d sessions, %d trajectories — VACUUMed",
+                            result["sessions"],
+                            result["trajectories"],
+                        )
+                    else:
+                        log.info(
+                            "nano-hermes purge: %d sessions, %d trajectories — "
+                            "VACUUM skipped (cooldown)",
+                            result["sessions"],
+                            result["trajectories"],
+                        )
             finally:
                 conn.close()
 
