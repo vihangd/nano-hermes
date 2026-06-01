@@ -183,7 +183,11 @@ CREATE TABLE IF NOT EXISTS semantic_facts (
     keywords         TEXT NOT NULL DEFAULT '[]',  -- JSON array of strings
     tags             TEXT NOT NULL DEFAULT '[]',  -- JSON array of strings
     context          TEXT NOT NULL DEFAULT '',    -- one-line situational description
-    importance       INTEGER NOT NULL DEFAULT 5   -- 1-10, Generative-Agents-style
+    importance       INTEGER NOT NULL DEFAULT 5,  -- 1-10, Generative-Agents-style
+    -- Bi-temporal invalidation (Zep/Graphiti variant): NULL = currently true;
+    -- a timestamp = the moment a newer fact superseded/contradicted this one.
+    -- Non-destructive — the row is kept for history, filtered from live views.
+    invalid_at       REAL
 );
 
 -- A-MEM (Phase 6): Zettelkasten-style semantic edges between facts.
@@ -247,6 +251,9 @@ _MIGRATIONS = [
     "ALTER TABLE semantic_facts ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE semantic_facts ADD COLUMN context TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE semantic_facts ADD COLUMN importance INTEGER NOT NULL DEFAULT 5",
+    # Phase 9 (bi-temporal): supersession invalidation timestamp.
+    # NULL = currently valid; set when a newer fact contradicts this one.
+    "ALTER TABLE semantic_facts ADD COLUMN invalid_at REAL",
     # Phase 6: Zettelkasten-style edge table between facts.
     """CREATE TABLE IF NOT EXISTS semantic_fact_links (
     fact_a_id    INTEGER NOT NULL REFERENCES semantic_facts(id) ON DELETE CASCADE,

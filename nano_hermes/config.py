@@ -64,6 +64,16 @@ class MemoryBudgets(BaseModel):
     # write the result to semantic_facts. When False, surface hubs to the
     # agent for manual review only (no LLM call, no DB write).
     distill_llm_enabled: bool = True
+    # Bi-temporal supersession: after distilling a new fact, check its nearest
+    # prior facts and stamp invalid_at on any the new one contradicts/replaces.
+    # One LLM call, gated by the similarity prefilter below — fires only on a
+    # near-duplicate write. Set False to keep all facts "current".
+    bitemporal_invalidation_enabled: bool = True
+    # Cosine-similarity floor for a fact to be a supersession candidate.
+    # Tighter than distill_cluster_threshold (0.88) would be too loose here —
+    # only near-duplicates plausibly contradict. 0.86 catches paraphrases of
+    # the same subject while excluding merely-related facts.
+    bitemporal_supersede_threshold: float = 0.86
 
 
 class RetrievalConfig(BaseModel):
