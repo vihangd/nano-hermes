@@ -29,38 +29,16 @@ _ACTIVE_MARKER = "Goal (active):"
 _OBJECTIVE_MAX_CHARS = 240  # cap for the snapshot stored on transition
 
 
-def goal_active(messages: list[dict[str, Any]]) -> bool:
-    """Return True if any system message contains the active-goal marker."""
-    for m in messages:
-        if m.get("role") != "system":
-            continue
-        content = m.get("content")
-        if isinstance(content, str) and _ACTIVE_MARKER in content:
-            return True
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict):
-                    text = block.get("text") or ""
-                    if isinstance(text, str) and _ACTIVE_MARKER in text:
-                        return True
-    return False
-
-
-def extract_objective(messages: list[dict[str, Any]]) -> str | None:
-    """Return the (clipped) objective text from the runtime context, or None.
-
-    The runtime block looks like:
-        Goal (active):
-        <objective text>
-        Summary: <hint>
-    We take the line(s) after the marker up to a blank line or the
-    'Summary:' prefix, clipped to _OBJECTIVE_MAX_CHARS.
+def _goal_block_text(messages: list[dict[str, Any]]) -> str | None:
+    """Return the text of the first system message carrying the active-goal
+    marker, or ``None``. Single pass — both ``goal_active`` and the objective
+    parse derive from this so the per-iteration tracker scans the message
+    list once, not twice.
     """
     for m in messages:
         if m.get("role") != "system":
             continue
         content = m.get("content")
-        text = ""
         if isinstance(content, str):
             text = content
         elif isinstance(content, list):
@@ -69,23 +47,48 @@ def extract_objective(messages: list[dict[str, Any]]) -> str | None:
                 for block in content
                 if isinstance(block, dict)
             )
-        if _ACTIVE_MARKER not in text:
+        else:
             continue
-        after = text.split(_ACTIVE_MARKER, 1)[1].lstrip("\n")
-        lines: list[str] = []
-        for line in after.splitlines():
-            if not line.strip():
-                break
-            if line.startswith("Summary:"):
-                break
-            lines.append(line)
-        objective = " ".join(lines).strip()
-        if not objective:
-            return None
-        if len(objective) > _OBJECTIVE_MAX_CHARS:
-            objective = objective[:_OBJECTIVE_MAX_CHARS].rstrip() + "…"
-        return objective
+        if _ACTIVE_MARKER in text:
+            return text
     return None
+
+
+def _parse_objective(text: str) -> str | None:
+    """Parse the clipped objective from a marker-bearing runtime block.
+
+    The block looks like:
+        Goal (active):
+        <objective text>
+        Summary: <hint>
+    We take the line(s) after the marker up to a blank line or the
+    'Summary:' prefix, clipped to _OBJECTIVE_MAX_CHARS.
+    """
+    after = text.split(_ACTIVE_MARKER, 1)[1].lstrip("\n")
+    lines: list[str] = []
+    for line in after.splitlines():
+        if not line.strip():
+            break
+        if line.startswith("Summary:"):
+            break
+        lines.append(line)
+    objective = " ".join(lines).strip()
+    if not objective:
+        return None
+    if len(objective) > _OBJECTIVE_MAX_CHARS:
+        objective = objective[:_OBJECTIVE_MAX_CHARS].rstrip() + "…"
+    return objective
+
+
+def goal_active(messages: list[dict[str, Any]]) -> bool:
+    """Return True if any system message contains the active-goal marker."""
+    return _goal_block_text(messages) is not None
+
+
+def extract_objective(messages: list[dict[str, Any]]) -> str | None:
+    """Return the (clipped) objective text from the runtime context, or None."""
+    text = _goal_block_text(messages)
+    return _parse_objective(text) if text is not None else None
 
 
 class GoalTracker:
@@ -106,10 +109,13 @@ class GoalTracker:
         self.last_objective: str | None = None
 
     def update(self, messages: list[dict[str, Any]]) -> str | None:
-        now_active = goal_active(messages)
+        # Single scan per iteration: derive both active-ness and the objective
+        # from one pass over the message list.
+        block = _goal_block_text(messages)
+        now_active = block is not None
         if now_active and not self.active:
             self.active = True
-            self.last_objective = extract_objective(messages)
+            self.last_objective = _parse_objective(block)
             return "started"
         if not now_active and self.active:
             self.active = False
@@ -119,7 +125,7 @@ class GoalTracker:
         if now_active:
             # Keep last_objective current — the objective text can be
             # edited in-place via /goal update commands.
-            current = extract_objective(messages)
+            current = _parse_objective(block)
             if current:
                 self.last_objective = current
         return None
