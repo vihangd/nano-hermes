@@ -135,6 +135,9 @@ def install(
 
     hook = NanoHermesHook(config=cfg, loop=loop)
     loop._extra_hooks.append(hook)
+    if cfg.memory_loadtime_scan:
+        from .memory.guard import install_loadtime_memory_scan  # noqa: PLC0415
+        install_loadtime_memory_scan(loop.context.memory)
     loop.tools.register(MemoryPatchTool(hook=hook))
     loop.tools.register(SessionBrowseTool(hook=hook))
     loop.tools.register(SessionSearchTool(hook=hook))
