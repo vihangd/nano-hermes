@@ -188,7 +188,7 @@ class SkillIndexer:
                 # they must pass skill_rate to promote.
                 # ON CONFLICT preserves the existing status — only set it on INSERT.
                 status = "active" if source in ("builtin", "external") else "draft"
-                cur = self._db.execute(
+                self._db.execute(
                     "INSERT INTO skill_stats (name, status, content_hash, indexed_at) "
                     "VALUES (?, ?, ?, ?) "
                     "ON CONFLICT(name) DO UPDATE SET "
@@ -196,7 +196,14 @@ class SkillIndexer:
                     "indexed_at = excluded.indexed_at",
                     (name, status, digest, now),
                 )
-                skill_id = cur.lastrowid
+                # cursor.lastrowid is NOT the conflicting row's id on the
+                # ON CONFLICT DO UPDATE branch (it keeps the last real INSERT's
+                # rowid), which would write the vector under the wrong skill and
+                # clobber another skill's embedding. Read the canonical id by
+                # name instead (UNIQUE-indexed, works on all SQLite versions).
+                skill_id = self._db.execute(
+                    "SELECT id FROM skill_stats WHERE name = ?", (name,)
+                ).fetchone()[0]
                 # vec0 doesn't support ON CONFLICT — delete then insert.
                 self._db.execute(
                     "DELETE FROM skill_vec WHERE skill_id = ?", (skill_id,)
