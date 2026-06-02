@@ -1,16 +1,22 @@
 """Goal-state transition tracking (Phase 8).
 
 nanobot's ``/goal`` command (and its ``long_task`` lineage) attaches a
-``goal_state`` blob to session metadata; ``goal_state_runtime_lines``
-then injects "Goal (active):" lines into the runtime-context system
-message whenever a goal is active.
+``goal_state`` blob to session metadata; ``goal_state_runtime_lines`` then
+emits "Goal (active):" / objective / "Summary:" lines INSIDE the
+``[Runtime Context …]`` block that ``ContextBuilder`` appends to the
+**current user message** every turn while a goal is active. (It is NOT in
+the system prompt — context.py merges the runtime block into the user
+content — and it is stripped from persisted history, so it appears only on
+the live turn.)
 
-Rather than reach into nanobot's SessionManager (private cache, fragile
-across versions), we detect goal state by scanning ``context.messages``
-for that visible marker. When the marker disappears between iterations
-we treat that as a goal completion and surface it to the reflection
-coordinator so the next iteration sees a Reflexion nudge — distilling
-the long-running objective into durable memory while it's still fresh.
+Rather than reach into nanobot's SessionManager (no session_key is exposed
+to the hook, and it's fragile across versions), we detect goal state by
+scanning ``context.messages`` for that block. We require BOTH the runtime
+sentinel and the marker so a user merely typing "Goal (active):" doesn't
+trip detection. When the block disappears between turns we treat that as a
+goal completion and surface it to the reflection coordinator so the next
+iteration sees a Reflexion nudge — distilling the long-running objective
+into durable memory while it's still fresh.
 
 Read-only. No nanobot imports beyond what's already in this module.
 """
@@ -22,22 +28,36 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-# Magic phrase emitted by nanobot.session.goal_state.goal_state_runtime_lines
-# when a sustained goal is active. Stable across nanobot versions because
-# it's user-facing UI text.
+# Phrase emitted by nanobot.session.goal_state.goal_state_runtime_lines when a
+# sustained goal is active, and the opening tag of the Runtime Context block it
+# lives inside (context.py ``_RUNTIME_CONTEXT_TAG``). Both are user-facing UI
+# text, stable across nanobot versions; we match the tag by prefix so minor
+# wording changes after "[Runtime Context" don't break detection.
 _ACTIVE_MARKER = "Goal (active):"
+# Fallback line nanobot emits when a goal is active but has no objective text
+# (goal_state.py). Lets us still detect the active→completed transition even
+# though there's no objective to parse.
+_ACTIVE_MARKER_NOOBJ = "Goal: active"
+_RUNTIME_SENTINEL = "[Runtime Context"
+_RUNTIME_END = "[/Runtime Context"  # closes the block; ']' omitted for safety
 _OBJECTIVE_MAX_CHARS = 240  # cap for the snapshot stored on transition
 
 
+def _has_active_marker(text: str) -> bool:
+    return _ACTIVE_MARKER in text or _ACTIVE_MARKER_NOOBJ in text
+
+
 def _goal_block_text(messages: list[dict[str, Any]]) -> str | None:
-    """Return the text of the first system message carrying the active-goal
-    marker, or ``None``. Single pass — both ``goal_active`` and the objective
-    parse derive from this so the per-iteration tracker scans the message
-    list once, not twice.
+    """Return the text of the message carrying an active goal inside nanobot's
+    Runtime Context block, or ``None``.
+
+    Single pass — both ``goal_active`` and the objective parse derive from this
+    so the per-iteration tracker scans the message list once. We don't filter
+    by role: the block rides in the current user message today, but requiring
+    the runtime sentinel makes detection robust wherever nanobot places it and
+    rejects a user who merely types the marker.
     """
     for m in messages:
-        if m.get("role") != "system":
-            continue
         content = m.get("content")
         if isinstance(content, str):
             text = content
@@ -49,7 +69,7 @@ def _goal_block_text(messages: list[dict[str, Any]]) -> str | None:
             )
         else:
             continue
-        if _ACTIVE_MARKER in text:
+        if _RUNTIME_SENTINEL in text and _has_active_marker(text):
             return text
     return None
 
@@ -61,15 +81,21 @@ def _parse_objective(text: str) -> str | None:
         Goal (active):
         <objective text>
         Summary: <hint>
-    We take the line(s) after the marker up to a blank line or the
-    'Summary:' prefix, clipped to _OBJECTIVE_MAX_CHARS.
+        [/Runtime Context]
+    We take the line(s) after the marker up to a blank line, the 'Summary:'
+    prefix, or the Runtime Context closing tag, clipped to
+    _OBJECTIVE_MAX_CHARS. (Without a Summary line the objective is followed
+    directly by '[/Runtime Context]', which must not bleed into it.)
     """
+    if _ACTIVE_MARKER not in text:
+        return None  # active-but-no-objective fallback form — nothing to parse
     after = text.split(_ACTIVE_MARKER, 1)[1].lstrip("\n")
     lines: list[str] = []
     for line in after.splitlines():
-        if not line.strip():
+        stripped = line.strip()
+        if not stripped:
             break
-        if line.startswith("Summary:"):
+        if stripped.startswith("Summary:") or stripped.startswith(_RUNTIME_END):
             break
         lines.append(line)
     objective = " ".join(lines).strip()
@@ -81,7 +107,7 @@ def _parse_objective(text: str) -> str | None:
 
 
 def goal_active(messages: list[dict[str, Any]]) -> bool:
-    """Return True if any system message contains the active-goal marker."""
+    """Return True if a message carries an active goal in its Runtime Context."""
     return _goal_block_text(messages) is not None
 
 
