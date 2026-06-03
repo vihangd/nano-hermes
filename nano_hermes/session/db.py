@@ -21,15 +21,69 @@ per turn.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 from pathlib import Path
+from typing import Callable
 
 import sqlite_vec
 
 from ..paths import state_db
 
 log = logging.getLogger(__name__)
+
+
+def _main_db_path(conn: sqlite3.Connection) -> str | None:
+    """File path backing ``conn``'s main database, or ``None`` if it has no
+    file (``:memory:`` / temp), which can't be reopened from another thread."""
+    try:
+        for _seq, name, file in conn.execute("PRAGMA database_list"):
+            if name == "main":
+                return file or None
+    except sqlite3.Error:
+        return None
+    return None
+
+
+async def run_vec_write(
+    conn: sqlite3.Connection,
+    fn: Callable[[sqlite3.Connection], object],
+    *,
+    busy_timeout_ms: int = 10000,
+) -> None:
+    """Run a vec-table write off the event loop on a short-lived connection.
+
+    Background ``_embed_and_write`` tasks call this so the synchronous commit
+    — and any WAL-checkpoint fsync it triggers — runs on a worker thread via
+    ``asyncio.to_thread`` instead of stalling the single event loop on slow
+    (SD-card) I/O. Mirrors the short-lived-connection pattern in
+    ``NanoHermesHook._background_purge`` and never shares the loop-owned
+    connection across threads.
+
+    Falls back to a synchronous write on ``conn`` when the database has no
+    backing file (e.g. ``:memory:``), which cannot be reopened elsewhere.
+    """
+    db_path = _main_db_path(conn)
+    if not db_path or db_path == ":memory:":
+        fn(conn)
+        conn.commit()
+        return
+
+    def _work() -> None:
+        w = sqlite3.connect(db_path)
+        try:
+            w.execute("PRAGMA foreign_keys = ON")
+            w.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+            w.enable_load_extension(True)
+            sqlite_vec.load(w)
+            w.enable_load_extension(False)
+            fn(w)
+            w.commit()
+        finally:
+            w.close()
+
+    await asyncio.to_thread(_work)
 
 
 _SCHEMA = """
@@ -418,65 +472,43 @@ def purge_older_than(conn: sqlite3.Connection, days: int) -> dict[str, int]:
     import time as _time  # noqa: PLC0415
     cutoff = _time.time() - days * 86400
 
-    # Collect vec IDs BEFORE cascade deletes remove the parent rows.
-    old_session_ids = [
-        r[0]
-        for r in conn.execute(
-            "SELECT id FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?",
-            (cutoff,),
-        ).fetchall()
-    ]
-    if old_session_ids:
-        ph = ",".join("?" * len(old_session_ids))
-        old_chunk_ids = [
-            r[0]
-            for r in conn.execute(
-                f"SELECT id FROM chunks WHERE session_id IN ({ph})",
-                old_session_ids,
-            ).fetchall()
-        ]
-        old_ref_ids = [
-            r[0]
-            for r in conn.execute(
-                f"SELECT id FROM reflections WHERE session_id IN ({ph})",
-                old_session_ids,
-            ).fetchall()
-        ]
-    else:
-        old_chunk_ids = []
-        old_ref_ids = []
-
+    # vec0 virtual tables don't participate in FK cascades, so their orphan
+    # rows must be deleted explicitly. Use nested subqueries (not a
+    # Python-materialised ``IN (?, ?, …)`` list) so a large purge can't blow
+    # past SQLite's SQLITE_MAX_VARIABLE_NUMBER cap (as low as 32766 on some
+    # builds) — which would raise OperationalError, get swallowed by the
+    # background purge, and silently stop both the purge and its VACUUM,
+    # letting the DB grow without bound on a swapless Pi.
+    #
+    # The vec0 cleanups must run BEFORE the parent DELETE: once sessions are
+    # gone their chunks/reflections cascade away and the subqueries find
+    # nothing.
+    _old_sessions = (
+        "SELECT id FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?"
+    )
+    conn.execute(
+        f"DELETE FROM chunks_vec WHERE chunk_id IN ("
+        f"  SELECT id FROM chunks WHERE session_id IN ({_old_sessions}))",
+        (cutoff,),
+    )
+    conn.execute(
+        f"DELETE FROM reflections_vec WHERE reflection_id IN ("
+        f"  SELECT id FROM reflections WHERE session_id IN ({_old_sessions}))",
+        (cutoff,),
+    )
     sess = conn.execute(
         "DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?",
         (cutoff,),
     ).rowcount
 
-    # Clean up orphaned vec0 rows for chunks and reflections (batched).
-    if old_chunk_ids:
-        ph = ",".join("?" * len(old_chunk_ids))
-        conn.execute(f"DELETE FROM chunks_vec WHERE chunk_id IN ({ph})", old_chunk_ids)
-    if old_ref_ids:
-        ph = ",".join("?" * len(old_ref_ids))
-        conn.execute(
-            f"DELETE FROM reflections_vec WHERE reflection_id IN ({ph})", old_ref_ids
-        )
-
-    # Collect trajectory IDs before deleting so we can clean up vec rows.
-    old_traj_ids = [
-        r[0]
-        for r in conn.execute(
-            "SELECT id FROM trajectories WHERE created_at < ?",
-            (cutoff,),
-        ).fetchall()
-    ]
+    conn.execute(
+        "DELETE FROM trajectories_vec WHERE trajectory_id IN ("
+        "  SELECT id FROM trajectories WHERE created_at < ?)",
+        (cutoff,),
+    )
     traj = conn.execute(
         "DELETE FROM trajectories WHERE created_at < ?",
         (cutoff,),
     ).rowcount
-    if old_traj_ids:
-        ph = ",".join("?" * len(old_traj_ids))
-        conn.execute(
-            f"DELETE FROM trajectories_vec WHERE trajectory_id IN ({ph})", old_traj_ids
-        )
     conn.commit()
     return {"sessions": sess, "trajectories": traj}

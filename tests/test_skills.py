@@ -1571,3 +1571,55 @@ class TestSkillNameBoundary:
         out = await tool.execute(name=name, description="d", body="b")
         assert out.startswith("Error"), f"65-char name should be rejected, got: {out}"
         assert "invalid skill name" in out
+
+
+# ---------------------------------------------------------------------------
+# Regression: skill_vec id integrity on description change (lastrowid-after-
+# upsert bug). A changed skill must update its OWN vector, not clobber another.
+# ---------------------------------------------------------------------------
+
+class TestSkillVectorIdIntegrity:
+    def test_changed_skill_does_not_clobber_another_vector(
+        self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import numpy as np
+
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop)
+        idx = hook.skill_indexer
+        dims = hook.config.embedding.target_dims
+
+        def _unit(axis: int) -> np.ndarray:
+            v = np.zeros(dims, dtype=np.float32)
+            v[axis] = 1.0
+            return v
+
+        # Initial index of two workspace skills (both real INSERTs).
+        idx._write_vectors(
+            [
+                ("alpha", "alpha: first", "h1", "workspace"),
+                ("beta", "beta: second", "h2", "workspace"),
+            ],
+            [_unit(0), _unit(1)],
+        )
+        aid = hook.db.execute(
+            "SELECT id FROM skill_stats WHERE name='alpha'"
+        ).fetchone()[0]
+        bid = hook.db.execute(
+            "SELECT id FROM skill_stats WHERE name='beta'"
+        ).fetchone()[0]
+
+        # alpha's description changes -> re-embed ONLY alpha. This hits the
+        # ON CONFLICT DO UPDATE branch, where cursor.lastrowid is NOT alpha's id.
+        idx._write_vectors([("alpha", "alpha: CHANGED", "h1b", "workspace")], [_unit(2)])
+
+        def _vec_of(sid: int):
+            row = hook.db.execute(
+                "SELECT embedding FROM skill_vec WHERE skill_id = ?", (sid,)
+            ).fetchone()
+            return np.frombuffer(row[0], dtype=np.float32) if row else None
+
+        assert np.allclose(_vec_of(aid), _unit(2)), "alpha's vector not updated"
+        assert np.allclose(_vec_of(bid), _unit(1)), (
+            "beta's vector was clobbered — lastrowid-after-upsert bug"
+        )

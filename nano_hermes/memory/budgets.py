@@ -17,6 +17,26 @@ from ..config import MemoryBudgets
 from .guard import scan_memory_content
 
 
+# Cached encoder + a sentinel marking "tiktoken unavailable, use the byte
+# heuristic". ``get_encoding`` loads a ~1.7MB BPE vocab (and may hit the
+# network on first call) — doing that on every memory_patch budget check is
+# pure waste on a Pi, so resolve it once per process.
+_ENC: object | None = None
+
+
+def _encoder() -> object | None:
+    """Return a memoized cl100k_base encoder, or ``None`` if tiktoken can't
+    be loaded (e.g. restricted-network Pi where the vocab can't be fetched)."""
+    global _ENC
+    if _ENC is None:
+        try:
+            import tiktoken
+            _ENC = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            _ENC = False  # negative cache — don't retry the failed import
+    return _ENC or None
+
+
 def _count_tokens(text: str) -> int:
     """Count tokens using cl100k_base (GPT-4 / Claude shared BPE).
 
@@ -24,14 +44,12 @@ def _count_tokens(text: str) -> int:
     (e.g., restricted-network Pi environment where the vocab file can't be
     downloaded). The fallback slightly over-counts CJK but stays conservative.
     """
-    try:
-        import tiktoken
-        enc = tiktoken.get_encoding("cl100k_base")
+    enc = _encoder()
+    if enc is not None:
         return len(enc.encode(text))
-    except Exception:
-        # ~4 UTF-8 bytes per token for Latin text; ~3 bytes/char for CJK
-        # which is ~1.5 bytes/token — dividing by 3 is a safe upper bound.
-        return max(1, len(text.encode("utf-8")) // 3)
+    # ~4 UTF-8 bytes per token for Latin text; ~3 bytes/char for CJK
+    # which is ~1.5 bytes/token — dividing by 3 is a safe upper bound.
+    return max(1, len(text.encode("utf-8")) // 3)
 
 Slot = Literal["memory", "user", "soul"]
 

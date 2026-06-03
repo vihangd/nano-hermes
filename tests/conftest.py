@@ -1,6 +1,7 @@
 """Shared fixtures and helpers for nano-hermes test suite."""
 from __future__ import annotations
 
+import contextlib
 import shutil
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -8,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
+from nanobot.agent import loop as _loop_mod
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
 
@@ -21,18 +23,27 @@ from nano_hermes.hook import NanoHermesHook
 def _make_loop(tmp_path: Path) -> AgentLoop:
     """Minimal AgentLoop. Mirrors nanobot/tests/agent/test_unified_session.py.
 
-    The patches avoid heavy subsystems (SessionManager, SubagentManager,
-    Dream) during __init__ — everything else we need (MemoryStore,
-    ContextBuilder, ToolRegistry, _extra_hooks) is constructed for real.
+    The patches avoid heavy subsystems (SessionManager, SubagentManager, and
+    the background dream/cron worker) during __init__ — everything else we
+    need (MemoryStore, ContextBuilder, ToolRegistry, _extra_hooks) is
+    constructed for real.
+
+    Version-tolerant across nanobot releases: 0.2.0 spins up a ``Dream``
+    object, while 0.2.1 (commit d1a94dae) replaced it with ``CronService``.
+    We patch whichever the installed nanobot actually exposes so the suite
+    stays green on both.
     """
     bus = MessageBus()
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
     provider.generation = MagicMock(max_tokens=4096)
 
-    with patch("nanobot.agent.loop.SessionManager"), \
-         patch("nanobot.agent.loop.SubagentManager") as sub_mgr, \
-         patch("nanobot.agent.loop.Dream"):
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch("nanobot.agent.loop.SessionManager"))
+        sub_mgr = stack.enter_context(patch("nanobot.agent.loop.SubagentManager"))
+        for sym in ("Dream", "CronService"):
+            if hasattr(_loop_mod, sym):
+                stack.enter_context(patch(f"nanobot.agent.loop.{sym}"))
         sub_mgr.return_value.cancel_by_session = AsyncMock(return_value=0)
         return AgentLoop(bus=bus, provider=provider, workspace=tmp_path)
 

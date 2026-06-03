@@ -23,6 +23,7 @@ from nanobot.agent.tools.base import Tool, tool_parameters
 
 from ..embedding.chain import AllProvidersFailed
 from ..redact import format_redaction_note, redact
+from ..session.db import run_vec_write
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -133,16 +134,20 @@ class ReflectTool(Tool):
         try:
             async with self._hook.embedder() as chain:
                 [vec] = await chain.embed([text])
-            # vec0 does not support UPSERT; delete first, then insert.
-            self._hook.db.execute(
-                "DELETE FROM reflections_vec WHERE reflection_id = ?",
-                (reflection_id,),
-            )
-            self._hook.db.execute(
-                "INSERT INTO reflections_vec (reflection_id, embedding) VALUES (?, ?)",
-                (reflection_id, vec.astype(np.float32).tobytes()),
-            )
-            self._hook.db.commit()
+            blob = vec.astype(np.float32).tobytes()
+
+            def _write(w):
+                # vec0 does not support UPSERT; delete first, then insert.
+                w.execute(
+                    "DELETE FROM reflections_vec WHERE reflection_id = ?",
+                    (reflection_id,),
+                )
+                w.execute(
+                    "INSERT INTO reflections_vec (reflection_id, embedding) VALUES (?, ?)",
+                    (reflection_id, blob),
+                )
+
+            await run_vec_write(self._hook.db, _write)
         except AllProvidersFailed as e:
             log.warning("reflection embed skipped: %s", e)
         except Exception:

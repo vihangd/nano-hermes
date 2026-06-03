@@ -140,6 +140,31 @@ class TestFtsSync:
         assert len(rows) == 1
 
 
+class TestEmbedderDownFallback:
+    async def test_all_providers_failed_degrades_to_fts(
+        self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When every embedding provider is down, _hybrid_search raises
+        AllProvidersFailed and execute() must fall back to the LIKE-based
+        keyword search and still return a matching trajectory."""
+        from nano_hermes.embedding.chain import AllProvidersFailed
+
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop)
+        _seed(hook, "kubernetes crashloop investigation", _FAKE_VEC_UNRELATED)
+
+        async def _boom(self, texts):
+            raise AllProvidersFailed("all down")
+
+        monkeypatch.setattr(
+            "nano_hermes.embedding.chain.EmbeddingChain.embed", _boom
+        )
+
+        tool = loop.tools.get("trajectory_search")
+        out = await tool.execute(query="kubernetes crashloop", k=3)
+        assert "kubernetes crashloop" in out, "fallback did not return the row"
+
+
 class TestMalformedQuery:
     async def test_unparsable_fts_query_degrades_to_dense(
         self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch

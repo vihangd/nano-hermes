@@ -30,6 +30,7 @@ import numpy as np
 from ..embedding.chain import AllProvidersFailed, EmbeddingChain
 from ..embedding.contextual import add_context_preamble
 from ..redact import redact
+from .db import run_vec_write
 
 log = logging.getLogger(__name__)
 
@@ -239,11 +240,15 @@ class SessionArchiver:
             log.exception("embed batch (%d chunks) crashed", len(chunk_ids))
             return
 
+        rows = [
+            (cid, vec.astype(np.float32).tobytes()) for cid, vec in zip(chunk_ids, vecs)
+        ]
         try:
-            self._db.executemany(
-                "INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)",
-                [(cid, vec.astype(np.float32).tobytes()) for cid, vec in zip(chunk_ids, vecs)],
+            await run_vec_write(
+                self._db,
+                lambda w: w.executemany(
+                    "INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)", rows
+                ),
             )
-            self._db.commit()
         except Exception:
             log.exception("vec write failed for %d chunks", len(chunk_ids))

@@ -410,3 +410,126 @@ class TestBusyTimeout:
             await hook._purge_task
 
         assert 6250 in seen, "busy_timeout not applied to purge connection"
+
+
+class TestVacuumActuallyRuns:
+    """The cooldown test must prove VACUUM does NOT execute within the window,
+    not merely that the meta timestamp is unchanged — a regression that VACUUMs
+    unconditionally but only meta_sets inside the guard would pass the latter."""
+
+    def _spy_vacuum(self, monkeypatch):
+        import sqlite3 as _sqlite3
+
+        vacuums: list[int] = []
+        real_connect = _sqlite3.connect
+
+        class _SpyConn(_sqlite3.Connection):
+            def execute(self, sql, *a, **k):  # type: ignore[override]
+                if "vacuum" in sql.lower():
+                    vacuums.append(1)
+                return super().execute(sql, *a, **k)
+
+        def _spy_connect(*args, **kwargs):
+            kwargs.setdefault("factory", _SpyConn)
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(_sqlite3, "connect", _spy_connect)
+        return vacuums
+
+    async def _run_purge(self, hook):
+        messages: list[dict] = [{"role": "user", "content": "new session"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=messages))
+        if hook._purge_task:
+            await hook._purge_task
+
+    async def test_vacuum_runs_on_first_purge(
+        self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time as _time
+
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop, config={"trajectory_retention_days": 30})
+        hook.db.execute(
+            "INSERT INTO trajectories (task, outcome, created_at) VALUES (?, ?, ?)",
+            ("old task", "ok", _time.time() - 60 * 86400),
+        )
+        hook.db.commit()
+        vacuums = self._spy_vacuum(monkeypatch)
+        await self._run_purge(hook)
+        assert sum(vacuums) >= 1, "VACUUM did not run on first purge with deletions"
+
+    async def test_vacuum_does_not_run_within_cooldown(
+        self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time as _time
+        from nano_hermes.hook import _META_LAST_VACUUM
+
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(
+            loop,
+            config={"trajectory_retention_days": 30, "vacuum_min_interval_days": 7},
+        )
+        # A VACUUM ran one day ago — inside the 7-day cooldown.
+        hook.db.execute(
+            "INSERT INTO meta(key, value) VALUES (?, ?)",
+            (_META_LAST_VACUUM, str(_time.time() - 1 * 86400)),
+        )
+        hook.db.execute(
+            "INSERT INTO trajectories (task, outcome, created_at) VALUES (?, ?, ?)",
+            ("old task", "ok", _time.time() - 60 * 86400),
+        )
+        hook.db.commit()
+        vacuums = self._spy_vacuum(monkeypatch)
+        await self._run_purge(hook)
+        assert sum(vacuums) == 0, "VACUUM ran despite being inside the cooldown window"
+        # ...but the purge itself still happened.
+        assert hook.db.execute(
+            "SELECT COUNT(*) FROM trajectories"
+        ).fetchone()[0] == 0
+
+
+class TestPurgeNoVariableCap:
+    """purge_older_than must use correlated subqueries, not a Python-built
+    IN (?, ?, …) list, so a large purge can't blow past SQLITE_MAX_VARIABLE_NUMBER
+    (raising OperationalError that gets swallowed, silently stopping the purge)."""
+
+    def test_large_purge_succeeds_and_cleans_vec(
+        self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time as _time
+        import numpy as np
+        from nano_hermes.session.db import purge_older_than
+
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop)
+        dims = hook.config.embedding.target_dims
+        old_ts = _time.time() - 60 * 86400
+
+        cur = hook.db.execute(
+            "INSERT INTO sessions (session_key, started_at, ended_at) VALUES (?, ?, ?)",
+            ("old:bulk", old_ts, old_ts),
+        )
+        sid = cur.lastrowid
+        vec = np.ones(dims, dtype=np.float32)
+        vec /= np.linalg.norm(vec)
+        # Well past the conservative 999-variable cap; the old code would build
+        # an IN-list of this many placeholders.
+        n = 1500
+        for i in range(n):
+            c = hook.db.execute(
+                "INSERT INTO chunks (session_id, turn_index, role, content, created_at) "
+                "VALUES (?, ?, 'user', 'x', ?)",
+                (sid, i, old_ts),
+            )
+            hook.db.execute(
+                "INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)",
+                (c.lastrowid, vec.tobytes()),
+            )
+        hook.db.commit()
+        assert hook.db.execute("SELECT COUNT(*) FROM chunks_vec").fetchone()[0] == n
+
+        # Must not raise, and must clean every vec0 orphan.
+        result = purge_older_than(hook.db, days=30)
+        assert result["sessions"] == 1
+        assert hook.db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
+        assert hook.db.execute("SELECT COUNT(*) FROM chunks_vec").fetchone()[0] == 0

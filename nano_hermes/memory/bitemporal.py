@@ -160,7 +160,16 @@ async def _ask_superseded(
 
     nums = _parse_index_list(content)
     num_to_id = {n: fid for n, (fid, _content) in numbered}
-    return [num_to_id[n] for n in nums if n in num_to_id]
+    # Map display numbers to fact ids, dropping out-of-range numbers and
+    # de-duplicating (an LLM may echo an index twice) while preserving order.
+    out: list[int] = []
+    seen: set[int] = set()
+    for n in nums:
+        fid = num_to_id.get(n)
+        if fid is not None and fid not in seen:
+            seen.add(fid)
+            out.append(fid)
+    return out
 
 
 def _parse_index_list(text: str) -> list[int]:

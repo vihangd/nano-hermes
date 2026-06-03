@@ -24,6 +24,7 @@ import numpy as np
 
 from ..embedding.chain import AllProvidersFailed, EmbeddingChain
 from .archiver import _extract_text
+from .db import run_vec_write
 
 log = logging.getLogger(__name__)
 
@@ -110,12 +111,15 @@ class TrajectoryWriter:
         except Exception:
             log.exception("trajectory embed crashed (id=%d)", trajectory_id)
             return
+        blob = vec.astype(np.float32).tobytes()
         try:
-            self._db.execute(
-                "INSERT INTO trajectories_vec (trajectory_id, embedding) VALUES (?, ?)",
-                (trajectory_id, vec.astype(np.float32).tobytes()),
+            await run_vec_write(
+                self._db,
+                lambda w: w.execute(
+                    "INSERT INTO trajectories_vec (trajectory_id, embedding) VALUES (?, ?)",
+                    (trajectory_id, blob),
+                ),
             )
-            self._db.commit()
         except Exception:
             log.exception("trajectory vec write failed (id=%d)", trajectory_id)
 

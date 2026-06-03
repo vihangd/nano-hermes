@@ -12,13 +12,16 @@ from unittest.mock import AsyncMock, MagicMock
 import numpy as np
 import pytest
 
+import json as _json
+
 import nano_hermes
-from conftest import _make_loop, _patch_embedding
+from conftest import _FAKE_VEC_SEARCH, _make_loop, _patch_embedding
 from nano_hermes.memory.bitemporal import (
     _parse_index_list,
     invalidate_superseded_facts,
 )
 from nano_hermes.memory.links import link_new_fact, neighbours_of
+from nano_hermes.memory.tool import MemoryPatchTool
 
 
 def _mock_response(text: str) -> MagicMock:
@@ -156,6 +159,112 @@ class TestInvalidateSuperseded:
         result = await invalidate_superseded_facts(hook, new, "no vec stored")
         assert result == []
         hook._loop.provider.chat_with_retry.assert_not_called()
+
+    async def test_never_raises_on_provider_error(self, tmp_path):
+        """The docstring promises best-effort: a provider exception must not
+        escape into distillation."""
+        hook = _make_hook(tmp_path)
+        db = hook.db
+        old = _insert_fact(db, "old fact")
+        _insert_vec(db, old, _unit(0))
+        new = _insert_fact(db, "new fact")
+        _insert_vec(db, new, _unit(0))
+        hook._loop.provider.chat_with_retry = AsyncMock(side_effect=RuntimeError("boom"))
+        result = await invalidate_superseded_facts(hook, new, "new fact")
+        assert result == []
+        assert _invalid_at(db, old) is None
+
+    async def test_out_of_range_and_duplicate_indices_handled(self, tmp_path):
+        """LLM returns indices beyond the candidate count and a duplicate —
+        only the valid one is invalidated, exactly once."""
+        hook = _make_hook(tmp_path)
+        db = hook.db
+        old = _insert_fact(db, "the one real candidate")
+        _insert_vec(db, old, _unit(0))
+        new = _insert_fact(db, "supersedes it")
+        _insert_vec(db, new, _unit(0))
+        hook._loop.provider.chat_with_retry = AsyncMock(
+            return_value=_mock_response("[1, 5, 1]")  # 5 is out of range; 1 dup
+        )
+        result = await invalidate_superseded_facts(hook, new, "supersedes it")
+        assert result == [old]
+        assert _invalid_at(db, old) is not None
+
+
+class TestDistillEndToEnd:
+    async def test_distill_invalidates_superseded_fact(self, tmp_path, monkeypatch):
+        """Full memory_patch(action='distill') path: a distilled fact stamps
+        invalid_at on a near-duplicate prior fact and surfaces it in the output."""
+        from tests.test_episodic_distillation import _seed_two_session_hub  # noqa: PLC0415
+
+        _patch_embedding(monkeypatch)
+        hook = _make_hook(tmp_path)
+        _seed_two_session_hub(hook.db)
+
+        # Pre-seed a prior fact the new one will supersede, with a vector that
+        # matches what the distilled "duckduckgo" fact embeds to.
+        old = _insert_fact(hook.db, "duckduckgo search uses the v1 API")
+        _insert_vec(hook.db, old, _FAKE_VEC_SEARCH)
+
+        distill_json = _json.dumps({
+            "fact": "duckduckgo search now requires the v2 API",
+            "keywords": ["duckduckgo", "api"],
+            "tags": ["web"],
+            "context": "When calling search.",
+            "importance": 7,
+        })
+        # Call 1: distill_hub_to_fact. Call 2: supersession check.
+        hook._loop.provider.chat_with_retry = AsyncMock(
+            side_effect=[_mock_response(distill_json), _mock_response("[1]")]
+        )
+
+        tool = MemoryPatchTool(hook=hook)
+        result = await tool.execute(action="distill")
+
+        assert _invalid_at(hook.db, old) is not None, "prior fact not invalidated"
+        assert "supersedes" in result
+        # The new fact itself stays current.
+        new_rows = hook.db.execute(
+            "SELECT invalid_at FROM semantic_facts WHERE content LIKE '%v2 API%'"
+        ).fetchone()
+        assert new_rows is not None and new_rows[0] is None
+
+
+class TestMigration:
+    def test_invalid_at_added_to_legacy_semantic_facts(self, tmp_path):
+        """A DB whose semantic_facts predates invalid_at must gain the column
+        via _apply_migrations, and the live WHERE invalid_at IS NULL filter
+        must then work."""
+        import sqlite3
+
+        from nano_hermes.session.db import _apply_migrations
+
+        conn = sqlite3.connect(tmp_path / "legacy.db")
+        # Legacy 4-column shape (pre-A-MEM, pre-bitemporal).
+        conn.execute(
+            "CREATE TABLE semantic_facts ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " content TEXT NOT NULL,"
+            " source_chunk_ids TEXT NOT NULL,"
+            " created_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO semantic_facts (content, source_chunk_ids, created_at) "
+            "VALUES ('legacy fact', '[]', 1.0)"
+        )
+        conn.commit()
+
+        _apply_migrations(conn)
+
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(semantic_facts)")]
+        assert "invalid_at" in cols
+        # Existing rows default to NULL = currently valid, so the live filter
+        # returns them.
+        rows = conn.execute(
+            "SELECT content FROM semantic_facts WHERE invalid_at IS NULL"
+        ).fetchall()
+        assert rows == [("legacy fact",)]
+        conn.close()
 
 
 class TestInvalidFiltering:

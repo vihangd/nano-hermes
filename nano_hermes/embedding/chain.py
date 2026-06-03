@@ -24,6 +24,18 @@ from ..config import EmbeddingConfig, EmbeddingProvider
 
 log = logging.getLogger(__name__)
 
+def _embeddings_in_index_order(data: dict) -> list[list[float]]:
+    """Extract embeddings from an OpenAI-compatible response in input order.
+
+    The response carries a per-row ``index`` because array order is not
+    contractual. Batch callers bind vectors positionally (zip with chunk_ids /
+    skill names), so a provider that returns rows out of order would silently
+    misbind every vector to the wrong text. Sort by ``index`` to prevent that.
+    """
+    rows = sorted(data["data"], key=lambda row: row.get("index", 0))
+    return [row["embedding"] for row in rows]
+
+
 # OpenAI-compatible embedding endpoints.
 _ENDPOINTS: dict[str, str] = {
     "deepinfra":  "https://api.deepinfra.com/v1/openai/embeddings",
@@ -114,7 +126,7 @@ class EmbeddingChain:
                 log.warning("embedding provider %s failed: %s", p.provider, e)
         raise AllProvidersFailed("; ".join(errors))
 
-    async def _call(
+    async def _call(  # noqa: D401
         self, p: EmbeddingProvider, texts: list[str]
     ) -> list[list[float]]:
         assert self._session is not None, "use `async with` to open the chain"
@@ -130,7 +142,7 @@ class EmbeddingChain:
         async with self._session.post(url, headers=headers, json=payload) as r:
             r.raise_for_status()
             data = await r.json()
-        return [row["embedding"] for row in data["data"]]
+        return _embeddings_in_index_order(data)
 
     def _postprocess(self, raw: list[float]) -> np.ndarray:
         v = np.asarray(raw, dtype=np.float32)
