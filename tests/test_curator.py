@@ -26,12 +26,16 @@ def _seed_skill(
     status: str = "active",
     use_count: int = 5,
     last_used_age_days: float = 0,
+    origin: str = "agent",
+    pinned: int = 0,
 ):
     now = time.time()
+    # Default origin='agent' (auto-evolvable, created via propose_skill); only
+    # such skills are eligible for curator archival.
     hook.db.execute(
-        "INSERT INTO skill_stats (name, status, use_count, last_used_at) "
-        "VALUES (?, ?, ?, ?)",
-        (name, status, use_count, now - last_used_age_days * 86400),
+        "INSERT INTO skill_stats (name, status, use_count, last_used_at, origin, pinned) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (name, status, use_count, now - last_used_age_days * 86400, origin, pinned),
     )
     hook.db.commit()
     skill_dir = hook.workspace / "skills" / name

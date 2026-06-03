@@ -29,9 +29,11 @@ from nano_hermes.skills.rewriter import (
 # ---------------------------------------------------------------------------
 
 def _seed_skill(hook: NanoHermesHook, name: str, use_count: int, success_count: int) -> None:
+    # origin='agent' marks these as auto-evolvable (created via propose_skill);
+    # only such skills are rewrite candidates.
     hook.db.execute(
         "INSERT OR REPLACE INTO skill_stats "
-        "(name, status, use_count, success_count) VALUES (?, 'active', ?, ?)",
+        "(name, status, use_count, success_count, origin) VALUES (?, 'active', ?, ?, 'agent')",
         (name, use_count, success_count),
     )
     hook.db.commit()
@@ -374,7 +376,7 @@ class TestRunRewriter:
         # Seed skill stats above thresholds
         hook.db.execute(
             "INSERT OR REPLACE INTO skill_stats "
-            "(name, status, use_count, success_count) VALUES (?, 'active', 10, 1)",
+            "(name, status, use_count, success_count, origin) VALUES (?, 'active', 10, 1, 'agent')",
             (skill_name,),
         )
         hook.db.commit()
@@ -433,10 +435,11 @@ class TestRunRewriter:
         loop = _make_loop(tmp_path)
         hook = nano_hermes.install(loop)
 
-        # High success rate — should not trigger
+        # High success rate — should not trigger (origin='agent' so the only
+        # thing keeping it out of candidates is the success rate, not origin)
         hook.db.execute(
             "INSERT OR REPLACE INTO skill_stats "
-            "(name, status, use_count, success_count) VALUES (?, 'active', 10, 9)",
+            "(name, status, use_count, success_count, origin) VALUES (?, 'active', 10, 9, 'agent')",
             (skill_name,),
         )
         hook.db.commit()

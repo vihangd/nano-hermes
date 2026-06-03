@@ -70,6 +70,8 @@ def find_stale_skills(
         SELECT name, last_used_at, use_count
         FROM skill_stats
         WHERE status = 'active'
+          AND origin = 'agent'
+          AND pinned = 0
           AND use_count >= ?
           AND last_used_at IS NOT NULL
           AND last_used_at < ?

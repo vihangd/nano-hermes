@@ -34,7 +34,7 @@ _SCHEMA: dict[str, Any] = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["create", "edit", "patch"],
+            "enum": ["create", "edit", "patch", "pin", "unpin"],
             "description": (
                 "'create' (default) writes a new draft skill — fails if an "
                 "active or draft skill with that name already exists. "
@@ -42,7 +42,9 @@ _SCHEMA: dict[str, Any] = {
                 "skill (full body replacement, may add/remove companion files). "
                 "'patch' is a surgical find-and-replace inside SKILL.md (or one "
                 "companion file via file_path) — preferred for typos and "
-                "single-line fixes since it avoids re-emitting the whole body."
+                "single-line fixes since it avoids re-emitting the whole body. "
+                "'pin' exempts a skill from automatic evolution (rewrite/"
+                "deprecation); 'unpin' lifts the exemption. Both take only name."
             ),
         },
         "name": {
@@ -203,10 +205,13 @@ class ProposeSkillTool(Tool):
         if action == "patch":
             return await self._patch(skill_name, kwargs)
 
+        if action in ("pin", "unpin"):
+            return self._set_pinned(skill_name, action == "pin")
+
         if action not in ("create", "edit"):
             return (
                 f"Error: unknown action {action!r} — must be 'create', 'edit', "
-                "or 'patch'."
+                "'patch', 'pin', or 'unpin'."
             )
 
         # --- create/edit-only validation ---
@@ -272,6 +277,20 @@ class ProposeSkillTool(Tool):
             seen.add(path)
         return None
 
+    def _set_pinned(self, skill_name: str, pinned: bool) -> str:
+        """Toggle the user-exemption flag that shields a skill from automatic
+        rewrite/deprecation. Works on any existing skill regardless of origin."""
+        cur = self._hook.db.execute(
+            "UPDATE skill_stats SET pinned = ? WHERE name = ?",
+            (1 if pinned else 0, skill_name),
+        )
+        self._hook.db.commit()
+        if cur.rowcount == 0:
+            return f"Error: no skill named {skill_name!r}."
+        if pinned:
+            return f"ok: pinned {skill_name!r} — exempt from automatic evolution."
+        return f"ok: unpinned {skill_name!r} — automatic evolution re-enabled."
+
     def _apply_redaction(
         self,
         description: str,
@@ -334,8 +353,8 @@ class ProposeSkillTool(Tool):
             skill_name, description, body, files, delete_files=[],
             upsert_sql=(
                 "INSERT INTO skill_stats "
-                "(name, status, use_count, success_count, last_used_at, provenance, content_hash) "
-                "VALUES (?, 'draft', 0, 0, NULL, NULL, NULL) "
+                "(name, status, use_count, success_count, last_used_at, provenance, content_hash, origin) "
+                "VALUES (?, 'draft', 0, 0, NULL, NULL, NULL, 'agent') "
                 "ON CONFLICT(name) DO UPDATE SET "
                 "status = 'draft', "
                 "use_count = 0, "
@@ -343,7 +362,10 @@ class ProposeSkillTool(Tool):
                 "last_used_at = NULL, "
                 "provenance = NULL, "
                 "content_hash = NULL, "
-                "indexed_at = NULL"
+                "indexed_at = NULL, "
+                "origin = 'agent'"
+                # NB: `pinned` is intentionally left untouched so a re-proposed
+                # skill keeps any user pin.
             ),
             success_msg=(
                 f"ok: created draft skill '{skill_name}' at "

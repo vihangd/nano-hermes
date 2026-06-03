@@ -927,8 +927,8 @@ class TestSkillPromotion:
 
         # Seed: 4 uses, 0 successes (below min_uses=5, so not yet deprecated)
         hook.db.execute(
-            "INSERT INTO skill_stats (name, status, use_count, success_count) "
-            "VALUES ('bad-skill', 'active', 4, 0)"
+            "INSERT INTO skill_stats (name, status, use_count, success_count, origin) "
+            "VALUES ('bad-skill', 'active', 4, 0, 'agent')"
         )
         hook.db.commit()
 
@@ -990,8 +990,8 @@ class TestSkillPromotion:
 
         # Seed: 2 uses, 0 successes — below min_uses=5
         hook.db.execute(
-            "INSERT INTO skill_stats (name, status, use_count, success_count) "
-            "VALUES ('newish-skill', 'active', 2, 0)"
+            "INSERT INTO skill_stats (name, status, use_count, success_count, origin) "
+            "VALUES ('newish-skill', 'active', 2, 0, 'agent')"
         )
         hook.db.commit()
 
@@ -1402,8 +1402,8 @@ class TestSkillRateTool:
         )
         # Pre-seed 4 uses, 0 successes
         hook.db.execute(
-            "INSERT INTO skill_stats (name, status, use_count, success_count) "
-            "VALUES ('bad-skill', 'active', 4, 0)"
+            "INSERT INTO skill_stats (name, status, use_count, success_count, origin) "
+            "VALUES ('bad-skill', 'active', 4, 0, 'agent')"
         )
         hook.db.commit()
 

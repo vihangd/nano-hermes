@@ -25,9 +25,11 @@ from nano_hermes.skills.gepa import (
 # ---------------------------------------------------------------------------
 
 def _seed_skill(hook: NanoHermesHook, name: str, use_count: int, success_count: int) -> None:
+    # origin='agent' marks these as auto-evolvable (created via propose_skill);
+    # only such skills are GEPA/rewrite candidates.
     hook.db.execute(
         "INSERT OR REPLACE INTO skill_stats "
-        "(name, status, use_count, success_count) VALUES (?, 'active', ?, ?)",
+        "(name, status, use_count, success_count, origin) VALUES (?, 'active', ?, ?, 'agent')",
         (name, use_count, success_count),
     )
     hook.db.commit()
