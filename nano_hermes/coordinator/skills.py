@@ -177,12 +177,13 @@ class SkillUsageTracker:
                 ]
                 for name in names:
                     row = self._db.execute(
-                        "SELECT status, use_count, success_count FROM skill_stats WHERE name = ?",
+                        "SELECT status, use_count, success_count, origin, pinned "
+                        "FROM skill_stats WHERE name = ?",
                         (name,),
                     ).fetchone()
                     if not row:
                         continue
-                    status, use_count, success_count = row
+                    status, use_count, success_count, origin, pinned = row
 
                     # Promotion: draft -> active after enough successes
                     if status == "draft" and success_count >= cfg.promotion_threshold:
@@ -208,9 +209,13 @@ class SkillUsageTracker:
                             )
                             status = "active"
 
-                    # Deprecation: any non-deprecated skill with chronic low success
+                    # Deprecation: agent-authored, unpinned skills with chronic
+                    # low success. Builtin/external/hand-authored ('user') and
+                    # pinned skills are exempt from automatic deprecation.
                     if (
                         status != "deprecated"
+                        and origin == "agent"
+                        and not pinned
                         and use_count >= cfg.deprecation_min_uses
                         and use_count > 0
                         and success_count / use_count < cfg.deprecation_max_success_rate

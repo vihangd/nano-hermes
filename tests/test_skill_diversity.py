@@ -19,9 +19,11 @@ def _seed_skill_with_vec(
 ) -> None:
     """Insert skill_stats + skill_vec rows directly, bypassing the indexer."""
     with db:
+        # origin='agent' marks these as auto-evolvable (created via propose_skill);
+        # only such skills are eligible for promotion/deprecation transitions.
         db.execute(
             "INSERT OR REPLACE INTO skill_stats "
-            "(name, status, use_count, success_count) VALUES (?, ?, ?, ?)",
+            "(name, status, use_count, success_count, origin) VALUES (?, ?, ?, ?, 'agent')",
             (name, status, use_count, success_count),
         )
         skill_id = db.execute(

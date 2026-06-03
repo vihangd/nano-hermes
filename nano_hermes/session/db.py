@@ -133,7 +133,9 @@ CREATE TABLE IF NOT EXISTS skill_stats (
     last_used_at    REAL,
     provenance      TEXT,                              -- JSON list of session ids
     content_hash    TEXT,                              -- sha1 of (name + description)
-    indexed_at      REAL                               -- last time we embedded this skill
+    indexed_at      REAL,                              -- last time we embedded this skill
+    origin          TEXT NOT NULL DEFAULT 'user',      -- 'agent' (propose_skill) | 'user' (everything else)
+    pinned          INTEGER NOT NULL DEFAULT 0         -- 1 = user-exempted from auto-evolution
 );
 
 -- Small key/value store for one-off metadata that doesn't justify its
@@ -353,6 +355,15 @@ _MIGRATIONS = [
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 )""",
+    # Phase 10: skill write-origin + pinning. Only 'agent'-authored skills
+    # (created via propose_skill) are eligible for auto-evolution; everything
+    # else — builtin, external, and hand-authored workspace skills — defaults
+    # to 'user' and is protected. `pinned` lets a user exempt any skill.
+    # Existing rows migrate to 'user', which conservatively shields skills the
+    # agent proposed before this column existed; newly proposed skills get
+    # 'agent' going forward.
+    "ALTER TABLE skill_stats ADD COLUMN origin TEXT NOT NULL DEFAULT 'user'",
+    "ALTER TABLE skill_stats ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
 ]
 
 

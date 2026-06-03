@@ -97,12 +97,19 @@ def get_rewrite_candidates(
     failure_threshold: float,
     min_uses: int,
 ) -> list[RewriteCandidate]:
-    """Return active skills whose failure rate exceeds *failure_threshold*."""
+    """Return active skills whose failure rate exceeds *failure_threshold*.
+
+    Only ``origin='agent'`` skills (created via propose_skill) and not
+    user-pinned are eligible — builtin/external/hand-authored skills are never
+    auto-rewritten. This is the single candidate source for both the rewriter
+    and GEPA (``gepa.get_rewrite_candidates``)."""
     rows = db.execute(
         """
         SELECT name, use_count, success_count
         FROM skill_stats
         WHERE status = 'active'
+          AND origin = 'agent'
+          AND pinned = 0
           AND use_count >= ?
           AND CAST(use_count - success_count AS REAL) / use_count > ?
         ORDER BY CAST(use_count - success_count AS REAL) / use_count DESC
