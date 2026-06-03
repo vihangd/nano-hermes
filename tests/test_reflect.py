@@ -348,10 +348,12 @@ class TestGlobalReflection:
         result = await tool.execute(content="When in doubt, check the docs first.")
         assert result.startswith("ok"), result
 
-        # Let any scheduled background tasks complete
+        # Await the scheduled embed task(s). The vec write now runs off the
+        # event loop via asyncio.to_thread, so yielding a couple of ticks no
+        # longer guarantees completion — wait on the real tasks instead.
         import asyncio
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        if hook._reflection_embed_tasks:
+            await asyncio.gather(*hook._reflection_embed_tasks)
 
         row_count = hook.db.execute(
             "SELECT COUNT(*) FROM reflections_vec"

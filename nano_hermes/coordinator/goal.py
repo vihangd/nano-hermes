@@ -56,8 +56,12 @@ def _goal_block_text(messages: list[dict[str, Any]]) -> str | None:
     by role: the block rides in the current user message today, but requiring
     the runtime sentinel makes detection robust wherever nanobot places it and
     rejects a user who merely types the marker.
+
+    Scanned tail-first and returns on the first match: the runtime block lives
+    in the latest user message, so in a long ``/goal`` session this touches one
+    or a few messages instead of the whole transcript every iteration.
     """
-    for m in messages:
+    for m in reversed(messages):
         content = m.get("content")
         if isinstance(content, str):
             text = content

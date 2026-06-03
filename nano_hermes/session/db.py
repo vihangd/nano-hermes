@@ -21,15 +21,69 @@ per turn.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 from pathlib import Path
+from typing import Callable
 
 import sqlite_vec
 
 from ..paths import state_db
 
 log = logging.getLogger(__name__)
+
+
+def _main_db_path(conn: sqlite3.Connection) -> str | None:
+    """File path backing ``conn``'s main database, or ``None`` if it has no
+    file (``:memory:`` / temp), which can't be reopened from another thread."""
+    try:
+        for _seq, name, file in conn.execute("PRAGMA database_list"):
+            if name == "main":
+                return file or None
+    except sqlite3.Error:
+        return None
+    return None
+
+
+async def run_vec_write(
+    conn: sqlite3.Connection,
+    fn: Callable[[sqlite3.Connection], object],
+    *,
+    busy_timeout_ms: int = 10000,
+) -> None:
+    """Run a vec-table write off the event loop on a short-lived connection.
+
+    Background ``_embed_and_write`` tasks call this so the synchronous commit
+    — and any WAL-checkpoint fsync it triggers — runs on a worker thread via
+    ``asyncio.to_thread`` instead of stalling the single event loop on slow
+    (SD-card) I/O. Mirrors the short-lived-connection pattern in
+    ``NanoHermesHook._background_purge`` and never shares the loop-owned
+    connection across threads.
+
+    Falls back to a synchronous write on ``conn`` when the database has no
+    backing file (e.g. ``:memory:``), which cannot be reopened elsewhere.
+    """
+    db_path = _main_db_path(conn)
+    if not db_path or db_path == ":memory:":
+        fn(conn)
+        conn.commit()
+        return
+
+    def _work() -> None:
+        w = sqlite3.connect(db_path)
+        try:
+            w.execute("PRAGMA foreign_keys = ON")
+            w.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+            w.enable_load_extension(True)
+            sqlite_vec.load(w)
+            w.enable_load_extension(False)
+            fn(w)
+            w.commit()
+        finally:
+            w.close()
+
+    await asyncio.to_thread(_work)
 
 
 _SCHEMA = """
