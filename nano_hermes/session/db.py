@@ -523,3 +523,56 @@ def purge_older_than(conn: sqlite3.Connection, days: int) -> dict[str, int]:
     ).rowcount
     conn.commit()
     return {"sessions": sess, "trajectories": traj}
+
+
+def evict_low_value_facts(
+    conn: sqlite3.Connection,
+    *,
+    retention_days: int,
+    importance_floor: int,
+    superseded_grace_days: int,
+    max_per_run: int,
+    now: float | None = None,
+) -> int:
+    """Bound the otherwise-unbounded ``semantic_facts`` table.
+
+    Two conservative tiers, each capped at ``max_per_run`` deletions total:
+      1. Superseded facts (``invalid_at`` set) older than the grace window —
+         pure dead weight kept only briefly for audit.
+      2. *Valid* facts that are both older than ``retention_days`` AND below
+         ``importance_floor`` (the distiller's 1–10 score). High-importance
+         facts never auto-evict, regardless of age.
+
+    Deletion is ordered lowest-value-first and bounded by a subquery LIMIT
+    (SQLite's ``DELETE … LIMIT`` is a non-default compile option). The
+    ``semantic_facts_ad`` trigger removes the matching ``semantic_facts_vec``
+    rows and ``semantic_fact_links`` cascade via FK, so callers need only
+    delete the parent rows. Returns the number of facts removed.
+    """
+    import time as _time  # noqa: PLC0415
+    now_ts = now if now is not None else _time.time()
+    removed = 0
+
+    if superseded_grace_days >= 0 and max_per_run > 0:
+        cutoff = now_ts - superseded_grace_days * 86400
+        removed += conn.execute(
+            "DELETE FROM semantic_facts WHERE id IN ("
+            "  SELECT id FROM semantic_facts "
+            "  WHERE invalid_at IS NOT NULL AND invalid_at < ? "
+            "  ORDER BY invalid_at ASC LIMIT ?)",
+            (cutoff, max_per_run),
+        ).rowcount
+
+    remaining = max_per_run - removed
+    if retention_days > 0 and remaining > 0:
+        cutoff = now_ts - retention_days * 86400
+        removed += conn.execute(
+            "DELETE FROM semantic_facts WHERE id IN ("
+            "  SELECT id FROM semantic_facts "
+            "  WHERE invalid_at IS NULL AND created_at < ? AND importance < ? "
+            "  ORDER BY importance ASC, created_at ASC LIMIT ?)",
+            (cutoff, importance_floor, remaining),
+        ).rowcount
+
+    conn.commit()
+    return removed
