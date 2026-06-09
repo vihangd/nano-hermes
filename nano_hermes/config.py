@@ -178,7 +178,12 @@ class SkillStatsConfig(BaseModel):
     # than once per *curator_cooldown_hours*.
     # Set curator_enabled=False or curator_stale_after_days=0 to disable.
     curator_enabled: bool = True
+    # active -> stale: dormant this long. Stale skills stay searchable but
+    # demoted; using one again reactivates it (stale -> active).
     curator_stale_after_days: int = 30
+    # stale -> deprecated: still dormant this long after going stale. Must be
+    # > curator_stale_after_days or staling and archiving collapse into one step.
+    curator_archive_after_days: int = 90
     curator_min_uses: int = 3
     curator_cooldown_hours: int = 24
     # MIND-Skill reconstruction check: before draft→active promotion, ask an LLM
