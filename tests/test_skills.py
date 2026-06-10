@@ -1007,6 +1007,26 @@ class TestSkillPromotion:
         ).fetchone()
         assert row[0] == "active", f"expected active (below min_uses), got {row[0]}"
 
+    async def test_stale_skill_reactivated_on_use(
+        self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop)
+        hook.db.execute(
+            "INSERT INTO skill_stats (name, status, use_count, success_count, origin) "
+            "VALUES ('dozer', 'stale', 5, 4, 'agent')"
+        )
+        hook.db.commit()
+
+        msgs: list[dict] = [{"role": "user", "content": "task"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
+        await loop.tools.get("skill_rate").execute(name="dozer", outcome="success")
+
+        status = hook.db.execute(
+            "SELECT status FROM skill_stats WHERE name = 'dozer'"
+        ).fetchone()[0]
+        assert status == "active", f"stale skill should reactivate on use, got {status}"
+
 
 # ---------------------------------------------------------------------------
 # Phase 5: skill edit action

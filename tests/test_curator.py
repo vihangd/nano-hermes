@@ -3,15 +3,12 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 import nano_hermes
 from conftest import _make_loop
 from nano_hermes.skills.curator import (
     _META_LAST_RUN,
     archive_skill,
     find_stale_skills,
-    mark_run,
     meta_get,
     meta_set,
     run_curator,
@@ -101,8 +98,56 @@ class TestArchiveSkill:
             ("to-archive",),
         ).fetchone()
         assert version is not None
-        assert version[1] == "curator: stale"
+        assert version[1] == "curator: archived"
         assert "to-archive" in version[0]
+
+
+class TestLifecycle:
+    def test_run_curator_marks_active_stale_not_deprecated(self, tmp_path):
+        hook = _make_hook(
+            tmp_path,
+            curator_stale_after_days=30,
+            curator_archive_after_days=90,
+            curator_min_uses=3,
+            curator_cooldown_hours=24,
+        )
+        _seed_skill(hook, "dormant", use_count=10, last_used_age_days=45)
+        touched = run_curator(hook)
+        assert touched == ["dormant"]
+        status = hook.db.execute(
+            "SELECT status FROM skill_stats WHERE name = 'dormant'"
+        ).fetchone()[0]
+        assert status == "stale"  # not deprecated yet
+
+    def test_stale_skill_deprecated_after_archive_window(self, tmp_path):
+        hook = _make_hook(
+            tmp_path,
+            curator_stale_after_days=30,
+            curator_archive_after_days=90,
+            curator_min_uses=3,
+            curator_cooldown_hours=0,  # allow repeated runs
+        )
+        # Dormant 120d: first run stales it; second run (still dormant) archives.
+        _seed_skill(hook, "ancient", use_count=10, last_used_age_days=120)
+        run_curator(hook)
+        assert hook.db.execute(
+            "SELECT status FROM skill_stats WHERE name = 'ancient'"
+        ).fetchone()[0] == "stale"
+        run_curator(hook)
+        assert hook.db.execute(
+            "SELECT status FROM skill_stats WHERE name = 'ancient'"
+        ).fetchone()[0] == "deprecated"
+
+    def test_stale_skill_still_searchable(self, tmp_path):
+        """Stale skills are demoted, not hidden — search filters only 'deprecated'."""
+        hook = _make_hook(tmp_path, curator_stale_after_days=30, curator_min_uses=3)
+        _seed_skill(hook, "dormant", use_count=10, last_used_age_days=45)
+        run_curator(hook)
+        # The skill-search candidate query excludes only deprecated rows.
+        rows = hook.db.execute(
+            "SELECT name FROM skill_stats WHERE status != 'deprecated' AND name = 'dormant'"
+        ).fetchall()
+        assert rows == [("dormant",)]
 
 
 class TestShouldRun:

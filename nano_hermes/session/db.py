@@ -127,7 +127,7 @@ END;
 CREATE TABLE IF NOT EXISTS skill_stats (
     id              INTEGER PRIMARY KEY AUTOINCREMENT, -- stable rowid for skill_vec
     name            TEXT NOT NULL UNIQUE,
-    status          TEXT NOT NULL DEFAULT 'active',   -- draft | active | deprecated
+    status          TEXT NOT NULL DEFAULT 'active',   -- draft | active | stale | deprecated
     use_count       INTEGER NOT NULL DEFAULT 0,
     success_count   INTEGER NOT NULL DEFAULT 0,
     last_used_at    REAL,
