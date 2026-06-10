@@ -140,6 +140,36 @@ class TestSkillSearch:
             f"expected duckduckgo-search first, got:\n{out}"
         )
 
+    async def test_multi_view_name_match_breaks_tie(
+        self,
+        loop: AgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two skills with the SAME description vector (tie); the query
+        lexically matches one skill's NAME — multi-view boost ranks it first."""
+        for nm in ("alpha-helper", "ddgfetch-tool"):
+            d = tmp_path / "skills" / nm
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(
+                f"---\nname: {nm}\ndescription: search the web via duckduckgo\n---\n\nBody.\n"
+            )
+        _patch_embedding(monkeypatch)
+        nano_hermes.install(
+            loop,
+            config={"skill_stats": {"multi_view_retrieval": True, "ranking_mode": "off"}},
+        )
+        tool = loop.tools.get("skill_search")
+        # 'ddgfetch' token matches the ddgfetch-tool name; both descriptions
+        # share the same fake vector, so the name overlap is the tie-breaker.
+        out = await tool.execute(query="use ddgfetch to duckduckgo")
+        assert "ddgfetch-tool" in out.splitlines()[0], out
+
+    def test_name_tokens_splits_hyphens(self):
+        from nano_hermes.skills.indexer import _name_tokens
+        assert _name_tokens("duckduckgo-search_v2") == {"duckduckgo", "search", "v2"}
+        assert _name_tokens("") == set()
+
     async def test_search_fails_cleanly_when_no_providers(
         self,
         loop: AgentLoop,

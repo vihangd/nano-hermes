@@ -148,7 +148,7 @@ async def link_new_fact(
     # A-MEM neighbour evolution: enrich only the single closest neighbour, so
     # an older fact keeps surfacing as the graph grows. Zero-LLM, gated, capped.
     mem_cfg = hook.config.memory
-    if best_neighbour is not None and getattr(mem_cfg, "amem_evolve_neighbours", False):
+    if best_neighbour is not None and mem_cfg.amem_evolve_neighbours:
         _evolve_neighbour(
             db, fact_id, best_neighbour, mem_cfg.amem_neighbour_max_tags
         )

@@ -56,6 +56,22 @@ def _content_text(name: str, description: str) -> str:
     return f"{name}: {description}" if description else name
 
 
+def _name_tokens(text: str) -> set[str]:
+    """Lowercase alphanumeric tokens, splitting hyphens/underscores (skill
+    names like ``duckduckgo-search`` -> {duckduckgo, search})."""
+    out: set[str] = set()
+    token = []
+    for ch in text.lower():
+        if ch.isalnum():
+            token.append(ch)
+        elif token:
+            out.add("".join(token))
+            token = []
+    if token:
+        out.add("".join(token))
+    return out
+
+
 def _hash_content(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
@@ -94,7 +110,9 @@ class SkillIndexer:
             await self._refresh_with_chain(entries, description_by_name, chain)
             [query_vec] = await chain.embed([query])
 
-        return self._vec_query(query_vec, k, description_by_name, location_by_name)
+        return self._vec_query(
+            query_vec, k, description_by_name, location_by_name, query=query
+        )
 
     async def refresh(self) -> dict[str, int]:
         """Explicit refresh — same work that ``search`` does automatically."""
@@ -247,13 +265,16 @@ class SkillIndexer:
         k: int,
         description_by_name: dict[str, str],
         location_by_name: dict[str, str],
+        query: str = "",
     ) -> list[SkillHit]:
         cfg = self._stats_config
         ranking_mode = cfg.ranking_mode if cfg else "off"
+        multi_view = bool(cfg and getattr(cfg, "multi_view_retrieval", False))
+        query_tokens = _name_tokens(query) if multi_view else set()
 
         # Widen the candidate pool when re-ranking so the top-k after
         # adjustment isn't constrained by the pre-rerank ordering.
-        fetch_k = k * 3 if ranking_mode != "off" else k
+        fetch_k = k * 3 if (ranking_mode != "off" or multi_view) else k
         vec_blob = query_vec.astype(np.float32).tobytes()
         rows = self._db.execute(
             "SELECT skill_id, distance FROM skill_vec "
@@ -304,6 +325,15 @@ class SkillIndexer:
                 if use_count >= min_uses:
                     success_rate = success_count / use_count
                     effective_distance -= boost * success_rate * 0.01
+
+            # Multi-view: reward skills whose NAME lexically matches the query
+            # (precision over the name), since a fused description vector blurs
+            # exact name handles. Fraction of name tokens present in the query.
+            if multi_view and query_tokens:
+                name_toks = _name_tokens(name)
+                if name_toks:
+                    overlap = len(name_toks & query_tokens) / len(name_toks)
+                    effective_distance -= cfg.multi_view_name_weight * overlap  # type: ignore[union-attr]
 
             hits.append(
                 SkillHit(

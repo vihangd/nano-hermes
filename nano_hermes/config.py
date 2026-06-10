@@ -136,6 +136,14 @@ class SkillStatsConfig(BaseModel):
     deprecation_max_success_rate: float = 0.2  # below this rate -> deprecated
     # Maximum total bytes (body + companion files) allowed per propose_skill call.
     max_skill_bytes: int = 256 * 1024  # 256 KiB
+    # Multi-view skill retrieval (CRAFT idea, Pi-fit variant): blend the
+    # description-vector match with a lexical overlap against the skill NAME.
+    # Names are precise handles a fused "name: description" vector dilutes;
+    # this recovers name-led hits with zero extra embeddings/storage. The
+    # weight shifts effective_distance, same scale as ucb1_coefficient.
+    # Off by default (changes ranking).
+    multi_view_retrieval: bool = False
+    multi_view_name_weight: float = 0.05
     # Cosine similarity threshold for the diversity gate at draft→active promotion.
     # A draft skill whose embedding is >= this similar to ANY active skill is blocked
     # from promotion (FactorMiner insight: uncurated duplicates hurt retrieval quality).
