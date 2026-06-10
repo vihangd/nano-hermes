@@ -237,6 +237,38 @@ class WorkflowInductionConfig(BaseModel):
     cluster_threshold: float = 0.85
 
 
+class PrincipleEvolutionConfig(BaseModel):
+    """ACE-style automatic curation of the `principles` playbook.
+
+    The principles store is injected each turn by FTS match. This block adds
+    the ACE evolution layer on top: embedding dedup on write, a session-
+    boundary LLM curator that proposes add/update/prune *deltas* (never a
+    full rewrite — that's the context-collapse failure mode), helpful/harmful
+    attribution from session outcomes, and counter+recency injection ranking.
+
+    Off by default (like GEPA) — it needs accumulated failure data and one
+    hosted LLM call per cycle.
+    """
+    enabled: bool = False
+    # Run the curator every N completed sessions (0 = never). Mirrors
+    # skill_stats.rewrite_session_interval.
+    session_interval: int = 0
+    # Cooldown between curator runs regardless of session cadence.
+    cooldown_hours: int = 24
+    # Cosine sim at/above which a new principle is merged into an existing one
+    # rather than inserted (used by both the manual tool and the curator).
+    dedup_threshold: float = 0.85
+    # Hard cap on stored principles; over this, lowest-value curator-authored
+    # rows are pruned (pure SQL, never manual/pinned).
+    max_principles: int = 200
+    # Max delta ops applied per curator run (bounds LLM blast radius + work).
+    max_ops_per_run: int = 8
+    # Only sessions failing at/above this rate feed the curator's reflect step.
+    failure_threshold: float = 0.4
+    # Recency half-life (days) for the injection-ranking decay term.
+    inject_rank_recency_half_life_days: float = 30.0
+
+
 class DecayConfig(BaseModel):
     """Memory decay: bound the unbounded ``semantic_facts`` table by eviction,
     and gently demote stale items in the two retrieval paths that rank results.
@@ -273,6 +305,9 @@ class DecayConfig(BaseModel):
 
 class NanoHermesConfig(BaseModel):
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
+    principles: PrincipleEvolutionConfig = Field(
+        default_factory=PrincipleEvolutionConfig
+    )
     decay: DecayConfig = Field(default_factory=DecayConfig)
     memory: MemoryBudgets = Field(default_factory=MemoryBudgets)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)

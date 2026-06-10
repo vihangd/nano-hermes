@@ -113,6 +113,7 @@ class NanoHermesHook(AgentHook):
 
         # Evolution task handle — GEPA + rewriter, scheduled at session boundaries.
         self._evolution_task: asyncio.Task | None = None
+        self._principle_task: asyncio.Task | None = None
 
         # Completed-session counter for evolution trigger cadence.
         self._completed_session_count: int = 0
@@ -462,6 +463,25 @@ class NanoHermesHook(AgentHook):
             return
         self._evolution_task = asyncio.create_task(self._run_evolution_cycle())
 
+    def _maybe_schedule_principle_curation(self) -> None:
+        """Schedule the ACE principle curator on its own session cadence."""
+        cfg = self.config.principles
+        if not cfg.enabled or cfg.session_interval <= 0:
+            return
+        if self._completed_session_count % cfg.session_interval != 0:
+            return
+        if self._principle_task and not self._principle_task.done():
+            log.debug("principle curator still running — skipping this session boundary")
+            return
+        self._principle_task = asyncio.create_task(self._run_principle_curation())
+
+    async def _run_principle_curation(self) -> None:
+        try:
+            from .skills.principle_curator import run_principle_curator
+            await run_principle_curator(self)
+        except Exception:
+            log.exception("nano-hermes principle curator failed")
+
     async def _run_evolution_cycle(self) -> None:
         """Run GEPA (if enabled) then the failure-driven rewriter, non-blocking."""
         from .skills.gepa import run_gepa  # noqa: PLC0415
@@ -585,8 +605,10 @@ class NanoHermesHook(AgentHook):
                 from .skills.composition import record_composition  # noqa: PLC0415
                 record_composition(self.db, skills_loaded)
             self._reflection_coord.back_propagate_utility(had_errors)
+            self._reflection_coord.attribute_principles("fail" if had_errors else "ok")
             self._session_coord.finalize(completed_id, skills_used, had_errors)
             self._reflection_coord.on_new_session(completed_id)
             self.archiver.prune_session_by_id(completed_id)
             self._completed_session_count += 1
             self._maybe_schedule_evolution()
+            self._maybe_schedule_principle_curation()

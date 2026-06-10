@@ -62,6 +62,9 @@ class ReflectionCoordinator:
         # Populated by get_session_injections / get_global_injections.
         # Back-propagated at session boundary via back_propagate_utility().
         self._injected_reflection_ids: set[int] = set()
+        # ACE: principle ids injected this session, credited/penalised at the
+        # session boundary by attribute_principles(outcome).
+        self._injected_principle_ids: set[int] = set()
         # RMM: list of (reflection_id, content) injected during the CURRENT
         # iteration. Reset at iteration boundary. record_iteration_citations
         # uses it to bump view_count / cite_count against the next response.
@@ -220,6 +223,26 @@ class ReflectionCoordinator:
         self._last_injected_reflection_id.pop(completed_session_id, None)
         self._last_injected_global_reflection_id = 0
         self._injected_reflection_ids.clear()
+
+    def attribute_principles(self, outcome: str) -> None:
+        """Credit (ok) or penalise (fail) the principles injected this session.
+
+        ACE's label-free feedback: a principle that rode along in a successful
+        session gains a helpful (``success_count``); one in a failed session
+        gains a ``harmful_count``. 'partial' outcomes are neutral. Always clears
+        the per-session injected set.
+        """
+        ids = self._injected_principle_ids
+        self._injected_principle_ids = set()
+        if not ids or outcome not in ("ok", "fail"):
+            return
+        col = "success_count" if outcome == "ok" else "harmful_count"
+        placeholders = ",".join("?" * len(ids))
+        self._db.execute(
+            f"UPDATE principles SET {col} = {col} + 1 WHERE id IN ({placeholders})",
+            tuple(ids),
+        )
+        self._db.commit()
 
     # ------------------------------------------------------------------
     # Memory-save nudge cadence
@@ -677,15 +700,21 @@ class ReflectionCoordinator:
         if not terms:
             return []
         fts_query = " OR ".join(terms)
+        # When evolution is on, widen the FTS candidate pool and re-rank by
+        # proven value (helpful - harmful) + recency, so a topically-relevant
+        # but stale/harmful principle yields to a proven recent one.
+        pcfg = self._config.principles
+        fetch = limit * 3 if pcfg.enabled else limit
         try:
             rows = self._db.execute(
-                "SELECT p.id, p.condition, p.action, p.expected_outcome "
+                "SELECT p.id, p.condition, p.action, p.expected_outcome, "
+                "       p.success_count, p.harmful_count, p.created_at "
                 "FROM principles_fts pf "
                 "JOIN principles p ON p.id = pf.content_id "
                 "WHERE principles_fts MATCH ? "
                 "ORDER BY pf.rank "
                 "LIMIT ?",
-                (fts_query, limit),
+                (fts_query, fetch),
             ).fetchall()
         except Exception:
             log.debug("principle injection FTS5 query failed", exc_info=True)
@@ -694,8 +723,25 @@ class ReflectionCoordinator:
         if not rows:
             return []
 
-        # Increment use_count for matched principles
+        if pcfg.enabled and len(rows) > limit:
+            hl = pcfg.inject_rank_recency_half_life_days
+            now = time.time()
+
+            def _score(r: tuple) -> float:
+                helpful, harmful, created = r[4] or 0, r[5] or 0, r[6] or now
+                age_days = max(0.0, (now - created) / 86400)
+                recency = 0.5 ** (age_days / hl) if hl > 0 else 1.0  # recency_decay
+                return (helpful - harmful) + recency
+
+            rows = sorted(rows, key=_score, reverse=True)[:limit]
+        else:
+            rows = rows[:limit]
+
+        # Increment use_count for injected principles and remember them so the
+        # session outcome can credit/penalise them (helpful/harmful attribution).
         ids = [r[0] for r in rows]
+        if pcfg.enabled:
+            self._injected_principle_ids.update(ids)
         try:
             ph = ",".join("?" * len(ids))
             self._db.execute(
@@ -707,7 +753,8 @@ class ReflectionCoordinator:
             pass
 
         lines: list[str] = []
-        for _, condition, action, expected_outcome in rows:
+        for row in rows:
+            condition, action, expected_outcome = row[1], row[2], row[3]
             parts = [f"• If: {condition}", f"  Then: {action}"]
             if expected_outcome:
                 parts.append(f"  Outcome: {expected_outcome}")
