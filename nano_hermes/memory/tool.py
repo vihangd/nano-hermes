@@ -28,13 +28,15 @@ _SCHEMA: dict[str, Any] = {
         },
         "action": {
             "type": "string",
-            "enum": ["add", "replace", "remove", "consolidate", "distill"],
+            "enum": ["add", "replace", "remove", "consolidate", "distill", "audit"],
             "description": (
                 "What to do with the slot. "
                 "consolidate: embed entries, merge near-duplicates (cosine ≥ threshold), "
                 "keep the longest entry per cluster. Call when memory feels bloated. "
                 "distill: find recurring themes across successful sessions and surface "
-                "them as candidate facts for you to add to memory. Slot is ignored for distill."
+                "them as candidate facts for you to add to memory. Slot is ignored for distill. "
+                "audit: hygiene sweep over stored facts — retire ones an updated fact "
+                "has made stale. Slot is ignored for audit."
             ),
         },
         "content": {
@@ -124,9 +126,26 @@ class MemoryPatchTool(Tool):
                 return await self._consolidate(slot)  # type: ignore[arg-type]
             if action == "distill":
                 return await self._distill()
+            if action == "audit":
+                return await self._audit()
             return f"Error: unknown action {action!r}"
         except Exception as e:
             return f"Error: {e}"
+
+    async def _audit(self) -> str:
+        """Hygiene sweep: retire stored facts an updated fact has superseded."""
+        from .bitemporal import sweep_contradictions  # noqa: PLC0415
+
+        mem_cfg = self._hook.config.memory
+        n = await sweep_contradictions(
+            self._hook,
+            enabled=mem_cfg.bitemporal_invalidation_enabled,
+            sim_threshold=mem_cfg.bitemporal_supersede_threshold,
+            max_anchors=mem_cfg.contradiction_sweep_max_anchors,
+        )
+        if not mem_cfg.bitemporal_invalidation_enabled:
+            return "ok: audit skipped (bitemporal invalidation disabled)"
+        return f"ok: audit retired {n} stale fact(s)"
 
     async def _distill(self) -> str:
         import json as _json  # noqa: PLC0415

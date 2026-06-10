@@ -10,7 +10,6 @@ import time
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
-import pytest
 
 import json as _json
 
@@ -19,6 +18,7 @@ from conftest import _FAKE_VEC_SEARCH, _make_loop, _patch_embedding
 from nano_hermes.memory.bitemporal import (
     _parse_index_list,
     invalidate_superseded_facts,
+    sweep_contradictions,
 )
 from nano_hermes.memory.links import link_new_fact, neighbours_of
 from nano_hermes.memory.tool import MemoryPatchTool
@@ -316,3 +316,69 @@ class TestSchema:
             for r in hook.db.execute("PRAGMA table_info(semantic_facts)").fetchall()
         ]
         assert "invalid_at" in cols
+
+
+def _insert_fact_at(db, content: str, created_at: float, importance: int = 5) -> int:
+    cur = db.execute(
+        "INSERT INTO semantic_facts (content, source_chunk_ids, created_at, "
+        "keywords, tags, context, importance) VALUES (?, '[]', ?, '[]', '[]', '', ?)",
+        (content, created_at, importance),
+    )
+    db.commit()
+    return int(cur.lastrowid)
+
+
+class TestContradictionSweep:
+    async def test_retires_older_superseded_fact(self, tmp_path):
+        hook = _make_hook(tmp_path)
+        db = hook.db
+        old = _insert_fact_at(db, "deploy with `make deploy`", created_at=100.0)
+        _insert_vec(db, old, _unit(0))
+        new = _insert_fact_at(db, "deploy with `make ship` (renamed)", created_at=200.0)
+        _insert_vec(db, new, _unit(0))  # near-identical embedding
+        hook._loop.provider.chat_with_retry = AsyncMock(return_value=_mock_response("[1]"))
+
+        n = await sweep_contradictions(hook, max_anchors=10)
+        assert n == 1
+        assert _invalid_at(db, old) is not None   # older retired
+        assert _invalid_at(db, new) is None        # anchor (newer) kept
+
+    async def test_noop_when_not_superseded(self, tmp_path):
+        hook = _make_hook(tmp_path)
+        db = hook.db
+        a = _insert_fact_at(db, "user prefers Python", created_at=100.0)
+        _insert_vec(db, a, _unit(0))
+        b = _insert_fact_at(db, "user also likes Rust", created_at=200.0)
+        _insert_vec(db, b, _unit(0))
+        hook._loop.provider.chat_with_retry = AsyncMock(return_value=_mock_response("[]"))
+
+        n = await sweep_contradictions(hook, max_anchors=10)
+        assert n == 0
+        assert _invalid_at(db, a) is None
+
+    async def test_disabled_returns_zero(self, tmp_path):
+        hook = _make_hook(tmp_path)
+        db = hook.db
+        old = _insert_fact_at(db, "x", created_at=100.0)
+        _insert_vec(db, old, _unit(0))
+        new = _insert_fact_at(db, "x updated", created_at=200.0)
+        _insert_vec(db, new, _unit(0))
+        called = AsyncMock(return_value=_mock_response("[1]"))
+        hook._loop.provider.chat_with_retry = called
+
+        n = await sweep_contradictions(hook, enabled=False, max_anchors=10)
+        assert n == 0
+        assert called.call_count == 0  # no LLM call when disabled
+
+    async def test_audit_action_via_memory_tool(self, tmp_path):
+        hook = _make_hook(tmp_path)
+        db = hook.db
+        old = _insert_fact_at(db, "config lives in settings.py", created_at=100.0)
+        _insert_vec(db, old, _unit(0))
+        new = _insert_fact_at(db, "config moved to config.toml", created_at=200.0)
+        _insert_vec(db, new, _unit(0))
+        hook._loop.provider.chat_with_retry = AsyncMock(return_value=_mock_response("[1]"))
+
+        out = await MemoryPatchTool(hook=hook).execute(action="audit")
+        assert out.startswith("ok: audit retired 1"), out
+        assert _invalid_at(db, old) is not None

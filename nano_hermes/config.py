@@ -74,6 +74,10 @@ class MemoryBudgets(BaseModel):
     # only near-duplicates plausibly contradict. 0.86 catches paraphrases of
     # the same subject while excluding merely-related facts.
     bitemporal_supersede_threshold: float = 0.86
+    # memory_patch(action="audit"): standing hygiene sweep over stored facts.
+    # Caps the number of (newest) anchor facts scanned per run — one LLM call
+    # per anchor that has near-duplicate older neighbours. Bounds Pi cost.
+    contradiction_sweep_max_anchors: int = 20
 
 
 class RetrievalConfig(BaseModel):
