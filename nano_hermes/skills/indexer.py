@@ -151,15 +151,19 @@ class SkillIndexer:
         chain: EmbeddingChain,
     ) -> dict[str, int]:
         source_by_name = {e["name"]: e.get("source", "workspace") for e in entries}
+        # One scan of skill_stats serves both stale-detection and cleanup,
+        # instead of a per-entry SELECT (N queries) plus a second full scan.
+        existing = self._db.execute(
+            "SELECT id, name, content_hash FROM skill_stats"
+        ).fetchall()
+        hash_by_name = {name: content_hash for _id, name, content_hash in existing}
+
         stale: list[tuple[str, str, str, str]] = []  # (name, text, digest, source)
         for entry in entries:
             name = entry["name"]
             text = _content_text(name, description_by_name.get(name, ""))
             digest = _hash_content(text)
-            row = self._db.execute(
-                "SELECT content_hash FROM skill_stats WHERE name = ?", (name,)
-            ).fetchone()
-            if row and row[0] == digest:
+            if hash_by_name.get(name) == digest:
                 continue
             stale.append((name, text, digest, source_by_name[name]))
 
@@ -167,7 +171,7 @@ class SkillIndexer:
             vecs = await chain.embed([t[1] for t in stale])
             self._write_vectors(stale, vecs)
 
-        removed = self._cleanup_removed({e["name"] for e in entries})
+        removed = self._cleanup_removed({e["name"] for e in entries}, existing=existing)
         return {
             "total": len(entries),
             "reindexed": len(stale),
@@ -213,11 +217,19 @@ class SkillIndexer:
                     (skill_id, vec.astype(np.float32).tobytes()),
                 )
 
-    def _cleanup_removed(self, current_names: set[str]) -> int:
-        existing = self._db.execute("SELECT id, name FROM skill_stats").fetchall()
+    def _cleanup_removed(
+        self,
+        current_names: set[str],
+        existing: list[tuple] | None = None,
+    ) -> int:
+        # Reuse the caller's scan when provided (rows may carry extra columns —
+        # only id and name are read); otherwise do our own minimal fetch.
+        if existing is None:
+            existing = self._db.execute("SELECT id, name FROM skill_stats").fetchall()
         removed = 0
         with self._db:
-            for row_id, name in existing:
+            for row in existing:
+                row_id, name = row[0], row[1]
                 if name in current_names:
                     continue
                 self._db.execute(
