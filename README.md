@@ -244,20 +244,23 @@ nano_hermes.install(loop, config={
 
 ## What the agent gets
 
-Ten tools land on `loop.tools`:
+Thirteen tools land on `loop.tools`:
 
 | Tool | What it does |
 |---|---|
-| `memory_patch(action, slot?, ...)` | Edit `MEMORY.md` / `USER.md` / `SOUL.md`. `slot ∈ {memory, user, soul}`. `action ∈ {add, replace, remove, consolidate, distill}`. `consolidate`: embed entries, merge near-duplicates (cosine ≥ threshold), keeps longest entry per cluster — call when memory feels bloated. `distill`: find recurring themes across successful sessions and surface candidate facts for you to add to memory; `slot` is ignored. |
+| `memory_patch(action, slot?, ...)` | Edit `MEMORY.md` / `USER.md` / `SOUL.md`. `slot ∈ {memory, user, soul}`. `action ∈ {add, replace, remove, consolidate, distill, audit}`. `consolidate`: embed entries, merge near-duplicates (cosine ≥ threshold), keeps longest entry per cluster. `distill`: surface recurring themes across successful sessions as candidate facts. `audit`: hygiene sweep over stored facts — retire ones an updated fact made stale (`slot` ignored). |
 | `session_search(query, k=8)` | Hybrid FTS5 + embedding search over archived turn chunks. RRF fusion + MMR diversity reranking. Degrades to FTS-only if every embedding provider is unreachable. |
+| `session_browse(...)` | Structured/paginated browse over archived sessions and turns — companion to `session_search` for walking history rather than searching it. |
 | `trajectory_search(query, k=3)` | Semantic search over past session summaries (task, outcome, skills used, reflection). Higher-signal than session_search — distilled lessons, not raw transcripts. |
-| `skill_search(query, k=5)` | Semantic retrieval over available skills ranked by UCB1 bandit (exploration + exploitation). Records returned skills as candidates for stat tracking. Deprecated skills are excluded; near-duplicate hits are collapsed to siblings. |
-| `skill_stats(name?)` | Read-only view of skill usage history: use count, success rate, status (draft/active/deprecated), last used. Omit `name` for a summary of all tracked skills. |
-| `propose_skill(name, description, body, action="create")` | Create a new draft skill (`action="create"`) or rewrite an existing one (`action="edit"`). Skills start as `draft`, auto-promote to `active` after enough successful uses, and get `deprecated` if they chronically fail. Fuzzy patch matching handles indentation drift on edit. |
-| `skill_rate(name, outcome)` | Manually rate a skill after use (`outcome ∈ {success, failure}`). Used to record cases where the hook cannot infer outcome automatically. |
+| `skill_search(query, k=5)` | Semantic retrieval over available skills ranked by UCB1 bandit (exploration + exploitation). `deprecated` skills excluded; near-duplicate hits collapsed to siblings. Optional multi-view name-overlap boost (see Self-improvement features). |
+| `skill_stats(name?)` | Read-only view of skill usage history: use count, success rate, status (`draft`/`active`/`stale`/`deprecated`), last used. Omit `name` for a summary. |
+| `propose_skill(name, ..., action="create")` | Manage skills. `action ∈ {create, edit, patch, pin, unpin}`. `create` writes a new draft; `edit`/`patch` rewrite an existing one; `pin`/`unpin` exempt a skill from automatic evolution. Skills the agent proposes are tagged `origin='agent'` (only those auto-evolve); hand-authored/builtin skills are protected. |
+| `record_principle(condition, action, ...)` | Record a reusable "WHEN … THEN …" operating principle. Principles are FTS-injected each turn; near-duplicates are merged by embedding. The ACE curator can also evolve them automatically (see below). |
+| `skill_rate(name, outcome)` | Manually rate a skill after use (`outcome ∈ {success, failure}`). Records cases where the hook can't infer the outcome. Using a `stale` skill reactivates it. |
+| `skill_export(...)` | Export skill/usage data (training-export helper). |
 | `reflect(content)` | Store a 2–4 sentence self-critique for the current session. Injected into the next iteration's prompt. With `reflection_scope="global"`, also embedded for cross-session recall. |
 | `nano_status()` | Read-only snapshot of internal state: session ID, turns archived, salience score, nudge pending, reflection count, skill counts by lifecycle stage, DB size on disk. |
-| `workflow_suggest(k=3)` | Cluster successful past trajectories by embedding similarity; surface recurring task patterns as workflow candidates. Prompts you to call `propose_skill` to codify them. Requires `workflow_induction.enabled = True`. |
+| `workflow_suggest(k=3)` | Cluster successful past trajectories by embedding similarity; surface recurring task patterns as workflow candidates. Requires `workflow_induction.enabled = True`. |
 
 ---
 
@@ -335,9 +338,43 @@ Auto-evolution (if rewrite_session_interval > 0):
 
 ---
 
-## Self-evolution
+## Self-improvement features
 
-nano-hermes can automatically improve skills that are chronically failing, without any agent involvement. The pipeline has two stages and runs in the background at session boundaries.
+Beyond the per-turn memory/skill machinery, nano-hermes ships a set of self-improvement features. The ones that only do local SQL/embedding work are **on by default**; everything that spends LLM calls is **off by default** and opt-in.
+
+| Feature | Default | What it does | Enable / tune (config keys) |
+|---|---|---|---|
+| **Memory decay + eviction** | on | Bounds the `semantic_facts` store — evicts superseded + old, low-importance facts during the background purge; recency-decays trajectory/reflection ranking | `decay.enabled`, `decay.fact_retention_days` (90), `decay.fact_evict_importance_floor` (4) |
+| **Skill provenance + pinning** | on | Only agent-proposed skills (`origin='agent'`) auto-evolve; builtin/hand-authored skills are protected. Pin exempts any skill | always on; `propose_skill(action="pin"/"unpin", name=…)` |
+| **Skill lifecycle (stale → reactivate)** | on | Dormant skills go `active → stale` (still searchable, demoted) then `stale → deprecated`; using one again reactivates it | `skill_stats.curator_enabled`, `curator_stale_after_days` (30), `curator_archive_after_days` (90) |
+| **Failure-case retrieval (K≈4)** | off | When trajectory context injection is on, injects up to `inject_k` similar past cases, framing successes as "worked" and failures as "avoid" | `trajectory.inject_context` (off by default), `trajectory.inject_k` (4) |
+| **A-MEM neighbour evolution** | on | On fact-link, folds the new fact's keywords/tags into the single closest neighbour (zero-LLM, capped) | `memory.amem_evolve_neighbours`, `amem_neighbour_max_tags` (12) |
+| **Contradiction sweep** | agent-invoked | `memory_patch(action="audit")` retires stored facts a newer fact superseded | `memory.bitemporal_invalidation_enabled`, `memory.contradiction_sweep_max_anchors` (20) |
+| **Multi-view skill retrieval** | off | Boosts skills whose **name** lexically matches the query (names are precise handles a fused description vector dilutes) | `skill_stats.multi_view_retrieval`, `multi_view_name_weight` (0.05) |
+| **ACE principle curation** | off | Session-boundary LLM curator evolves the `principles` playbook via add/update/prune **deltas** (never a full rewrite → avoids context collapse); helpful/harmful attribution from session outcomes; counter+recency injection ranking | `principles.enabled` + `principles.session_interval` (>0); `principles.cooldown_hours` (24) |
+| **GEPA + SkillForge rewriter** | off | Auto-rewrites chronically-failing skills (see *Skill-rewrite pipeline* below) | `skill_stats.rewrite_session_interval` (>0), `skill_stats.gepa_enabled` |
+| **Umbrella consolidation** | off | Merges clusters of near-duplicate sibling skills into one umbrella skill, deprecating the absorbed siblings | `skill_stats.umbrella_merge_enabled`, `umbrella_sim_threshold` (0.86) |
+| **Pre-evolution snapshot + rollback** | on (when evolution runs) | Snapshots the DB + `skills/` before each evolution cycle so a bad batch can be undone | `skill_stats.snapshot_before_evolution`, `snapshot_retain` (3). Offline rollback: `python -m nano_hermes.skills.evolution_snapshot <workspace>` |
+
+Everything LLM-gated runs in the background at session boundaries, is cooldown-bounded, and never blocks the agent's turn. To turn the optional features on:
+
+```json
+{
+  "principles": { "enabled": true, "session_interval": 5 },
+  "skill_stats": {
+    "rewrite_session_interval": 5,
+    "gepa_enabled": true,
+    "umbrella_merge_enabled": true,
+    "multi_view_retrieval": true
+  }
+}
+```
+
+---
+
+## Self-evolution (skill-rewrite pipeline)
+
+nano-hermes can automatically improve skills that are chronically failing, without any agent involvement. The pipeline runs in the background at session boundaries. GEPA and the rewriter target *failing* skills; the **umbrella** pass (above) merges *redundant* ones, and the **ACE principle curator** evolves the principles playbook — all in the same snapshot-protected cycle.
 
 ### Trigger
 
@@ -370,9 +407,15 @@ The rewriter targets skills with failure rate ≥ `rewrite_failure_threshold` (d
 
 The judge prompt is a module-level constant and cannot be overwritten by skill content — this prevents the metric-gaming failure mode where an optimized skill learns to game its own evaluator.
 
+### Stage 3 — Umbrella consolidation (off by default)
+
+After the rewriter, if `umbrella_merge_enabled` is set, nano-hermes clusters active, agent-authored, unpinned skills by cosine similarity over their stored vectors and merges each cluster into one broader umbrella skill via a single LLM call. The absorbed siblings are **deprecated, not deleted** (files and rows kept, with an `absorbed_into:` audit reason), so a wrong merge is recoverable. A chosen umbrella name that collides with an out-of-cluster skill is rejected rather than overwriting it.
+
 ### Safety
 
 All rewritten skill text passes through the same injection scanner (`skills/guard.py`) that `propose_skill` uses. A rewrite that contains prompt-injection patterns is logged and discarded; the original skill is unchanged.
+
+Every evolution cycle is **snapshot-protected**: before GEPA/rewriter/umbrella run, the state DB and `skills/` directory are snapshotted (kept `snapshot_retain` deep). If a batch goes wrong, restore the latest snapshot offline with `python -m nano_hermes.skills.evolution_snapshot <workspace>` (agent stopped). Judge/merge prompts are module-level constants that skill content cannot overwrite — closing the metric-gaming loop where an optimized skill games its own evaluator.
 
 ---
 
