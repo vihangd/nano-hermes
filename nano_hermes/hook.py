@@ -514,6 +514,17 @@ class NanoHermesHook(AgentHook):
         except Exception:
             log.exception("evolution cycle: rewriter failed")
 
+        try:
+            from .skills.umbrella import run_umbrella_merge  # noqa: PLC0415
+            merged = await run_umbrella_merge(self)
+            if merged:
+                log.info(
+                    "evolution cycle: umbrella merged %d cluster(s): %s",
+                    len(merged), merged,
+                )
+        except Exception:
+            log.exception("evolution cycle: umbrella merge failed")
+
     async def _background_curator(self) -> None:
         """Run the curator on the main loop after a short delay.
 

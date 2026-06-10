@@ -155,6 +155,17 @@ class SkillStatsConfig(BaseModel):
     # are candidates for automatic rewriting.
     rewrite_failure_threshold: float = 0.6  # >60% failure rate
     rewrite_min_uses: int = 5               # minimum uses before rewrite trigger
+    # Skill umbrella consolidation: cluster near-duplicate sibling skills
+    # (agent-authored, unpinned, active) by cosine over their stored vectors,
+    # then merge each cluster into one broader umbrella skill via a single LLM
+    # call and deprecate the absorbed siblings (status='deprecated', reason
+    # "absorbed_into: <umbrella>"). Runs inside the evolution cycle, which is
+    # already snapshot-protected. Off by default.
+    umbrella_merge_enabled: bool = False
+    umbrella_sim_threshold: float = 0.86
+    umbrella_min_cluster: int = 2
+    umbrella_max_cluster: int = 5
+    umbrella_max_merges_per_run: int = 2
     rewrite_context_chunks: int = 5         # how many failed-session chunks to send the LLM
     # Auto-evolution trigger: run GEPA (if enabled) then rewriter every N completed sessions.
     # 0 = disabled (off by default). Recommended starting value: 5–10.
