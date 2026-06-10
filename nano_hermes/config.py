@@ -219,6 +219,11 @@ class TrajectoryConfig(BaseModel):
     # Minimum similarity (1 - distance) to inject a trajectory.
     # Prevents injecting a vaguely-related trajectory as "relevant".
     inject_min_similarity: float = 0.75
+    # Max past cases injected (MMR-diversified). Memento (arXiv 2508.16153)
+    # finds case-based retrieval peaks around K=4 and declines beyond — a
+    # small, high-quality set beats a large one, and costs fewer tokens on a Pi.
+    # Both successes ("what worked") and failures ("what to avoid") are kept.
+    inject_k: int = 4
 
 
 class WorkflowInductionConfig(BaseModel):

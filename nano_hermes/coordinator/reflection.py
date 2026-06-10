@@ -557,13 +557,15 @@ class ReflectionCoordinator:
     # ------------------------------------------------------------------
 
     async def get_trajectory_injection(self, messages: list[dict]) -> dict | None:
-        """Embed the first user message and return up to 2 relevant past trajectories.
+        """Embed the first user message and return up to ``inject_k`` (default 4)
+        relevant past cases, framed by outcome.
 
-        Uses MMR (Maximal Marginal Relevance) to select a diverse pair:
-        - d1 = most similar to current task
-        - d2 = highest MMR score among remaining candidates (relevance - diversity penalty)
-        Diversity is measured by Jaccard similarity on tokenized task text, requiring
-        no extra embedding round-trips.
+        Greedy MMR (Maximal Marginal Relevance): start from the most-similar
+        case, then iteratively add the candidate with the best
+        ``relevance - diversity`` score until ``config.trajectory.inject_k`` is
+        reached. Diversity is Jaccard similarity on tokenized task text (no
+        extra embedding round-trips). Both successes and failures are kept —
+        failures surface as cautionary "avoid" cases (Memento, arXiv 2508.16153).
 
         Returns None when no match is found or similarity is below threshold.
         """
@@ -590,7 +592,8 @@ class ReflectionCoordinator:
             vec_blob = vec.astype(np.float32).tobytes()
             mmr_lambda = self._config.retrieval.mmr_lambda
             min_sim = self._config.trajectory.inject_min_similarity
-            fetch_k = 6
+            # Pool must comfortably exceed inject_k so MMR has room to diversify.
+            fetch_k = max(6, self._config.trajectory.inject_k * 2)
 
             rows = self._db.execute(
                 "SELECT trajectory_id, distance FROM trajectories_vec "
@@ -623,35 +626,47 @@ class ReflectionCoordinator:
             if d1_id not in detail:
                 return None
 
+            # Greedy MMR: most-similar case first, then iteratively add the
+            # case with the best (relevance - diversity) score, up to inject_k.
+            # Memento finds K≈4 optimal; failures are kept as cautionary cases.
+            inject_k = max(1, self._config.trajectory.inject_k)
             selected = [d1_id]
-            d1_task = detail[d1_id][0] or ""
+            sel_tokens = [set((detail[d1_id][0] or "").lower().split())]
+            remaining = [(cid, csim) for cid, csim in candidates[1:] if cid in detail]
 
-            # d2 = best MMR score among remaining candidates.
-            d1_tokens = set(d1_task.lower().split())
-            best_mmr, best_id = -1.0, None
-            for cid, csim in candidates[1:]:
-                if cid not in detail:
-                    continue
-                c_task = detail[cid][0] or ""
-                c_tokens = set(c_task.lower().split())
-                union = d1_tokens | c_tokens
-                jaccard = len(d1_tokens & c_tokens) / len(union) if union else 0.0
-                mmr_score = mmr_lambda * csim - (1.0 - mmr_lambda) * jaccard
-                if mmr_score > best_mmr:
-                    best_mmr, best_id = mmr_score, cid
-            if best_id is not None:
-                selected.append(best_id)
+            while len(selected) < inject_k and remaining:
+                best_mmr, best = -2.0, None
+                for cid, csim in remaining:
+                    c_tokens = set((detail[cid][0] or "").lower().split())
+                    jaccard = max(
+                        (len(c_tokens & st) / len(c_tokens | st) if (c_tokens | st) else 0.0)
+                        for st in sel_tokens
+                    )
+                    mmr_score = mmr_lambda * csim - (1.0 - mmr_lambda) * jaccard
+                    if mmr_score > best_mmr:
+                        best_mmr, best = mmr_score, (cid, c_tokens)
+                if best is None:
+                    break
+                selected.append(best[0])
+                sel_tokens.append(best[1])
+                remaining = [(c, s) for c, s in remaining if c != best[0]]
 
-            # Build injection message.
+            # Build injection message — frame each case by its outcome so the
+            # agent replicates wins and steers clear of past failures.
+            _tag = {
+                "ok": "✓ WORKED — replicate this",
+                "fail": "✗ AVOID — this approach failed",
+                "partial": "~ PARTIAL — proceed with caution",
+            }
             sections: list[str] = []
             for i, tid in enumerate(selected, start=1):
                 task_txt, skills_used_json, outcome, reflection = detail[tid]
                 skills = _json.loads(skills_used_json) if skills_used_json else []
                 skill_str = ", ".join(skills) if skills else "none"
-                label = "Most similar" if i == 1 else "Contrasting"
+                tag = _tag.get(outcome, outcome)
                 lines = [
-                    f"### Past session {i} ({label})",
-                    f"Outcome: {outcome}  |  Skills: {skill_str}",
+                    f"### Past case {i}: {tag}",
+                    f"Skills: {skill_str}",
                     f"Task: {task_txt[:200]}",
                 ]
                 if reflection:
@@ -659,9 +674,14 @@ class ReflectionCoordinator:
                 sections.append("\n".join(lines))
 
             log.debug(
-                "trajectory context injected: %d sessions (MMR)", len(selected)
+                "trajectory context injected: %d cases (MMR, K=%d)",
+                len(selected),
+                inject_k,
             )
-            header = "## Relevant past sessions"
+            header = (
+                "## Relevant past cases\n"
+                "Successes show what worked; failures are cautionary — don't repeat them."
+            )
             return {"role": "system", "content": header + "\n" + "\n\n".join(sections)}
         except Exception:
             log.debug("trajectory context injection failed", exc_info=True)
