@@ -185,6 +185,16 @@ class SkillUsageTracker:
                         continue
                     status, use_count, success_count, origin, pinned = row
 
+                    # Reactivation: a stale skill used again returns to active.
+                    # The curator can re-stale it later if it lapses once more.
+                    if status == "stale":
+                        self._db.execute(
+                            "UPDATE skill_stats SET status = 'active' WHERE name = ?",
+                            (name,),
+                        )
+                        log.info("skill '%s' reactivated (stale -> active)", name)
+                        status = "active"
+
                     # Promotion: draft -> active after enough successes
                     if status == "draft" and success_count >= cfg.promotion_threshold:
                         threshold = getattr(

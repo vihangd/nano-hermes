@@ -178,7 +178,12 @@ class SkillStatsConfig(BaseModel):
     # than once per *curator_cooldown_hours*.
     # Set curator_enabled=False or curator_stale_after_days=0 to disable.
     curator_enabled: bool = True
+    # active -> stale: dormant this long. Stale skills stay searchable but
+    # demoted; using one again reactivates it (stale -> active).
     curator_stale_after_days: int = 30
+    # stale -> deprecated: still dormant this long after going stale. Must be
+    # > curator_stale_after_days or staling and archiving collapse into one step.
+    curator_archive_after_days: int = 90
     curator_min_uses: int = 3
     curator_cooldown_hours: int = 24
     # MIND-Skill reconstruction check: before draft→active promotion, ask an LLM
@@ -264,11 +269,46 @@ class PrincipleEvolutionConfig(BaseModel):
     inject_rank_recency_half_life_days: float = 30.0
 
 
+class DecayConfig(BaseModel):
+    """Memory decay: bound the unbounded ``semantic_facts`` table by eviction,
+    and gently demote stale items in the two retrieval paths that rank results.
+
+    Facts are a write-mostly staging store (distill → agent promotes the good
+    ones into MEMORY.md) and are never otherwise deleted, so on a long-lived
+    Pi they grow without bound. Eviction here is conservative: superseded facts
+    are dropped after a grace window, and *valid* facts are dropped only once
+    they are both old AND low-importance. High-importance facts never auto-evict.
+
+    Ranking decay is a recency multiplier/term applied to trajectory_search and
+    global-reflection injection — the only paths that actually rank stored rows.
+    It nudges fresher rows up without erasing strong semantic matches.
+    """
+    enabled: bool = True
+    # --- Fact eviction (semantic_facts) ---
+    # Valid facts older than this AND below the importance floor are eligible.
+    fact_retention_days: int = 90
+    # importance is the 1–10 distiller score; facts at/above this never evict.
+    fact_evict_importance_floor: int = 4
+    # Superseded (invalid_at set) facts are deleted this long after invalidation.
+    superseded_grace_days: int = 14
+    # Hard cap on deletions per purge pass — bounds work/IO on a Pi.
+    max_evictions_per_run: int = Field(default=500, gt=0)
+    # --- Ranking recency decay ---
+    # Days for the recency factor to halve (0.5 ** age/half_life).
+    ranking_half_life_days: float = Field(default=30.0, gt=0)
+    # Max fraction by which an ancient trajectory's fused score is demoted.
+    trajectory_decay_weight: float = Field(default=0.3, ge=0, le=1)
+    # Additive weight of the recency term in global-reflection scoring
+    # (comparable to the existing citation_weight=0.2).
+    reflection_decay_weight: float = Field(default=0.15, ge=0)
+
+
 class NanoHermesConfig(BaseModel):
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     principles: PrincipleEvolutionConfig = Field(
         default_factory=PrincipleEvolutionConfig
     )
+    decay: DecayConfig = Field(default_factory=DecayConfig)
     memory: MemoryBudgets = Field(default_factory=MemoryBudgets)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)

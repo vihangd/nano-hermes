@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.tools.base import Tool, tool_parameters
 
+from ..decay import recency_decay
 from ..embedding.chain import AllProvidersFailed
 from .search import _contains_cjk, _like_escape, reciprocal_rank_fusion
 
@@ -128,22 +129,35 @@ class TrajectorySearchTool(Tool):
 
         rrf_k = self._hook.config.retrieval.rrf_k
         fused = reciprocal_rank_fusion(fts_ids, vec_ids, rrf_k)
-        ordered = [
-            cid for cid, _ in sorted(fused.items(), key=lambda kv: kv[1], reverse=True)
-        ][:k]
-        if not ordered:
+        if not fused:
             return []
 
-        placeholders = ",".join("?" * len(ordered))
+        # Fetch all fused candidates (pool is small, ~k*4), then rank by the
+        # RRF score gently demoted for age, and take the top-k. Applying decay
+        # before the cut lets a fresher candidate displace a stale one rather
+        # than only reordering an already-fixed top-k.
+        cand_ids = list(fused)
+        placeholders = ",".join("?" * len(cand_ids))
         traj_rows = self._hook.db.execute(
             f"SELECT id, task, skills_used, outcome, reflection, created_at "
             f"FROM trajectories WHERE id IN ({placeholders})",
-            ordered,
+            cand_ids,
         ).fetchall()
 
-        rank = {tid: i for i, tid in enumerate(ordered)}
-        traj_rows.sort(key=lambda r: rank.get(r[0], 9999))
-        return traj_rows
+        decay = self._hook.config.decay
+        weight = decay.trajectory_decay_weight if decay.enabled else 0.0
+        now = time.time()
+
+        def _adjusted(row: tuple) -> float:
+            score = fused.get(row[0], 0.0)
+            if weight and row[5] is not None:
+                age_days = (now - row[5]) / 86400
+                recency = recency_decay(age_days, decay.ranking_half_life_days)
+                score *= 1.0 - weight * (1.0 - recency)
+            return score
+
+        traj_rows.sort(key=_adjusted, reverse=True)
+        return traj_rows[:k]
 
     def _fts_ids(self, query: str, limit: int) -> list[int]:
         """BM25-ranked trajectory ids for *query*, or [] on an unparsable
