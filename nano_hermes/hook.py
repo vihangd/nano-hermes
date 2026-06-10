@@ -487,6 +487,18 @@ class NanoHermesHook(AgentHook):
         from .skills.gepa import run_gepa  # noqa: PLC0415
         from .skills.rewriter import run_rewriter  # noqa: PLC0415
 
+        # Snapshot DB + skills/ before mutating, so a bad batch is one undo.
+        if self.config.skill_stats.snapshot_before_evolution:
+            try:
+                from .skills.evolution_snapshot import snapshot_evolution  # noqa: PLC0415
+                await asyncio.to_thread(
+                    snapshot_evolution,
+                    self.workspace,
+                    retain=self.config.skill_stats.snapshot_retain,
+                )
+            except Exception:
+                log.exception("evolution snapshot failed (continuing without it)")
+
         gepa_evolved: list[str] = []
         try:
             gepa_evolved = await run_gepa(self)

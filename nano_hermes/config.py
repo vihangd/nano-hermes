@@ -186,6 +186,11 @@ class SkillStatsConfig(BaseModel):
     curator_archive_after_days: int = 90
     curator_min_uses: int = 3
     curator_cooldown_hours: int = 24
+    # Pre-evolution snapshot: before each GEPA/rewriter cycle, snapshot the
+    # state DB + skills/ dir so a bad batch can be rolled back as one unit
+    # (python -m nano_hermes.skills.evolution_snapshot <workspace>, offline).
+    snapshot_before_evolution: bool = True
+    snapshot_retain: int = 5
     # MIND-Skill reconstruction check: before draft→active promotion, ask an LLM
     # to verify the skill body actually implements what the description claims.
     # Fails open on LLM error (promotion allowed). Default ON.
