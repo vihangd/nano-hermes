@@ -208,7 +208,8 @@ class SkillStatsConfig(BaseModel):
     # state DB + skills/ dir so a bad batch can be rolled back as one unit
     # (python -m nano_hermes.skills.evolution_snapshot <workspace>, offline).
     snapshot_before_evolution: bool = True
-    snapshot_retain: int = 5
+    # Each snapshot copies the whole state DB; keep few on an SD card.
+    snapshot_retain: int = 3
     # MIND-Skill reconstruction check: before draft→active promotion, ask an LLM
     # to verify the skill body actually implements what the description claims.
     # Fails open on LLM error (promotion allowed). Default ON.

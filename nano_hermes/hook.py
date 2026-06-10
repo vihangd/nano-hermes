@@ -114,6 +114,9 @@ class NanoHermesHook(AgentHook):
         # Evolution task handle — GEPA + rewriter, scheduled at session boundaries.
         self._evolution_task: asyncio.Task | None = None
         self._principle_task: asyncio.Task | None = None
+        # Serializes whole-DB-file I/O (retention VACUUM, pre-evolution
+        # snapshot) so two heavy operations can't thrash a slow SD card at once.
+        self._heavy_io_lock = asyncio.Lock()
 
         # Completed-session counter for evolution trigger cadence.
         self._completed_session_count: int = 0
@@ -491,11 +494,12 @@ class NanoHermesHook(AgentHook):
         if self.config.skill_stats.snapshot_before_evolution:
             try:
                 from .skills.evolution_snapshot import snapshot_evolution  # noqa: PLC0415
-                await asyncio.to_thread(
-                    snapshot_evolution,
-                    self.workspace,
-                    retain=self.config.skill_stats.snapshot_retain,
-                )
+                async with self._heavy_io_lock:
+                    await asyncio.to_thread(
+                        snapshot_evolution,
+                        self.workspace,
+                        retain=self.config.skill_stats.snapshot_retain,
+                    )
             except Exception:
                 log.exception("evolution snapshot failed (continuing without it)")
 
@@ -602,7 +606,10 @@ class NanoHermesHook(AgentHook):
                 conn.close()
 
         try:
-            await asyncio.to_thread(_run)
+            # Held across the whole purge: its conditional VACUUM rewrites the
+            # entire DB file and must not overlap a pre-evolution snapshot.
+            async with self._heavy_io_lock:
+                await asyncio.to_thread(_run)
         except Exception:
             log.exception("nano-hermes purge failed")
 

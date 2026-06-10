@@ -391,6 +391,13 @@ _MIGRATIONS = [
     "DROP TRIGGER IF EXISTS principles_ad",
     """CREATE TRIGGER principles_ad AFTER DELETE ON principles BEGIN
        DELETE FROM principles_fts WHERE rowid = old.id; END""",
+    # Serve the contradiction-sweep anchor scan (ORDER BY created_at DESC) and
+    # the fact-eviction scan (ORDER BY importance, created_at) without a full
+    # table sort once semantic_facts grows. Partial on the live-fact predicate.
+    "CREATE INDEX IF NOT EXISTS idx_semantic_facts_created "
+    "ON semantic_facts(created_at) WHERE invalid_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_semantic_facts_evict "
+    "ON semantic_facts(importance, created_at) WHERE invalid_at IS NULL",
 ]
 
 
