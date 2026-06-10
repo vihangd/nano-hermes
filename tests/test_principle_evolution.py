@@ -278,3 +278,66 @@ class TestRunCurator:
         assert hook.db.execute(
             "SELECT COUNT(*) FROM principles WHERE origin='curator'"
         ).fetchone()[0] == 1
+
+
+class TestCuratorEdges:
+    def test_parse_ops_malformed_json_with_braces(self):
+        # Has braces (passes the find check) but isn't valid JSON -> [].
+        assert parse_ops("{not: valid, json}") == []
+
+    def test_parse_ops_add_missing_fields_skipped(self):
+        # op present but no condition/action -> kept by parse, dropped by apply.
+        assert parse_ops('{"ops":[{"op":"add"}]}') == [{"op": "add"}]
+
+    async def test_apply_add_without_fields_is_noop(self, loop, monkeypatch):
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop, config={"principles": {"enabled": True}})
+        counts = await apply_ops(hook, [{"op": "add", "condition": "only cond"}], hook.config.principles)
+        assert counts["added"] == 0 and _count(hook.db) == 0
+
+    async def test_run_curator_blocked_by_cooldown(self, loop, monkeypatch):
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(
+            loop, config={"principles": {"enabled": True, "cooldown_hours": 24}}
+        )
+        # Mark a recent run so the cooldown gate trips.
+        hook.db.execute(
+            "INSERT INTO meta(key, value) VALUES ('principle_curator.last_run_at', ?)",
+            (str(time.time()),),
+        )
+        hook.db.commit()
+        hook.db.execute(
+            "INSERT INTO trajectories (task, outcome, created_at) VALUES ('x broke', 'fail', ?)",
+            (time.time(),),
+        )
+        hook.db.commit()
+        assert await run_principle_curator(hook) == {}
+
+    async def test_run_curator_handles_llm_failure(self, loop, monkeypatch):
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(
+            loop, config={"principles": {"enabled": True, "cooldown_hours": 0}}
+        )
+        hook.db.execute(
+            "INSERT INTO trajectories (task, outcome, reflection, created_at) "
+            "VALUES ('deploy broke', 'fail', 'forgot to migrate', ?)",
+            (time.time(),),
+        )
+        hook.db.commit()
+        from unittest.mock import AsyncMock
+        hook._loop.provider.chat_with_retry = AsyncMock(side_effect=RuntimeError("provider down"))
+        assert await run_principle_curator(hook) == {}  # swallowed, no crash
+
+    async def test_apply_op_exception_is_swallowed(self, loop, monkeypatch):
+        _patch_embedding(monkeypatch)
+        hook = nano_hermes.install(loop, config={"principles": {"enabled": True}})
+        import nano_hermes.skills.principle_curator as pc
+
+        async def boom(*a, **k):
+            raise RuntimeError("embed exploded")
+
+        monkeypatch.setattr(pc, "upsert_principle", boom)
+        counts = await apply_ops(
+            hook, [{"op": "add", "condition": "c", "action": "a"}], hook.config.principles
+        )
+        assert counts["added"] == 0  # exception caught per-op, no crash
