@@ -25,8 +25,6 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
 
@@ -124,6 +122,89 @@ async def invalidate_superseded_facts(
         superseded,
     )
     return superseded
+
+
+async def sweep_contradictions(
+    hook: "NanoHermesHook",
+    *,
+    enabled: bool = True,
+    sim_threshold: float = _DEFAULT_SUPERSEDE_THRESHOLD,
+    max_anchors: int = 20,
+) -> int:
+    """Standing hygiene sweep: find stale facts among ALREADY-stored ones.
+
+    ``invalidate_superseded_facts`` only runs reactively, when a fact is
+    written. This audits the existing store: walk the most recent valid facts
+    (anchors), and for each, ask whether it makes any of its near-duplicate
+    *older* neighbours outdated — stamping ``invalid_at`` on the losers. The
+    "anchor is newer than candidate" rule means each conflicting pair is judged
+    once, in the direction where the later fact supersedes the earlier one.
+
+    Bounded for the Pi: at most ``max_anchors`` anchors, ``_MAX_CANDIDATES``
+    neighbours each, one LLM call per anchor that has candidates. Returns the
+    number of facts invalidated; never raises.
+    """
+    if not enabled:
+        return 0
+    db = hook.db
+    anchors = db.execute(
+        "SELECT id, content, created_at FROM semantic_facts "
+        "WHERE invalid_at IS NULL ORDER BY created_at DESC LIMIT ?",
+        (max_anchors,),
+    ).fetchall()
+
+    invalidated: set[int] = set()
+    for anchor_id, anchor_text, anchor_created in anchors:
+        if anchor_id in invalidated:
+            continue
+        vrow = db.execute(
+            "SELECT embedding FROM semantic_facts_vec WHERE fact_id = ?", (anchor_id,)
+        ).fetchone()
+        if vrow is None:
+            continue
+        knn = db.execute(
+            "SELECT fact_id, distance FROM semantic_facts_vec "
+            "WHERE embedding MATCH ? AND fact_id != ? AND k = ? ORDER BY distance",
+            (bytes(vrow[0]), anchor_id, _MAX_CANDIDATES + 4),
+        ).fetchall()
+        cand_ids = [
+            fid for fid, dist in knn if (1.0 - float(dist)) >= sim_threshold
+        ][:_MAX_CANDIDATES]
+        if not cand_ids:
+            continue
+
+        placeholders = ",".join("?" * len(cand_ids))
+        # Only OLDER, still-valid neighbours — the anchor is the "new" fact.
+        rows = db.execute(
+            f"SELECT id, content FROM semantic_facts "
+            f"WHERE id IN ({placeholders}) AND invalid_at IS NULL AND created_at < ?",
+            (*cand_ids, anchor_created),
+        ).fetchall()
+        rows = [r for r in rows if r[0] not in invalidated]
+        if not rows:
+            continue
+
+        numbered = list(enumerate(rows, start=1))
+        superseded = await _ask_superseded(hook, anchor_text, numbered)
+        if not superseded:
+            continue
+        now = time.time()
+        with db:
+            for fid in superseded:
+                db.execute(
+                    "UPDATE semantic_facts SET invalid_at = ? "
+                    "WHERE id = ? AND invalid_at IS NULL",
+                    (now, fid),
+                )
+        invalidated.update(superseded)
+
+    if invalidated:
+        log.info(
+            "contradiction sweep: invalidated %d stale fact(s): %s",
+            len(invalidated),
+            sorted(invalidated),
+        )
+    return len(invalidated)
 
 
 async def _ask_superseded(
