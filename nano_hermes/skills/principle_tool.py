@@ -10,12 +10,12 @@ Reference: EvolveR (arXiv 2406.00024, 2024).
 """
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.tools.base import Tool, tool_parameters
 
 from ..redact import format_redaction_note, redact
+from .principle_index import upsert_principle
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -118,25 +118,20 @@ class PrincipleTool(Tool):
                 redaction_note = format_redaction_note(aggregate)
 
         try:
-            cur = self._hook.db.execute(
-                "INSERT INTO principles "
-                "(condition, action, expected_outcome, confidence, created_at) "
-                "VALUES (?, ?, ?, 0.5, ?)",
-                (condition, action, expected_outcome or None, time.time()),
+            principle_id, outcome = await upsert_principle(
+                self._hook,
+                condition=condition,
+                action=action,
+                expected_outcome=expected_outcome or None,
+                origin="agent",  # manually recorded — protected from auto-pruning
+                dedup_threshold=self._hook.config.principles.dedup_threshold,
             )
-            principle_id = int(cur.lastrowid)
-            # Insert into FTS5 index
-            self._hook.db.execute(
-                "INSERT INTO principles_fts (rowid, condition, action, content_id) "
-                "VALUES (?, ?, ?, ?)",
-                (principle_id, condition, action, principle_id),
-            )
-            self._hook.db.commit()
         except Exception as e:
             return f"Error: {e}"
 
+        verb = "merged into" if outcome == "merged" else "recorded"
         return (
-            f"ok: principle #{principle_id} recorded"
+            f"ok: principle #{principle_id} {verb}"
             + (f" — {expected_outcome[:60]}" if expected_outcome else "")
             + redaction_note
         )

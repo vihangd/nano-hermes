@@ -225,9 +225,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS principles_fts USING fts5(
     tokenize='porter'
 );
 
+-- principles_fts is a standalone (non-external-content) fts5 table, so a
+-- delete is a plain DELETE by rowid — NOT the external-content 'delete'
+-- command (that form raises "no row with rowid" on a standalone table).
 CREATE TRIGGER IF NOT EXISTS principles_ad AFTER DELETE ON principles BEGIN
-    INSERT INTO principles_fts(principles_fts, rowid, condition, action, content_id)
-    VALUES ('delete', old.id, old.condition, old.action, old.id);
+    DELETE FROM principles_fts WHERE rowid = old.id;
 END;
 
 -- Phase 5: Associative reflection co-activation graph (HeLa-Mem-lite).
@@ -303,6 +305,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS semantic_facts_vec USING vec0(
     fact_id        INTEGER PRIMARY KEY,
     embedding      FLOAT[{dims}] distance_metric=cosine
 );
+
+CREATE VIRTUAL TABLE IF NOT EXISTS principles_vec USING vec0(
+    principle_id   INTEGER PRIMARY KEY,
+    embedding      FLOAT[{dims}] distance_metric=cosine
+);
 """
 
 
@@ -364,6 +371,26 @@ _MIGRATIONS = [
     # 'agent' going forward.
     "ALTER TABLE skill_stats ADD COLUMN origin TEXT NOT NULL DEFAULT 'user'",
     "ALTER TABLE skill_stats ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+    # Phase 11 (ACE delta-playbook): automatic principle evolution.
+    # success_count is the 'helpful' counter; add 'harmful' for failed-session
+    # attribution. origin distinguishes manual (principle_tool) from auto
+    # (curator) rows so pruning only ever removes curator-authored principles.
+    "ALTER TABLE principles ADD COLUMN harmful_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE principles ADD COLUMN origin TEXT NOT NULL DEFAULT 'agent'",
+    "ALTER TABLE principles ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE principles ADD COLUMN updated_at REAL",
+    # FK-less cascade into the vec0 shadow table (vec0 ignores FK cascades).
+    # WHEN-guarded: vec0 raises on DELETE of a missing rowid, and FTS-only
+    # principles (embedding unavailable at write time) have no vec row.
+    """CREATE TRIGGER IF NOT EXISTS principles_ad_vec AFTER DELETE ON principles
+       WHEN EXISTS (SELECT 1 FROM principles_vec WHERE principle_id = old.id)
+       BEGIN DELETE FROM principles_vec WHERE principle_id = old.id; END""",
+    # Replace the original principles_ad trigger, which used the external-content
+    # 'delete' command on a standalone fts5 table and raised on real deletes
+    # (dormant until the curator introduced principle deletion).
+    "DROP TRIGGER IF EXISTS principles_ad",
+    """CREATE TRIGGER principles_ad AFTER DELETE ON principles BEGIN
+       DELETE FROM principles_fts WHERE rowid = old.id; END""",
 ]
 
 
