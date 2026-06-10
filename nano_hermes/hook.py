@@ -26,7 +26,7 @@ from .memory.budgets import BudgetedMemory
 from .reflect.salience import last_user_text
 from .session.archiver import SessionArchiver
 from .paths import state_db
-from .session.db import open_db, purge_older_than
+from .session.db import evict_low_value_facts, open_db, purge_older_than
 from .session.trajectory import TrajectoryWriter
 from .skills.indexer import SkillIndexer
 
@@ -507,6 +507,7 @@ class NanoHermesHook(AgentHook):
         days = self.config.trajectory_retention_days
         vacuum_interval_s = self.config.vacuum_min_interval_days * 86400
         busy_timeout_ms = self.config.sqlite_busy_timeout_ms
+        decay = self.config.decay
 
         def _run() -> None:
             import sqlite3  # noqa: PLC0415
@@ -524,13 +525,24 @@ class NanoHermesHook(AgentHook):
             conn.enable_load_extension(False)
             try:
                 result = purge_older_than(conn, days)
+                # Evict low-value semantic_facts — the one store retention
+                # purge doesn't touch, so it grows without bound on a Pi.
+                evicted = 0
+                if decay.enabled:
+                    evicted = evict_low_value_facts(
+                        conn,
+                        retention_days=decay.fact_retention_days,
+                        importance_floor=decay.fact_evict_importance_floor,
+                        superseded_grace_days=decay.superseded_grace_days,
+                        max_per_run=decay.max_evictions_per_run,
+                    )
                 # Reclaim space when rows were actually removed. FTS5 and vec0
                 # shadow tables don't return pages without an explicit VACUUM.
                 # Gate behind a cooldown: once data ages past the retention
                 # window every startup removes a fresh day of rows, so an
                 # unconditional VACUUM would rewrite the whole DB on each boot,
                 # taking an exclusive lock that contends with the live archiver.
-                if result["sessions"] or result["trajectories"]:
+                if result["sessions"] or result["trajectories"] or evicted:
                     now = time.time()
                     last_raw = meta_get(conn, _META_LAST_VACUUM)
                     last = float(last_raw) if last_raw else 0.0
@@ -540,16 +552,19 @@ class NanoHermesHook(AgentHook):
                         conn.isolation_level = ""  # restore default for meta_set
                         meta_set(conn, _META_LAST_VACUUM, str(now))
                         log.info(
-                            "nano-hermes purge: %d sessions, %d trajectories — VACUUMed",
+                            "nano-hermes purge: %d sessions, %d trajectories, "
+                            "%d facts — VACUUMed",
                             result["sessions"],
                             result["trajectories"],
+                            evicted,
                         )
                     else:
                         log.info(
-                            "nano-hermes purge: %d sessions, %d trajectories — "
-                            "VACUUM skipped (cooldown)",
+                            "nano-hermes purge: %d sessions, %d trajectories, "
+                            "%d facts — VACUUM skipped (cooldown)",
                             result["sessions"],
                             result["trajectories"],
+                            evicted,
                         )
             finally:
                 conn.close()

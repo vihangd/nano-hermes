@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from typing import TYPE_CHECKING, Callable
+
+from ..decay import recency_decay
 
 from ..reflect.salience import (
     correction_score,
@@ -486,7 +489,7 @@ class ReflectionCoordinator:
         placeholders = ",".join("?" * len(vec_rows))
         id_to_distance = {r[0]: r[1] for r in vec_rows}
         ref_rows = self._db.execute(
-            f"SELECT id, content, session_id, utility, view_count, cite_count "
+            f"SELECT id, content, session_id, utility, view_count, cite_count, created_at "
             f"FROM reflections WHERE id IN ({placeholders})",
             [r[0] for r in vec_rows],
         ).fetchall()
@@ -497,12 +500,16 @@ class ReflectionCoordinator:
         # The smoothing means a never-injected reflection starts at 0.5
         # (neither rewarded nor penalised) so newcomers can still surface.
         citation_weight = 0.2
+        decay = self._config.decay
+        decay_weight = decay.reflection_decay_weight if decay.enabled else 0.0
+        now = time.time()
         scored = []
         for r in ref_rows:
             rid, content, sid = r[0], r[1], r[2]
             utility = r[3] if len(r) > 3 else 0.5
             view_count = int(r[4]) if len(r) > 4 and r[4] is not None else 0
             cite_count = int(r[5]) if len(r) > 5 and r[5] is not None else 0
+            created_at = r[6] if len(r) > 6 and r[6] is not None else now
             cosine_sim = 1.0 - id_to_distance.get(rid, 999.0)
             if cosine_sim < min_sim:
                 continue
@@ -512,6 +519,11 @@ class ReflectionCoordinator:
                 + utility_weight * utility
                 + citation_weight * cite_rate
             )
+            if decay_weight:
+                age_days = (now - created_at) / 86400
+                combined += decay_weight * recency_decay(
+                    age_days, decay.ranking_half_life_days
+                )
             scored.append((rid, content, sid, combined))
 
         results = sorted(scored, key=lambda x: -x[3])
