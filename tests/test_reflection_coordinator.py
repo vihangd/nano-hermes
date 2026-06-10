@@ -317,6 +317,47 @@ class TestMMRTrajectoryInjection:
         )
         assert result is None
 
+    async def test_failure_case_is_framed_as_avoid(self, hook, coord, monkeypatch):
+        from conftest import _patch_embedding, _FAKE_DIMS
+        import numpy as np
+        _patch_embedding(monkeypatch)
+        ok = self._seed_trajectory(hook, "duckduckgo search happy path", outcome="ok")
+        bad = self._seed_trajectory(hook, "duckduckgo search broken approach", outcome="fail")
+        vec = np.zeros(_FAKE_DIMS, dtype=np.float32)
+        vec[0] = 1.0
+        for tid in (ok, bad):
+            hook.db.execute(
+                "INSERT INTO trajectories_vec (trajectory_id, embedding) VALUES (?, ?)",
+                (tid, vec.tobytes()),
+            )
+        hook.db.commit()
+        result = await coord.get_trajectory_injection(
+            [{"role": "user", "content": "duckduckgo search for data"}]
+        )
+        assert result is not None
+        assert "AVOID" in result["content"]   # failure kept as cautionary case
+        assert "WORKED" in result["content"]  # success framed positively
+
+    async def test_respects_inject_k_cap(self, hook, coord, monkeypatch):
+        from conftest import _patch_embedding, _FAKE_DIMS
+        import numpy as np
+        _patch_embedding(monkeypatch)
+        coord._config.trajectory.inject_k = 2  # cap below available cases
+        vec = np.zeros(_FAKE_DIMS, dtype=np.float32)
+        vec[0] = 1.0
+        for i in range(4):
+            tid = self._seed_trajectory(hook, f"duckduckgo search variant {i}", outcome="ok")
+            hook.db.execute(
+                "INSERT INTO trajectories_vec (trajectory_id, embedding) VALUES (?, ?)",
+                (tid, vec.tobytes()),
+            )
+        hook.db.commit()
+        result = await coord.get_trajectory_injection(
+            [{"role": "user", "content": "duckduckgo search for data"}]
+        )
+        assert result is not None
+        assert result["content"].count("### Past case") == 2
+
     async def test_returns_single_when_only_one_candidate(self, hook, coord, monkeypatch):
         from conftest import _patch_embedding, _FAKE_DIMS
         import numpy as np
@@ -336,7 +377,7 @@ class TestMMRTrajectoryInjection:
             [{"role": "user", "content": "duckduckgo search for latest news"}]
         )
         assert result is not None
-        assert "Past session" in result["content"]
+        assert "Past case" in result["content"]
 
     async def test_injects_two_sessions_with_mmr(self, hook, coord, monkeypatch):
         from conftest import _patch_embedding, _FAKE_DIMS
@@ -361,8 +402,8 @@ class TestMMRTrajectoryInjection:
         )
         assert result is not None
         # Both sessions should appear in the output
-        assert "Past session 1" in result["content"]
-        assert "Past session 2" in result["content"]
+        assert "Past case 1" in result["content"]
+        assert "Past case 2" in result["content"]
 
     async def test_below_min_similarity_returns_none(self, hook, coord, monkeypatch):
         from conftest import _patch_embedding, _FAKE_DIMS

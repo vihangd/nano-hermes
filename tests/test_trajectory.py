@@ -330,7 +330,7 @@ class TestTrajectoryContextInjection:
         before_len = len(msgs)
         await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
         # No trajectory injection should have happened
-        injected = [m for m in msgs[before_len:] if "past session" in str(m.get("content", ""))]
+        injected = [m for m in msgs[before_len:] if "past case" in str(m.get("content", ""))]
         assert injected == []
 
     async def test_injection_fires_when_enabled_and_similar(
@@ -365,7 +365,7 @@ class TestTrajectoryContextInjection:
         before_len = len(msgs)
         await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
 
-        injected = [m for m in msgs[before_len:] if "past session" in str(m.get("content", ""))]
+        injected = [m for m in msgs[before_len:] if "past case" in str(m.get("content", ""))]
         assert len(injected) == 1
         assert "duckduckgo-search" in injected[0]["content"]
 
@@ -402,7 +402,7 @@ class TestTrajectoryContextInjection:
         before_len = len(msgs)
         await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
 
-        injected = [m for m in msgs[before_len:] if "past session" in str(m.get("content", ""))]
+        injected = [m for m in msgs[before_len:] if "past case" in str(m.get("content", ""))]
         assert injected == []
 
     async def test_injection_only_on_iteration_zero(
@@ -436,5 +436,5 @@ class TestTrajectoryContextInjection:
         # Iteration 1 — no injection
         before_len = len(msgs)
         await hook.before_iteration(AgentHookContext(iteration=1, messages=msgs))
-        injected = [m for m in msgs[before_len:] if "past session" in str(m.get("content", ""))]
+        injected = [m for m in msgs[before_len:] if "past case" in str(m.get("content", ""))]
         assert injected == []
