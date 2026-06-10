@@ -17,6 +17,7 @@ dependencies = [
 dev = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
+  "pytest-cov>=4",
   "ruff>=0.4",
   # 0.2.0 ships nanobot.session.goal_state and a larger built-in skill
   # catalog (long-goal, weather, tmux, github, summarize, etc.) that

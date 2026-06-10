@@ -382,3 +382,14 @@ class TestContradictionSweep:
         out = await MemoryPatchTool(hook=hook).execute(action="audit")
         assert out.startswith("ok: audit retired 1"), out
         assert _invalid_at(db, old) is not None
+
+
+class TestSweepEdges:
+    async def test_skips_fact_without_vector(self, tmp_path):
+        hook = _make_hook(tmp_path)
+        _insert_fact_at(hook.db, "lonely fact, no embedding", created_at=200.0)
+        called = AsyncMock(return_value=_mock_response("[1]"))
+        hook._loop.provider.chat_with_retry = called
+        n = await sweep_contradictions(hook, max_anchors=10)
+        assert n == 0
+        assert called.call_count == 0  # no vec -> skipped before any LLM call
