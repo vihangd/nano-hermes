@@ -78,6 +78,12 @@ class MemoryBudgets(BaseModel):
     # Caps the number of (newest) anchor facts scanned per run — one LLM call
     # per anchor that has near-duplicate older neighbours. Bounds Pi cost.
     contradiction_sweep_max_anchors: int = 20
+    # A-MEM neighbour evolution: when a new fact links to a near neighbour,
+    # union the new fact's keywords/tags into that single closest neighbour
+    # (zero-LLM) so older facts stay discoverable as the graph grows. Capped
+    # to bound tag/keyword growth per fact.
+    amem_evolve_neighbours: bool = True
+    amem_neighbour_max_tags: int = 12
 
 
 class RetrievalConfig(BaseModel):

@@ -6,7 +6,6 @@ import time
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
-import pytest
 
 import nano_hermes
 from conftest import _make_loop, _patch_embedding
@@ -258,3 +257,55 @@ class TestDistillEndToEndWithLinks:
         # The result string surfaces the new metadata.
         assert "importance=9" in result
         assert "bootstrap" in result
+
+
+def _insert_fact_kt(db, content, *, keywords, tags, importance=5) -> int:
+    cur = db.execute(
+        "INSERT INTO semantic_facts (content, source_chunk_ids, created_at, "
+        "keywords, tags, context, importance) VALUES (?, '[]', ?, ?, ?, '', ?)",
+        (content, time.time(), json.dumps(keywords), json.dumps(tags), importance),
+    )
+    db.commit()
+    return int(cur.lastrowid)
+
+
+class TestNeighbourEvolution:
+    async def test_closest_neighbour_gains_new_facts_tags(self, tmp_path, monkeypatch):
+        from conftest import _FAKE_DIMS
+        _patch_embedding(monkeypatch)
+        hook = _make_hook(tmp_path)
+        db = hook.db
+        vec = np.zeros(_FAKE_DIMS, dtype=np.float32)
+        vec[0] = 1.0  # _FAKE_VEC_SEARCH ('duckduckgo')
+        nbr = _insert_fact_kt(db, "duckduckgo old", keywords=["old"], tags=["search"])
+        _insert_fact_vec(db, nbr, vec)
+        new = _insert_fact_kt(db, "duckduckgo new", keywords=["fresh"], tags=["web"])
+
+        written = await link_new_fact(hook, new, "duckduckgo new")
+        assert written >= 1
+        kw, tags = db.execute(
+            "SELECT keywords, tags FROM semantic_facts WHERE id = ?", (nbr,)
+        ).fetchone()
+        assert "old" in json.loads(kw) and "fresh" in json.loads(kw)   # union
+        assert set(json.loads(tags)) == {"search", "web"}
+
+    async def test_disabled_leaves_neighbour_untouched(self, tmp_path, monkeypatch):
+        from conftest import _FAKE_DIMS
+        _patch_embedding(monkeypatch)
+        hook = _make_hook(tmp_path)
+        hook.config.memory.amem_evolve_neighbours = False
+        db = hook.db
+        vec = np.zeros(_FAKE_DIMS, dtype=np.float32)
+        vec[0] = 1.0
+        nbr = _insert_fact_kt(db, "duckduckgo old", keywords=["old"], tags=["search"])
+        _insert_fact_vec(db, nbr, vec)
+        new = _insert_fact_kt(db, "duckduckgo new", keywords=["fresh"], tags=["web"])
+
+        await link_new_fact(hook, new, "duckduckgo new")
+        kw = db.execute("SELECT keywords FROM semantic_facts WHERE id = ?", (nbr,)).fetchone()[0]
+        assert json.loads(kw) == ["old"]  # unchanged
+
+    def test_union_capped_preserves_existing(self):
+        from nano_hermes.memory.links import _union_capped
+        assert _union_capped(["a", "b"], ["b", "c", "d"], cap=3) == ["a", "b", "c"]
+        assert _union_capped(["a"], [], cap=5) == ["a"]
