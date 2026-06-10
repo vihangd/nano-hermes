@@ -12,6 +12,7 @@ upstream; this module just adds the geometric edge.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from typing import TYPE_CHECKING
@@ -24,6 +25,55 @@ if TYPE_CHECKING:
 
 _DEFAULT_TOP_K = 3
 _DEFAULT_SIM_THRESHOLD = 0.78
+
+
+def _union_capped(existing: list[str], incoming: list[str], cap: int) -> list[str]:
+    """Append novel *incoming* items to *existing* (order-preserving, deduped),
+    capped at *cap*. Existing items are never dropped to make room."""
+    out = list(existing)
+    seen = set(existing)
+    for item in incoming:
+        if len(out) >= cap:
+            break
+        if item not in seen:
+            out.append(item)
+            seen.add(item)
+    return out
+
+
+def _evolve_neighbour(
+    db: sqlite3.Connection, new_fact_id: int, neighbour_id: int, max_tags: int
+) -> bool:
+    """A-MEM: fold the new fact's keywords/tags into a neighbour's, so an older
+    fact gains discoverability from a strong new connection. Zero-LLM, capped.
+    Returns True if the neighbour row changed."""
+    rows = db.execute(
+        "SELECT id, keywords, tags FROM semantic_facts WHERE id IN (?, ?)",
+        (new_fact_id, neighbour_id),
+    ).fetchall()
+    by_id = {r[0]: r for r in rows}
+    new, nbr = by_id.get(new_fact_id), by_id.get(neighbour_id)
+    if new is None or nbr is None:
+        return False
+
+    def _load(raw: str | None) -> list[str]:
+        try:
+            v = json.loads(raw) if raw else []
+            return [str(x) for x in v] if isinstance(v, list) else []
+        except (json.JSONDecodeError, ValueError):
+            return []
+
+    new_kw, new_tags = _load(new[1]), _load(new[2])
+    nbr_kw, nbr_tags = _load(nbr[1]), _load(nbr[2])
+    merged_kw = _union_capped(nbr_kw, new_kw, max_tags)
+    merged_tags = _union_capped(nbr_tags, new_tags, max_tags)
+    if merged_kw == nbr_kw and merged_tags == nbr_tags:
+        return False
+    db.execute(
+        "UPDATE semantic_facts SET keywords = ?, tags = ? WHERE id = ?",
+        (json.dumps(merged_kw), json.dumps(merged_tags), neighbour_id),
+    )
+    return True
 
 
 async def link_new_fact(
@@ -77,6 +127,7 @@ async def link_new_fact(
 
     now = time.time()
     written = 0
+    best_neighbour: int | None = None  # strongest edge — rows are distance-sorted
     for other_id, distance in rows:
         if other_id not in valid_ids:
             continue
@@ -90,7 +141,18 @@ async def link_new_fact(
             "VALUES (?, ?, ?, ?)",
             (a, b, similarity, now),
         )
+        if best_neighbour is None:
+            best_neighbour = other_id
         written += 1
+
+    # A-MEM neighbour evolution: enrich only the single closest neighbour, so
+    # an older fact keeps surfacing as the graph grows. Zero-LLM, gated, capped.
+    mem_cfg = hook.config.memory
+    if best_neighbour is not None and mem_cfg.amem_evolve_neighbours:
+        _evolve_neighbour(
+            db, fact_id, best_neighbour, mem_cfg.amem_neighbour_max_tags
+        )
+
     db.commit()
     return written
 

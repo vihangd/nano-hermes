@@ -78,6 +78,12 @@ class MemoryBudgets(BaseModel):
     # Caps the number of (newest) anchor facts scanned per run — one LLM call
     # per anchor that has near-duplicate older neighbours. Bounds Pi cost.
     contradiction_sweep_max_anchors: int = 20
+    # A-MEM neighbour evolution: when a new fact links to a near neighbour,
+    # union the new fact's keywords/tags into that single closest neighbour
+    # (zero-LLM) so older facts stay discoverable as the graph grows. Capped
+    # to bound tag/keyword growth per fact.
+    amem_evolve_neighbours: bool = True
+    amem_neighbour_max_tags: int = 12
 
 
 class RetrievalConfig(BaseModel):
@@ -130,6 +136,14 @@ class SkillStatsConfig(BaseModel):
     deprecation_max_success_rate: float = 0.2  # below this rate -> deprecated
     # Maximum total bytes (body + companion files) allowed per propose_skill call.
     max_skill_bytes: int = 256 * 1024  # 256 KiB
+    # Multi-view skill retrieval (CRAFT idea, Pi-fit variant): blend the
+    # description-vector match with a lexical overlap against the skill NAME.
+    # Names are precise handles a fused "name: description" vector dilutes;
+    # this recovers name-led hits with zero extra embeddings/storage. The
+    # weight shifts effective_distance, same scale as ucb1_coefficient.
+    # Off by default (changes ranking).
+    multi_view_retrieval: bool = False
+    multi_view_name_weight: float = 0.05
     # Cosine similarity threshold for the diversity gate at draft→active promotion.
     # A draft skill whose embedding is >= this similar to ANY active skill is blocked
     # from promotion (FactorMiner insight: uncurated duplicates hurt retrieval quality).
