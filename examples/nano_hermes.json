@@ -18,7 +18,16 @@
     "deprecation_max_success_rate": 0.2,
 
     "ranking_mode": "ucb1",
-    "ucb1_coefficient": 0.05
+    "ucb1_coefficient": 0.05,
+
+    "_write_approval": "off | approve — when 'approve', autonomous skill rewrites are staged for review (pending_review tool / `nano-hermes pending`) instead of committed",
+    "write_approval": "off"
+  },
+
+  "principles": {
+    "enabled": false,
+    "_write_approval": "off | approve — stage curator principle edits for review instead of applying",
+    "write_approval": "off"
   },
 
   "memory": {

@@ -491,7 +491,11 @@ class NanoHermesHook(AgentHook):
         from .skills.rewriter import run_rewriter  # noqa: PLC0415
 
         # Snapshot DB + skills/ before mutating, so a bad batch is one undo.
-        if self.config.skill_stats.snapshot_before_evolution:
+        # Under the write-approval gate nothing mutates this cycle (writes are
+        # staged for review), so the pre-evolution snapshot is wasted — skip it;
+        # approve-time replay takes its own snapshot instead.
+        from .governance import write_approval as wa  # noqa: PLC0415
+        if self.config.skill_stats.snapshot_before_evolution and not wa.is_gated(self, "skills"):
             try:
                 from .skills.evolution_snapshot import snapshot_evolution  # noqa: PLC0415
                 async with self._heavy_io_lock:

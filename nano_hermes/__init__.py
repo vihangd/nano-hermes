@@ -151,4 +151,6 @@ def install(
     loop.tools.register(NanoStatusTool(hook=hook))
     loop.tools.register(WorkflowSuggestTool(hook=hook))
     loop.tools.register(SkillExportTool(hook=hook))
+    from .governance.review_tool import PendingReviewTool  # noqa: PLC0415
+    loop.tools.register(PendingReviewTool(hook=hook))
     return hook
