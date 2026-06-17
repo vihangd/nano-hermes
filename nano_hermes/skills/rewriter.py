@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..utils.error_classifier import EvolutionAbortError, classify_llm_response
 from .guard import scan_skill_content
 
 if TYPE_CHECKING:
@@ -196,6 +197,12 @@ async def _run_critic(
                 model=getattr(hook._loop, "model", None),
                 max_tokens=20,
             )
+            err = classify_llm_response(resp)
+            if err is not None:
+                log.warning("rewriter: critic call error for %s — %s", skill_name, err.reason.value)
+                if err.should_abort:
+                    raise EvolutionAbortError(err)
+                continue
             last_raw = (resp.content or "").strip()
             approved = _parse_critic_response(last_raw)
             if approved:
@@ -205,6 +212,8 @@ async def _run_critic(
                 "rewriter: critic rejected %s — %r", skill_name, last_raw
             )
             return False
+        except EvolutionAbortError:
+            raise
         except Exception:
             log.warning(
                 "rewriter: critic LLM call failed for %s (attempt %d/2)",
@@ -279,7 +288,15 @@ async def rewrite_skill(
             model=getattr(hook._loop, "model", None),
             max_tokens=2048,
         )
+        err = classify_llm_response(response)
+        if err is not None:
+            log.warning("rewriter: LLM call error for %s — %s", candidate.skill_name, err.reason.value)
+            if err.should_abort:
+                raise EvolutionAbortError(err)
+            return None
         new_body = (response.content or "").strip()
+    except EvolutionAbortError:
+        raise
     except Exception:
         log.exception("rewriter: LLM call failed for skill %s", candidate.skill_name)
         return None

@@ -489,6 +489,7 @@ class NanoHermesHook(AgentHook):
         """Run GEPA (if enabled) then the failure-driven rewriter, non-blocking."""
         from .skills.gepa import run_gepa  # noqa: PLC0415
         from .skills.rewriter import run_rewriter  # noqa: PLC0415
+        from .utils.error_classifier import EvolutionAbortError  # noqa: PLC0415
 
         # Snapshot DB + skills/ before mutating, so a bad batch is one undo.
         # Under the write-approval gate nothing mutates this cycle (writes are
@@ -512,6 +513,9 @@ class NanoHermesHook(AgentHook):
             gepa_evolved = await run_gepa(self)
             if gepa_evolved:
                 log.info("evolution cycle: GEPA updated %d skill(s): %s", len(gepa_evolved), gepa_evolved)
+        except EvolutionAbortError as _ea:
+            log.error("evolution cycle: GEPA aborted (%s) — skipping remainder", _ea.classified.reason.value)
+            return
         except Exception:
             log.exception("evolution cycle: GEPA failed")
 
@@ -519,6 +523,9 @@ class NanoHermesHook(AgentHook):
             rewritten = await run_rewriter(self, skip=frozenset(gepa_evolved))
             if rewritten:
                 log.info("evolution cycle: rewriter updated %d skill(s): %s", len(rewritten), rewritten)
+        except EvolutionAbortError as _ea:
+            log.error("evolution cycle: rewriter aborted (%s) — skipping remainder", _ea.classified.reason.value)
+            return
         except Exception:
             log.exception("evolution cycle: rewriter failed")
 

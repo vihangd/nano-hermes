@@ -99,3 +99,38 @@ def test_preserves_target_mode_bits_when_target_exists(tmp_path):
     mode = stat.S_IMODE(os.stat(target).st_mode)
     assert mode == 0o644, f"expected 0o644, got 0o{mode:o}"
     assert target.read_text() == "v2"
+
+
+def test_copymode_oserror_silently_ignored(tmp_path):
+    """OSError from shutil.copymode is swallowed — permissions are best-effort."""
+    target = tmp_path / "out.txt"
+    target.write_text("v1")
+    with patch.object(mod.shutil, "copymode", side_effect=OSError("no perms")):
+        atomic_write_text(target, "v2")  # must not raise
+    assert target.read_text() == "v2"
+
+
+def test_unlink_oserror_during_cleanup_propagates_write_error(tmp_path):
+    """If the write fails AND the tmp cleanup also fails, the original write
+    error still propagates (the cleanup OSError is swallowed).
+    """
+    target = tmp_path / "out.txt"
+    target.write_text("original")
+
+    real_fdopen = mod.os.fdopen
+
+    def failing_fdopen(fd, mode, **kwargs):
+        f = real_fdopen(fd, mode, **kwargs)
+
+        def _raise(_):
+            raise OSError("disk full")
+
+        f.write = _raise  # type: ignore[method-assign]
+        return f
+
+    with patch.object(mod.os, "fdopen", failing_fdopen), \
+         patch("nano_hermes._atomic.Path.unlink", side_effect=OSError("perm denied")):
+        with pytest.raises(OSError, match="disk full"):
+            atomic_write_text(target, "v2")
+
+    assert target.read_text() == "original"

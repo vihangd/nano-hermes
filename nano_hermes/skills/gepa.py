@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..memory.budgets import _count_tokens
+from ..utils.error_classifier import EvolutionAbortError, classify_llm_response
 from .guard import scan_skill_content
 from .rewriter import gather_failure_context, get_rewrite_candidates, save_skill_version
 
@@ -235,7 +236,15 @@ async def evolve_skill(
                 model=getattr(hook._loop, "model", None),
                 max_tokens=2048,
             )
+            err = classify_llm_response(resp)
+            if err is not None:
+                log.warning("gepa: mutation call error %s round %d — %s", candidate.skill_name, round_n, err.reason.value)
+                if err.should_abort:
+                    raise EvolutionAbortError(err)
+                continue
             new_body = (resp.content or "").strip()
+        except EvolutionAbortError:
+            raise
         except Exception:
             log.exception("gepa: mutation LLM call failed — %s round %d", candidate.skill_name, round_n)
             continue
@@ -263,9 +272,17 @@ async def evolve_skill(
                 model=getattr(hook._loop, "model", None),
                 max_tokens=len(failure_contexts) * 4 + 20,
             )
+            eval_err = classify_llm_response(eval_resp)
+            if eval_err is not None:
+                log.warning("gepa: evaluation call error %s round %d — %s", candidate.skill_name, round_n, eval_err.reason.value)
+                if eval_err.should_abort:
+                    raise EvolutionAbortError(eval_err)
+                continue
             improvements = _parse_yn_response(
                 eval_resp.content or "", len(failure_contexts)
             )
+        except EvolutionAbortError:
+            raise
         except Exception:
             log.exception("gepa: evaluation LLM call failed — %s round %d", candidate.skill_name, round_n)
             continue
