@@ -84,6 +84,15 @@ def _patch_agent_loop() -> None:
 
 
 def main() -> None:
+    # nano-hermes-native subcommand: offline review of write-approval-gated
+    # writes. Handled before delegating to nanobot's Typer app.
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "pending":
+        from nano_hermes.governance.pending import _run
+
+        raise SystemExit(_run(sys.argv[2:]))
+
     _patch_agent_loop()
     from nanobot.cli.commands import app
 

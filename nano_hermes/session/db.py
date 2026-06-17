@@ -398,6 +398,25 @@ _MIGRATIONS = [
     "ON semantic_facts(created_at) WHERE invalid_at IS NULL",
     "CREATE INDEX IF NOT EXISTS idx_semantic_facts_evict "
     "ON semantic_facts(importance, created_at) WHERE invalid_at IS NULL",
+    # Phase 12 (write-approval gate): pending store for autonomous evolution
+    # writes staged under write_approval='approve'. payload is JSON — the new
+    # SKILL.md body (skills) or the curator op list (principles). base_hash is
+    # the sha256 of the live SKILL.md at stage time, used to refuse a stale
+    # replay (skills only). status: pending | approved | rejected | stale.
+    """CREATE TABLE IF NOT EXISTS pending_writes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    subsystem    TEXT NOT NULL,                       -- 'skills' | 'principles'
+    skill_name   TEXT,                                -- NULL for principle ops
+    payload      TEXT NOT NULL,                        -- JSON
+    base_hash    TEXT,                                -- sha256 of live body at stage (skills)
+    reason       TEXT,
+    origin       TEXT NOT NULL DEFAULT 'background',   -- 'rewriter'|'gepa'|'umbrella'|'curator'
+    status       TEXT NOT NULL DEFAULT 'pending',      -- pending|approved|rejected|stale
+    created_at   REAL NOT NULL,
+    resolved_at  REAL
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_pending_open "
+    "ON pending_writes(subsystem) WHERE status='pending'",
 ]
 
 

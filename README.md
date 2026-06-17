@@ -2,7 +2,7 @@
 
 Self-evolving memory, skill lifecycle, and Reflexion-based self-improvement extensions for [HKUDS/nanobot](https://github.com/HKUDS/nanobot).
 
-Adds ten agent-facing tools plus a lifecycle hook that archives turns into a searchable SQLite index, runs Reflexion-style self-critique, maintains a Voyager-style embedding index over nanobot's skill library, supports a two-phase skill promotion system (draft → active → deprecated), and automatically rewrites chronically failing skills using a SkillForge-inspired pipeline.
+Adds fourteen agent-facing tools plus a lifecycle hook that archives turns into a searchable SQLite index, runs Reflexion-style self-critique, maintains a Voyager-style embedding index over nanobot's skill library, supports a two-phase skill promotion system (draft → active → deprecated), and automatically rewrites chronically failing skills using a SkillForge-inspired pipeline.
 
 Designed for low-resource hosts (Raspberry Pi) — no local embedding model, one SQLite file per workspace, hosted-embedding failover across DeepInfra, Together, and OpenRouter.
 
@@ -134,6 +134,8 @@ When `nano-hermes gateway` (or `nano-hermes agent`) starts, it calls `install()`
 
 Workspace values win on any key present in both files. Missing files are silently skipped. A fully-annotated example is at [`examples/nano_hermes.json`](examples/nano_hermes.json) in this repo.
 
+> ⚠️ **Separate file from nanobot's own config.** nano-hermes keys (`skill_stats`, `principles`, `embedding`, …) go in `~/.nanobot/**nano_hermes**.json` — **not** in nanobot's `~/.nanobot/config.json`. nanobot's loader rejects unknown keys (`Extra inputs are not permitted … Using default configuration.`), so a nano-hermes block placed there is dropped silently. If you see that warning, you put the keys in the wrong file.
+
 **Quick start** — copy the example to your user config and edit as needed:
 
 ```bash
@@ -244,7 +246,7 @@ nano_hermes.install(loop, config={
 
 ## What the agent gets
 
-Thirteen tools land on `loop.tools`:
+Fourteen tools land on `loop.tools`:
 
 | Tool | What it does |
 |---|---|
@@ -261,6 +263,7 @@ Thirteen tools land on `loop.tools`:
 | `reflect(content)` | Store a 2–4 sentence self-critique for the current session. Injected into the next iteration's prompt. With `reflection_scope="global"`, also embedded for cross-session recall. |
 | `nano_status()` | Read-only snapshot of internal state: session ID, turns archived, salience score, nudge pending, reflection count, skill counts by lifecycle stage, DB size on disk. |
 | `workflow_suggest(k=3)` | Cluster successful past trajectories by embedding similarity; surface recurring task patterns as workflow candidates. Requires `workflow_induction.enabled = True`. |
+| `pending_review(action, id?)` | Review autonomous writes held by the write-approval gate (only relevant when `write_approval="approve"`). `action ∈ {list, diff, approve, reject}`. Approving a skill write is refused if the skill changed on disk since it was staged. |
 
 ---
 
@@ -355,6 +358,7 @@ Beyond the per-turn memory/skill machinery, nano-hermes ships a set of self-impr
 | **GEPA + SkillForge rewriter** | off | Auto-rewrites chronically-failing skills (see *Skill-rewrite pipeline* below) | `skill_stats.rewrite_session_interval` (>0), `skill_stats.gepa_enabled` |
 | **Umbrella consolidation** | off | Merges clusters of near-duplicate sibling skills into one umbrella skill, deprecating the absorbed siblings | `skill_stats.umbrella_merge_enabled`, `umbrella_sim_threshold` (0.86) |
 | **Pre-evolution snapshot + rollback** | on (when evolution runs) | Snapshots the DB + `skills/` before each evolution cycle so a bad batch can be undone | `skill_stats.snapshot_before_evolution`, `snapshot_retain` (3). Offline rollback: `python -m nano_hermes.skills.evolution_snapshot <workspace>` |
+| **Write-approval gate** | off | A *pre-commit hold*: under `"approve"`, autonomous skill rewrites (GEPA/rewriter/umbrella) and curator principle edits are **staged** for review instead of committed. Approve replays the write; it's refused if the skill changed on disk since staging (anti-clobber). Foreground `propose_skill`/`principle` writes are never gated | `skill_stats.write_approval` (`"off"`/`"approve"`), `principles.write_approval`. Review: the `pending_review` tool, or offline `nano-hermes pending <workspace> list\|diff\|approve\|reject <id>` |
 
 Everything LLM-gated runs in the background at session boundaries, is cooldown-bounded, and never blocks the agent's turn. To turn the optional features on:
 

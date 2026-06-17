@@ -370,6 +370,22 @@ async def run_rewriter(
         if new_body is None:
             continue
 
+        # Write-approval gate: under "approve" stage the rewrite for review
+        # instead of committing, and do NOT report it as evolved (keeps the
+        # caller's skip= chaining and logs honest).
+        from ..governance import write_approval as wa  # noqa: PLC0415
+        if wa.is_gated(hook, "skills"):
+            wa.stage_skill_write(
+                hook,
+                skill_name=candidate.skill_name,
+                description="",
+                body=new_body,
+                reason=f"auto-rewrite: failure_rate={candidate.failure_rate:.0%}",
+                origin="rewriter",
+            )
+            log.info("rewriter: staged %s for approval (gate=approve)", candidate.skill_name)
+            continue
+
         # Pass description="" — _edit only uses it in the success message;
         # SkillIndexer re-extracts description from the file on next search.
         # Use ProposeSkillTool's internal _edit path — import lazily to

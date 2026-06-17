@@ -345,6 +345,24 @@ async def run_gepa(hook: "NanoHermesHook") -> list[str]:
             log.info("gepa: %s — no Pareto improvement found", candidate.skill_name)
             continue
 
+        # Write-approval gate: under "approve" stage instead of committing, and
+        # do NOT append to `evolved` (so the cycle's skip= and logs stay honest).
+        from ..governance import write_approval as wa  # noqa: PLC0415
+        if wa.is_gated(hook, "skills"):
+            wa.stage_skill_write(
+                hook,
+                skill_name=candidate.skill_name,
+                description="",
+                body=best.body,
+                reason=(
+                    f"gepa: Pareto-best (improvements={best.estimated_improvements}, "
+                    f"tokens={best.token_count}, failure_rate={candidate.failure_rate:.0%})"
+                ),
+                origin="gepa",
+            )
+            log.info("gepa: staged %s for approval (gate=approve)", candidate.skill_name)
+            continue
+
         # Preserve original before overwriting.
         skill_path = hook.workspace / "skills" / candidate.skill_name / "SKILL.md"
         save_skill_version(

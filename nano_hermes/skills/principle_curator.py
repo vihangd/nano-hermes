@@ -211,6 +211,17 @@ async def run_principle_curator(hook: "NanoHermesHook") -> dict[str, int]:
         return {}
 
     ops = parse_ops(text)
+
+    # Write-approval gate: under "approve" stage the op list for review instead
+    # of applying it. Replay re-runs apply_ops against the live table, so its
+    # deterministic dedup/prune re-merge correctly — no stale-base check needed.
+    from ..governance import write_approval as wa  # noqa: PLC0415
+    if ops and wa.is_gated(hook, "principles"):
+        wa.stage_principle_ops(hook, ops=ops, reason=f"{len(ops)} curator op(s)")
+        _mark_run(hook.db)
+        log.info("principle curator: staged %d op(s) for approval (gate=approve)", len(ops))
+        return {"staged": len(ops)}
+
     counts = await apply_ops(hook, ops, cfg)
     counts["pruned"] += _prune_over_budget(hook.db, cfg.max_principles)
     _mark_run(hook.db)

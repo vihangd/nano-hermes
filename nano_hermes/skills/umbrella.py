@@ -173,6 +173,19 @@ async def run_umbrella_merge(hook: "NanoHermesHook") -> list[str]:
                 )
                 continue
 
+        # Write-approval gate: under "approve" stage the whole merge (umbrella
+        # body + absorbed siblings) for review; don't write or deprecate yet,
+        # and don't report it as merged.
+        from ..governance import write_approval as wa  # noqa: PLC0415
+        if wa.is_gated(hook, "skills"):
+            wa.stage_umbrella_write(
+                hook, name=name, description=description, body=body,
+                absorbed=absorbed,
+                reason=f"umbrella merge of {absorbed}",
+            )
+            log.info("umbrella: staged merge %s -> %s for approval (gate=approve)", absorbed, name)
+            continue
+
         _write_umbrella(hook, name, description, body)
         # The umbrella is agent-authored so it stays eligible for future
         # evolution; the indexer embeds it on the next refresh.

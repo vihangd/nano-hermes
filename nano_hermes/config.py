@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class EmbeddingProvider(BaseModel):
@@ -229,6 +229,17 @@ class SkillStatsConfig(BaseModel):
     # offline GEPA/MIPROv2 optimisation. Kept high (50) so early-corpus noise
     # doesn't pollute the training set.
     export_min_sessions: int = 50
+    # Phase 12: write-approval gate for AUTONOMOUS skill writes (rewriter, GEPA,
+    # umbrella). "off" = today's behaviour (writes commit immediately). "approve"
+    # = stage the new body to pending_writes for out-of-band review instead of
+    # writing; review via the pending_review tool or `nano-hermes pending`.
+    # Foreground propose_skill calls are never gated. Default off.
+    write_approval: Literal["off", "approve"] = "off"
+
+    @field_validator("write_approval", mode="before")
+    @classmethod
+    def _coerce_write_approval(cls, v: object) -> str:
+        return "approve" if str(v).strip().lower() == "approve" else "off"
 
 
 class SkillsConfig(BaseModel):
@@ -307,6 +318,16 @@ class PrincipleEvolutionConfig(BaseModel):
     failure_threshold: float = 0.4
     # Recency half-life (days) for the injection-ranking decay term.
     inject_rank_recency_half_life_days: float = 30.0
+    # Phase 12: write-approval gate for the AUTONOMOUS curator. "off" = ops apply
+    # immediately. "approve" = stage the curator op list to pending_writes for
+    # review (replay re-runs apply_ops against the live table). Manual principle
+    # tool writes are never gated. Default off.
+    write_approval: Literal["off", "approve"] = "off"
+
+    @field_validator("write_approval", mode="before")
+    @classmethod
+    def _coerce_write_approval(cls, v: object) -> str:
+        return "approve" if str(v).strip().lower() == "approve" else "off"
 
 
 class DecayConfig(BaseModel):
