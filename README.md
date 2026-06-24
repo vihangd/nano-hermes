@@ -222,7 +222,45 @@ nano_hermes.install(loop, config={
         # Run GEPA (if enabled) then rewriter every N completed sessions.
         # 0 = disabled. Recommended starting value: 5–10.
         "rewrite_session_interval": 0,
+
+        # Ratchet skill-cap + retirement (arXiv:2605.22148). Zero LLM calls.
+        # Retire skills with ĉ(s) = (2·successes − uses)/uses ≤ −τ after ≥ n_min uses.
+        # Cap enforcement then evicts the lowest-scoring excess agent-origin skills.
+        # Off by default. Enable once you have ≥100 uses per skill.
+        "ratchet_enabled": False,
+        "ratchet_skill_cap": 50,          # max active agent-origin non-pinned skills
+        "ratchet_n_min": 100,             # min uses before retirement eligibility
+        "ratchet_retire_threshold": 0.10, # retire if ĉ(s) ≤ −0.10
+
+        # MemSkill designer loop (arXiv:2602.02474).
+        # Proposes new skills for tasks where no skill was used and outcome failed.
+        # One LLM call per cluster. Off by default.
+        "skill_designer_enabled": False,
+        "skill_designer_lookback_days": 30,
+        "skill_designer_max_candidates": 50,
+        "skill_designer_min_cluster_size": 3,
+
+        # Dynamic Cheatsheet (arXiv:2504.07952).
+        # One LLM call per completed session extracts a transferable lesson.
+        # Lessons are KNN-retrieved and prepended at iteration 0. Off by default.
+        "cheatsheet_enabled": False,
+        "cheatsheet_top_k": 3,
+
+        # OPRO prompt meta-optimizer (arXiv:2309.03409).
+        # Evolves nano-hermes's internal evolution prompts via an LLM-as-optimizer loop.
+        # Fires every opro_cycle_interval evolution cycles. Off by default.
+        "opro_enabled": False,
+        "opro_cycle_interval": 20,         # cycles between OPRO rounds
+        "opro_candidates_per_round": 8,    # candidate prompts generated per round
     },
+
+    # ExpeL contrastive insight extraction (arXiv:2308.10144).
+    # After each session, pairs it with the most similar past session that had the
+    # opposite outcome (success ↔ fail/partial). One LLM call extracts the contrast.
+    # Retrieved alongside cheatsheet lessons at iteration 0. Off by default.
+    "expel_enabled": False,
+    "expel_similarity_threshold": 0.75,
+
 
     # ── Trajectory replay ────────────────────────────────────────────────
     "trajectory": {
@@ -359,6 +397,11 @@ Beyond the per-turn memory/skill machinery, nano-hermes ships a set of self-impr
 | **Umbrella consolidation** | off | Merges clusters of near-duplicate sibling skills into one umbrella skill, deprecating the absorbed siblings | `skill_stats.umbrella_merge_enabled`, `umbrella_sim_threshold` (0.86) |
 | **Pre-evolution snapshot + rollback** | on (when evolution runs) | Snapshots the DB + `skills/` before each evolution cycle so a bad batch can be undone | `skill_stats.snapshot_before_evolution`, `snapshot_retain` (3). Offline rollback: `python -m nano_hermes.skills.evolution_snapshot <workspace>` |
 | **Write-approval gate** | off | A *pre-commit hold*: under `"approve"`, autonomous skill rewrites (GEPA/rewriter/umbrella) and curator principle edits are **staged** for review instead of committed. Approve replays the write; it's refused if the skill changed on disk since staging (anti-clobber). Foreground `propose_skill`/`principle` writes are never gated | `skill_stats.write_approval` (`"off"`/`"approve"`), `principles.write_approval`. Review: the `pending_review` tool, or offline `nano-hermes pending <workspace> list\|diff\|approve\|reject <id>` |
+| **Ratchet retirement + cap** | off | Contribution-score retirement: skills with ĉ(s) = (2·successes − uses) / uses ≤ −τ after ≥ n_min uses are deprecated. Cap enforcement evicts the lowest-scoring agent-origin skills until the active count is within the cap. Zero LLM calls — pure SQL. Runs after each umbrella-merge step | `skill_stats.ratchet_enabled`, `ratchet_skill_cap` (50), `ratchet_n_min` (100), `ratchet_retire_threshold` (0.10) |
+| **MemSkill designer loop** | off | Detects sessions where no skill was used and outcome was fail/partial. Clusters those sessions by task-embedding cosine similarity; for each cluster ≥ min_cluster_size, one LLM call proposes a new skill to fill the coverage gap. Targets tasks for which no skill exists, complementing GEPA/rewriter which improve existing ones | `skill_stats.skill_designer_enabled`, `skill_designer_lookback_days` (30), `skill_designer_max_candidates` (50), `skill_designer_min_cluster_size` (3) |
+| **Dynamic Cheatsheet** | off | After each completed session, one LLM call extracts a single transferable lesson and stores it in the semantic-facts store. At iteration 0, the top-k most relevant lessons (KNN by embedding) are prepended to the system context. Zero per-turn overhead when disabled | `skill_stats.cheatsheet_enabled`, `cheatsheet_top_k` (3) |
+| **ExpeL contrastive insights** | off | After each session, finds the most similar past session with the opposite outcome (success ↔ fail/partial). When cosine similarity ≥ threshold, one LLM call extracts a contrastive insight explaining the difference. Stored alongside cheatsheet lessons and retrieved at iteration 0 | `expel_enabled` (top-level), `expel_similarity_threshold` (0.75) |
+| **OPRO prompt optimizer** | off | Treats nano-hermes's internal evolution prompts (e.g. the GEPA mutation prompt) as optimizable objects. A meta-LLM call sees the history of (prompt, GEPA-improvement-rate) pairs and generates improved candidate prompts; the best-scoring one is promoted. Fires at most once every N evolution cycles | `skill_stats.opro_enabled`, `opro_cycle_interval` (20), `opro_candidates_per_round` (8) |
 
 Everything LLM-gated runs in the background at session boundaries, is cooldown-bounded, and never blocks the agent's turn. To turn the optional features on:
 

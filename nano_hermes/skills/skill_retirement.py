@@ -83,7 +83,8 @@ def run_ratchet(hook: "NanoHermesHook") -> dict[str, list[str]]:
     # ------------------------------------------------------------------ #
     cap_evicted: list[str] = []
     total_active: int = db.execute(
-        "SELECT COUNT(*) FROM skill_stats WHERE status = 'active'"
+        "SELECT COUNT(*) FROM skill_stats "
+        "WHERE status = 'active' AND origin = 'agent' AND pinned = 0"
     ).fetchone()[0]
     to_evict = max(0, total_active - cap)
     if to_evict > 0:
@@ -94,12 +95,9 @@ def run_ratchet(hook: "NanoHermesHook") -> dict[str, list[str]]:
             "ORDER BY CAST(2 * success_count - use_count AS REAL)"
             "       / NULLIF(use_count, 0) ASC",
         ).fetchall()
-        already_retired = set(retired)
         for name, uses, successes in evict_candidates:
             if len(cap_evicted) >= to_evict:
                 break
-            if name in already_retired:
-                continue
             db.execute(
                 "UPDATE skill_stats SET status = 'deprecated' WHERE name = ?",
                 (name,),

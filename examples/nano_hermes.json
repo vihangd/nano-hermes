@@ -21,7 +21,28 @@
     "ucb1_coefficient": 0.05,
 
     "_write_approval": "off | approve — when 'approve', autonomous skill rewrites are staged for review (pending_review tool / `nano-hermes pending`) instead of committed",
-    "write_approval": "off"
+    "write_approval": "off",
+
+    "_ratchet": "Contribution-score retirement + cap enforcement. Zero LLM calls. Enable once skills have >=100 uses.",
+    "ratchet_enabled": false,
+    "ratchet_skill_cap": 50,
+    "ratchet_n_min": 100,
+    "ratchet_retire_threshold": 0.10,
+
+    "_skill_designer": "Proposes new skills for tasks where no skill was used and outcome was fail/partial.",
+    "skill_designer_enabled": false,
+    "skill_designer_lookback_days": 30,
+    "skill_designer_max_candidates": 50,
+    "skill_designer_min_cluster_size": 3,
+
+    "_cheatsheet": "Extracts one transferable lesson per session; retrieved at iteration 0.",
+    "cheatsheet_enabled": false,
+    "cheatsheet_top_k": 3,
+
+    "_opro": "Evolves internal evolution prompts via LLM-as-optimizer. Fires every N evolution cycles.",
+    "opro_enabled": false,
+    "opro_cycle_interval": 20,
+    "opro_candidates_per_round": 8
   },
 
   "principles": {
@@ -29,6 +50,10 @@
     "_write_approval": "off | approve — stage curator principle edits for review instead of applying",
     "write_approval": "off"
   },
+
+  "_expel": "ExpeL contrastive insight extraction. Pairs sessions with opposite outcomes; one LLM call extracts insight.",
+  "expel_enabled": false,
+  "expel_similarity_threshold": 0.75,
 
   "memory": {
     "memory_md_tokens": 512,

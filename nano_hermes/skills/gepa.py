@@ -219,14 +219,13 @@ async def evolve_skill(
     best = baseline
     current_body = original_body  # start each round from the Pareto-best body
 
+    from ..governance.prompt_optimizer import get_active_prompt, record_gepa_rounds  # noqa: PLC0415
+    _active_mutation_template = get_active_prompt(hook.db, "gepa_mutation", _MUTATION_PROMPT)
+
     for round_n in range(1, max_rounds + 1):
         log.debug("gepa: %s — round %d/%d", candidate.skill_name, round_n, max_rounds)
 
         # --- Step 1: mutate ---
-        from ..governance.prompt_optimizer import get_active_prompt  # noqa: PLC0415
-        _active_mutation_template = get_active_prompt(
-            hook.db, "gepa_mutation", _MUTATION_PROMPT
-        )
         mutation_prompt = _active_mutation_template.format(
             skill_name=candidate.skill_name,
             round_n=round_n,
@@ -315,6 +314,8 @@ async def evolve_skill(
                 "gepa: %s round %d — new Pareto-best (improvements=%d, tokens=%d)",
                 candidate.skill_name, round_n, best.estimated_improvements, best.token_count,
             )
+
+    record_gepa_rounds(hook.db, max_rounds)
 
     # Only return if we genuinely improved (improvements > 0 AND body changed).
     # The Pareto check can select a shorter body with 0 improvements as "best"

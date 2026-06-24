@@ -126,6 +126,8 @@ class NanoHermesHook(AgentHook):
         # Pending reflection embedding tasks — reflect/tool.py registers tasks here
         # so asyncio doesn't GC them before they complete.
         self._reflection_embed_tasks: set[asyncio.Task] = set()
+        # Pending cheatsheet/expel background tasks (same GC guard pattern).
+        self._lesson_tasks: set[asyncio.Task] = set()
 
         # Cache for last_user_text: (id(messages), len(messages), result).
         # Avoids a full reverse scan every after_iteration when nothing changed.
@@ -737,9 +739,13 @@ class NanoHermesHook(AgentHook):
             msgs_snapshot = list(messages)
             # Dynamic Cheatsheet: schedule lesson extraction for the completed session.
             if getattr(self.config.skill_stats, "cheatsheet_enabled", False):
-                asyncio.create_task(self._extract_cheatsheet_lesson(msgs_snapshot, outcome))
+                t = asyncio.create_task(self._extract_cheatsheet_lesson(msgs_snapshot, outcome))
+                self._lesson_tasks.add(t)
+                t.add_done_callback(self._lesson_tasks.discard)
             # ExpeL: schedule contrastive insight extraction for the completed session.
             if getattr(self.config, "expel_enabled", False):
-                asyncio.create_task(
+                t = asyncio.create_task(
                     self._extract_expel_insight(completed_id, outcome, msgs_snapshot)
                 )
+                self._lesson_tasks.add(t)
+                t.add_done_callback(self._lesson_tasks.discard)

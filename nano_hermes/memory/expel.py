@@ -124,7 +124,7 @@ def find_contrasting_session(
         for cand_sid, cand_outcome in candidates:
             emb_row = db.execute(
                 "SELECT embedding FROM chunks_vec "
-                "WHERE rowid = ("
+                "WHERE chunk_id = ("
                 "  SELECT c.id FROM chunks c WHERE c.session_id = ? "
                 "  ORDER BY c.turn_index ASC LIMIT 1"
                 ")",

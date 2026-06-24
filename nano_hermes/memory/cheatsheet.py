@@ -189,14 +189,16 @@ async def retrieve_lessons(
         log.debug("cheatsheet: KNN retrieval failed — using FTS fallback", exc_info=True)
 
     if not lessons:
-        # FTS5 fallback — recency-ordered query.
-        rows = db.execute(
-            "SELECT content FROM semantic_facts "
-            "WHERE fact_type IN ('cheatsheet', 'expel') AND invalid_at IS NULL "
-            "ORDER BY created_at DESC LIMIT ?",
-            (top_k,),
-        ).fetchall()
-        lessons = [r[0] for r in rows]
+        try:
+            rows = db.execute(
+                "SELECT content FROM semantic_facts "
+                "WHERE fact_type IN ('cheatsheet', 'expel') AND invalid_at IS NULL "
+                "ORDER BY created_at DESC LIMIT ?",
+                (top_k,),
+            ).fetchall()
+            lessons = [r[0] for r in rows]
+        except Exception:
+            log.debug("cheatsheet: FTS fallback failed", exc_info=True)
 
     return lessons
 

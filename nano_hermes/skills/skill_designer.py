@@ -57,59 +57,39 @@ Output ONLY the SKILL.md content. Skill name must be unique and descriptive.
 _NAME_RE = re.compile(r"^name:\s*([a-z0-9][a-z0-9_-]{0,63})\s*$", re.MULTILINE)
 
 # ---------------------------------------------------------------------------
-# Embedding / cosine helpers
+# Clustering helper
 # ---------------------------------------------------------------------------
 
 
-def _cosine(a: "np.ndarray", b: "np.ndarray") -> float:  # type: ignore[name-defined]
-    """Cosine similarity between two unit-normalised or raw float32 vectors."""
-    import numpy as np  # noqa: PLC0415
-    na = np.linalg.norm(a)
-    nb = np.linalg.norm(b)
-    if na == 0 or nb == 0:
-        return 0.0
-    return float(np.dot(a, b) / (na * nb))
-
-
-def _greedy_cluster(
+def _cluster_sessions(
     sessions: list[tuple[int, str, bytes]],
     threshold: float,
 ) -> list[list[int]]:
-    """Greedy single-linkage clustering by cosine similarity.
+    """Cluster sessions by task-embedding cosine similarity.
 
-    ``sessions`` is a list of ``(traj_id, task_text, embedding_bytes)``.
-    Returns a list of clusters; each cluster is a list of indices into
-    ``sessions``.  Sessions without an embedding blob are skipped.
+    Delegates to ``consolidation.greedy_cluster`` (running-mean centroids).
+    Returns clusters as lists of indices into ``sessions``; None-embedding
+    sessions are excluded from all clusters.
     """
     import numpy as np  # noqa: PLC0415
+    from ..memory.consolidation import greedy_cluster  # noqa: PLC0415
 
-    vecs: list[tuple[int, "np.ndarray"] | None] = []
-    for tid, _task, emb_bytes in sessions:
+    valid_indices: list[int] = []
+    valid_vecs: list[np.ndarray] = []
+    for idx, (_tid, _task, emb_bytes) in enumerate(sessions):
         if emb_bytes is None:
-            vecs.append(None)
-        else:
-            try:
-                vecs.append((tid, np.frombuffer(emb_bytes, dtype=np.float32).copy()))
-            except Exception:
-                vecs.append(None)
-
-    assigned = [False] * len(sessions)
-    clusters: list[list[int]] = []
-
-    for i, vi in enumerate(vecs):
-        if assigned[i] or vi is None:
             continue
-        cluster = [i]
-        assigned[i] = True
-        for j, vj in enumerate(vecs):
-            if assigned[j] or vj is None or i == j:
-                continue
-            if _cosine(vi[1], vj[1]) >= threshold:
-                cluster.append(j)
-                assigned[j] = True
-        clusters.append(cluster)
+        try:
+            valid_vecs.append(np.frombuffer(emb_bytes, dtype=np.float32).copy())
+            valid_indices.append(idx)
+        except Exception:
+            pass
 
-    return clusters
+    if not valid_vecs:
+        return []
+
+    raw = greedy_cluster(valid_vecs, threshold)
+    return [[valid_indices[i] for i in cluster] for cluster in raw]
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +148,7 @@ async def run_skill_designer(hook: "NanoHermesHook") -> list[str]:
 
     # 2. Cluster by cosine similarity on embeddings
     sessions = [(r[0], r[1], r[2]) for r in rows]
-    clusters = _greedy_cluster(sessions, cosine_threshold)
+    clusters = _cluster_sessions(sessions, cosine_threshold)
 
     # Filter to clusters large enough
     eligible = [c for c in clusters if len(c) >= min_cluster_size]

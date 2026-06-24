@@ -10,7 +10,7 @@ import pytest
 
 import nano_hermes
 from conftest import _make_loop
-from nano_hermes.skills.skill_designer import _cosine, _greedy_cluster, run_skill_designer
+from nano_hermes.skills.skill_designer import _cluster_sessions, run_skill_designer
 
 
 # ---------------------------------------------------------------------------
@@ -84,22 +84,6 @@ When the agent has no skill for this task type.
 # Unit: cosine + clustering
 # ---------------------------------------------------------------------------
 
-class TestCosine:
-    def test_identical_vectors(self):
-        a = np.array([1, 0, 0], dtype=np.float32)
-        assert abs(_cosine(a, a) - 1.0) < 1e-6
-
-    def test_orthogonal_vectors(self):
-        a = np.array([1, 0], dtype=np.float32)
-        b = np.array([0, 1], dtype=np.float32)
-        assert abs(_cosine(a, b)) < 1e-6
-
-    def test_zero_vector_returns_zero(self):
-        a = np.zeros(3, dtype=np.float32)
-        b = np.array([1, 0, 0], dtype=np.float32)
-        assert _cosine(a, b) == 0.0
-
-
 class TestGreedyCluster:
     def test_similar_sessions_grouped(self):
         emb = _vec(0)
@@ -108,7 +92,7 @@ class TestGreedyCluster:
             (2, "task b", emb),
             (3, "task c", emb),
         ]
-        clusters = _greedy_cluster(sessions, threshold=0.75)
+        clusters = _cluster_sessions(sessions, threshold=0.75)
         assert len(clusters) == 1
         assert len(clusters[0]) == 3
 
@@ -116,13 +100,13 @@ class TestGreedyCluster:
         e1 = _vec(0)
         e2 = _vec(1)
         sessions = [(1, "t1", e1), (2, "t2", e2)]
-        clusters = _greedy_cluster(sessions, threshold=0.75)
+        clusters = _cluster_sessions(sessions, threshold=0.75)
         assert len(clusters) == 2
 
     def test_none_embedding_skipped(self):
         e = _vec(0)
         sessions = [(1, "t1", None), (2, "t2", e)]
-        clusters = _greedy_cluster(sessions, threshold=0.75)
+        clusters = _cluster_sessions(sessions, threshold=0.75)
         # Only session 2 has embedding — forms solo cluster
         assert any(len(c) == 1 for c in clusters)
         # Session 0 (None emb) never starts a cluster
