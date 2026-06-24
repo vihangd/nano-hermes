@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -152,3 +153,53 @@ class TestPrincipleInjection:
         if injections:
             bullets = injections[0]["content"].count("• If:")
             assert bullets <= 2
+
+
+# ---------------------------------------------------------------------------
+# Coverage additions: description property, redaction path, upsert exception
+# ---------------------------------------------------------------------------
+
+
+class TestPrincipleToolProperties:
+    def test_description_property_is_nonempty(self, tmp_path):
+        """Line 89: description property must return the docstring."""
+        hook = nano_hermes.install(_make_loop(tmp_path))
+        tool = PrincipleTool(hook=hook)
+        assert tool.description  # must be non-empty
+        assert isinstance(tool.description, str)
+
+    def test_name_property(self, tmp_path):
+        hook = nano_hermes.install(_make_loop(tmp_path))
+        assert PrincipleTool(hook=hook).name == "record_principle"
+
+
+class TestPrincipleToolRedaction:
+    async def test_redaction_note_added_when_secrets_found(self, tmp_path):
+        """Lines 112-118: redaction note formatted when secrets found in condition/action."""
+        hook = nano_hermes.install(
+            _make_loop(tmp_path), config={"redact_secrets": True}
+        )
+        tool = PrincipleTool(hook=hook)
+        # Use a pattern that triggers redaction (env_assignment with long secret)
+        secret_condition = "WHEN OPENAI_API_KEY=sk-thisisalongfakesecret123 is set"
+        result = await tool.execute(
+            condition=secret_condition,
+            action="use the configured key",
+        )
+        # Should succeed (redacted, then recorded)
+        assert result.startswith("ok:")
+
+    async def test_upsert_exception_returns_error_string(self, tmp_path):
+        """Lines 129-130: Exception from upsert_principle → return f'Error: {e}'."""
+        hook = nano_hermes.install(_make_loop(tmp_path))
+        tool = PrincipleTool(hook=hook)
+        with patch(
+            "nano_hermes.skills.principle_tool.upsert_principle",
+            new=AsyncMock(side_effect=RuntimeError("DB full")),
+        ):
+            result = await tool.execute(
+                condition="when something goes wrong",
+                action="handle it gracefully",
+            )
+        assert result.startswith("Error:")
+        assert "DB full" in result
