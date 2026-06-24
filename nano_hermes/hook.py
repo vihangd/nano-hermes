@@ -578,6 +578,17 @@ class NanoHermesHook(AgentHook):
         except Exception:
             log.exception("evolution cycle: ratchet retirement failed")
 
+        try:
+            from .skills.skill_designer import run_skill_designer  # noqa: PLC0415
+            designed = await run_skill_designer(self)
+            if designed:
+                log.info(
+                    "evolution cycle: skill_designer proposed %d skill(s): %s",
+                    len(designed), designed,
+                )
+        except Exception:
+            log.exception("evolution cycle: skill designer failed")
+
         self._evolution_cycle_count += 1
 
         try:
@@ -595,6 +606,18 @@ class NanoHermesHook(AgentHook):
             await extract_cheatsheet_lesson(self, messages, outcome)
         except Exception:
             log.debug("cheatsheet: extraction task failed", exc_info=True)
+
+    async def _extract_expel_insight(
+        self, session_id: int | None, outcome: str, messages: list
+    ) -> None:
+        """Background task: find contrasting session and extract contrastive insight."""
+        if session_id is None:
+            return
+        try:
+            from .memory.expel import extract_contrastive_insight  # noqa: PLC0415
+            await extract_contrastive_insight(self, session_id, outcome, messages)
+        except Exception:
+            log.debug("expel: extraction task failed", exc_info=True)
 
     async def _background_curator(self) -> None:
         """Run the curator on the main loop after a short delay.
@@ -709,9 +732,14 @@ class NanoHermesHook(AgentHook):
             self._completed_session_count += 1
             self._maybe_schedule_evolution()
             self._maybe_schedule_principle_curation()
+            import asyncio  # noqa: PLC0415
+            outcome = "fail" if had_errors else "success"
+            msgs_snapshot = list(messages)
             # Dynamic Cheatsheet: schedule lesson extraction for the completed session.
             if getattr(self.config.skill_stats, "cheatsheet_enabled", False):
-                outcome = "fail" if had_errors else "success"
-                msgs_snapshot = list(messages)
-                import asyncio  # noqa: PLC0415
                 asyncio.create_task(self._extract_cheatsheet_lesson(msgs_snapshot, outcome))
+            # ExpeL: schedule contrastive insight extraction for the completed session.
+            if getattr(self.config, "expel_enabled", False):
+                asyncio.create_task(
+                    self._extract_expel_insight(completed_id, outcome, msgs_snapshot)
+                )

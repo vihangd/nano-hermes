@@ -179,7 +179,7 @@ async def retrieve_lessons(
             rows = db.execute(
                 "SELECT sf.content FROM semantic_facts_vec sfv "
                 "JOIN semantic_facts sf ON sf.id = sfv.fact_id "
-                "WHERE sfv.embedding MATCH ? AND sf.fact_type = 'cheatsheet' "
+                "WHERE sfv.embedding MATCH ? AND sf.fact_type IN ('cheatsheet', 'expel') "
                 "  AND sf.invalid_at IS NULL AND k = ? "
                 "ORDER BY sfv.distance",
                 (vec_bytes, top_k),
@@ -192,7 +192,7 @@ async def retrieve_lessons(
         # FTS5 fallback — recency-ordered query.
         rows = db.execute(
             "SELECT content FROM semantic_facts "
-            "WHERE fact_type = 'cheatsheet' AND invalid_at IS NULL "
+            "WHERE fact_type IN ('cheatsheet', 'expel') AND invalid_at IS NULL "
             "ORDER BY created_at DESC LIMIT ?",
             (top_k,),
         ).fetchall()
