@@ -120,6 +120,8 @@ class NanoHermesHook(AgentHook):
 
         # Completed-session counter for evolution trigger cadence.
         self._completed_session_count: int = 0
+        # Evolution-cycle counter for OPRO cadence (incremented each cycle).
+        self._evolution_cycle_count: int = 0
 
         # Pending reflection embedding tasks — reflect/tool.py registers tasks here
         # so asyncio doesn't GC them before they complete.
@@ -370,6 +372,26 @@ class NanoHermesHook(AgentHook):
         if skill_suggestions:
             self._inject(context.messages, skill_suggestions)
 
+        # Dynamic Cheatsheet: inject top-k relevant past lessons on iteration 0.
+        if context.iteration == 0 and getattr(
+            self.config.skill_stats, "cheatsheet_enabled", False
+        ):
+            try:
+                from .memory.cheatsheet import (  # noqa: PLC0415
+                    _first_user_text,
+                    build_injection_message,
+                    retrieve_lessons,
+                )
+                task_text = _first_user_text(context.messages)
+                if task_text:
+                    top_k = getattr(self.config.skill_stats, "cheatsheet_top_k", 3)
+                    lessons = await retrieve_lessons(self, task_text, top_k=top_k)
+                    msg = build_injection_message(lessons)
+                    if msg:
+                        self._inject(context.messages, msg)
+            except Exception:
+                log.debug("cheatsheet: retrieval injection failed", exc_info=True)
+
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         tool_count = len(context.tool_calls)
         self._tool_calls += tool_count
@@ -556,6 +578,24 @@ class NanoHermesHook(AgentHook):
         except Exception:
             log.exception("evolution cycle: ratchet retirement failed")
 
+        self._evolution_cycle_count += 1
+
+        try:
+            from .governance.prompt_optimizer import run_opro  # noqa: PLC0415
+            await run_opro(self)
+        except Exception:
+            log.exception("evolution cycle: OPRO failed")
+
+    async def _extract_cheatsheet_lesson(
+        self, messages: list, outcome: str
+    ) -> None:
+        """Background task: extract and store one cheatsheet lesson."""
+        try:
+            from .memory.cheatsheet import extract_cheatsheet_lesson  # noqa: PLC0415
+            await extract_cheatsheet_lesson(self, messages, outcome)
+        except Exception:
+            log.debug("cheatsheet: extraction task failed", exc_info=True)
+
     async def _background_curator(self) -> None:
         """Run the curator on the main loop after a short delay.
 
@@ -669,3 +709,9 @@ class NanoHermesHook(AgentHook):
             self._completed_session_count += 1
             self._maybe_schedule_evolution()
             self._maybe_schedule_principle_curation()
+            # Dynamic Cheatsheet: schedule lesson extraction for the completed session.
+            if getattr(self.config.skill_stats, "cheatsheet_enabled", False):
+                outcome = "fail" if had_errors else "success"
+                msgs_snapshot = list(messages)
+                import asyncio  # noqa: PLC0415
+                asyncio.create_task(self._extract_cheatsheet_lesson(msgs_snapshot, outcome))

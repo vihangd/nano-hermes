@@ -223,7 +223,11 @@ async def evolve_skill(
         log.debug("gepa: %s — round %d/%d", candidate.skill_name, round_n, max_rounds)
 
         # --- Step 1: mutate ---
-        mutation_prompt = _MUTATION_PROMPT.format(
+        from ..governance.prompt_optimizer import get_active_prompt  # noqa: PLC0415
+        _active_mutation_template = get_active_prompt(
+            hook.db, "gepa_mutation", _MUTATION_PROMPT
+        )
+        mutation_prompt = _active_mutation_template.format(
             skill_name=candidate.skill_name,
             round_n=round_n,
             max_rounds=max_rounds,

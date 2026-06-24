@@ -417,6 +417,25 @@ _MIGRATIONS = [
 )""",
     "CREATE INDEX IF NOT EXISTS idx_pending_open "
     "ON pending_writes(subsystem) WHERE status='pending'",
+    # Phase 13 (Dynamic Cheatsheet): per-session transferable lesson extraction.
+    # fact_type distinguishes cheatsheet lessons ('cheatsheet') from distilled
+    # semantic facts ('fact'). task_category indexes by task for KNN retrieval.
+    "ALTER TABLE semantic_facts ADD COLUMN fact_type TEXT NOT NULL DEFAULT 'fact'",
+    "ALTER TABLE semantic_facts ADD COLUMN task_category TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_semantic_facts_type "
+    "ON semantic_facts(fact_type) WHERE invalid_at IS NULL",
+    # Phase 14 (OPRO): prompt variants and scores for meta-optimization.
+    """CREATE TABLE IF NOT EXISTS prompt_versions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    prompt_name  TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    score        REAL,
+    active       INTEGER NOT NULL DEFAULT 0,
+    created_at   REAL NOT NULL,
+    scored_at    REAL
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_prompt_versions_name "
+    "ON prompt_versions(prompt_name, active)",
 ]
 
 
