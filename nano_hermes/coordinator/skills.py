@@ -11,9 +11,8 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 if TYPE_CHECKING:
+    import numpy as np
     from ..config import SkillStatsConfig
 
 log = logging.getLogger(__name__)
@@ -139,7 +138,7 @@ class SkillUsageTracker:
         self,
         name: str,
         threshold: float,
-        active_embeddings: list[np.ndarray],
+        active_embeddings: "list[np.ndarray]",
     ) -> bool:
         """Return True if draft skill embedding is too similar to any active skill.
 
@@ -154,6 +153,7 @@ class SkillUsageTracker:
         if row is None:
             return False  # not yet indexed — allow promotion, indexer will catch up
 
+        import numpy as np  # noqa: PLC0415
         candidate = np.frombuffer(row[0], dtype=np.float32)
         return any(
             float(np.dot(candidate, ae)) >= threshold for ae in active_embeddings
@@ -172,6 +172,7 @@ class SkillUsageTracker:
                     "JOIN skill_stats ss ON ss.id = sv.skill_id "
                     "WHERE ss.status = 'active'",
                 ).fetchall()
+                import numpy as np  # noqa: PLC0415
                 active_embeddings = [
                     np.frombuffer(r[0], dtype=np.float32) for r in active_emb_rows
                 ]

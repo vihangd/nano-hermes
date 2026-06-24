@@ -478,6 +478,9 @@ def open_db(
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA cache_size = -8000")    # 8 MB page cache — cuts SD card thrash on Pi
+    conn.execute("PRAGMA temp_store = MEMORY")   # avoid tmp-file I/O for sort/index ops
+    conn.execute("PRAGMA mmap_size = 67108864")  # 64 MB mmap window for read-heavy queries
     # Wait out a background VACUUM/purge lock instead of immediately raising
     # SQLITE_BUSY (which would silently drop the turn's archive write).
     conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
