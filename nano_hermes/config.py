@@ -235,6 +235,24 @@ class SkillStatsConfig(BaseModel):
     # writing; review via the pending_review tool or `nano-hermes pending`.
     # Foreground propose_skill calls are never gated. Default off.
     write_approval: Literal["off", "approve"] = "off"
+    # Ratchet (arXiv:2605.22148): contribution-score retirement + cap.
+    # Zero LLM overhead — pure SQL, runs after each evolution cycle. Default off.
+    ratchet_enabled: bool = False
+    ratchet_skill_cap: int = 50              # max active agent-origin non-pinned skills
+    ratchet_n_min: int = 100                 # min uses before retirement eligibility
+    ratchet_retire_threshold: float = 0.10   # retire if ĉ(s) ≤ −τ  (default: ≤ −0.10)
+    # MemSkill designer loop (arXiv:2602.02474): propose skills for no-coverage tasks.
+    skill_designer_enabled: bool = False
+    skill_designer_lookback_days: int = 30   # look-back window for no-skill failures
+    skill_designer_max_candidates: int = 50  # max sessions to cluster per cycle
+    skill_designer_min_cluster_size: int = 3 # min sessions per cluster before proposing
+    # Dynamic Cheatsheet (arXiv:2504.07952): per-session transferable lesson extraction.
+    cheatsheet_enabled: bool = False
+    cheatsheet_top_k: int = 3               # lessons retrieved at inference
+    # OPRO prompt meta-optimization (arXiv:2309.03409): evolve internal prompts.
+    opro_enabled: bool = False
+    opro_cycle_interval: int = 20            # run after every N evolution cycles
+    opro_candidates_per_round: int = 8       # candidate prompts per round
 
     @field_validator("write_approval", mode="before")
     @classmethod
@@ -378,6 +396,9 @@ class NanoHermesConfig(BaseModel):
     trajectory: TrajectoryConfig = Field(default_factory=TrajectoryConfig)
     workflow_induction: WorkflowInductionConfig = Field(default_factory=WorkflowInductionConfig)
     trajectory_retention_days: int = 45
+    # ExpeL contrastive insight extraction (arXiv:2308.10144).
+    expel_enabled: bool = False
+    expel_similarity_threshold: float = 0.75  # min cosine sim to consider same task type
     # Minimum days between full VACUUMs. Once data ages past the retention
     # window, every startup purges a fresh day of rows; without this gate
     # each purge would trigger a whole-DB VACUUM (exclusive lock, slow on a

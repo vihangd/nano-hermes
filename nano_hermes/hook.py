@@ -540,6 +540,22 @@ class NanoHermesHook(AgentHook):
         except Exception:
             log.exception("evolution cycle: umbrella merge failed")
 
+        try:
+            from .skills.skill_retirement import run_ratchet  # noqa: PLC0415
+            result = run_ratchet(self)
+            if result["retired"]:
+                log.info(
+                    "evolution cycle: ratchet retired %d skill(s): %s",
+                    len(result["retired"]), result["retired"],
+                )
+            if result["cap_evicted"]:
+                log.info(
+                    "evolution cycle: ratchet cap-evicted %d skill(s): %s",
+                    len(result["cap_evicted"]), result["cap_evicted"],
+                )
+        except Exception:
+            log.exception("evolution cycle: ratchet retirement failed")
+
     async def _background_curator(self) -> None:
         """Run the curator on the main loop after a short delay.
 
