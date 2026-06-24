@@ -51,7 +51,7 @@ def _seed_trajectory(hook, *, task="do something", outcome="fail", skills_used="
         )
         cid = cur2.lastrowid
         hook.db.execute(
-            "INSERT INTO chunks_vec (rowid, embedding) VALUES (?, ?)",
+            "INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)",
             (cid, embedding),
         )
     hook.db.commit()

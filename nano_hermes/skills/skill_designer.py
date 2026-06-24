@@ -143,7 +143,7 @@ async def run_skill_designer(hook: "NanoHermesHook") -> list[str]:
         """
         SELECT t.id, t.task,
             (SELECT embedding FROM chunks_vec
-             WHERE rowid = (
+             WHERE chunk_id = (
                  SELECT c.id FROM chunks c
                  WHERE c.session_id = t.session_id
                  ORDER BY c.turn_index ASC

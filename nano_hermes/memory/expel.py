@@ -82,11 +82,13 @@ def find_contrasting_session(
     since = time.time() - lookback_days * 86400
 
     # Get current session's first-chunk embedding.
+    # chunks_vec is a sqlite_vec virtual table; use scalar subquery for rowid lookup.
     cur_row = db.execute(
-        "SELECT cv.embedding FROM chunks_vec cv "
-        "JOIN chunks c ON c.id = cv.chunk_id "
-        "WHERE c.session_id = ? "
-        "ORDER BY c.turn_index ASC LIMIT 1",
+        "SELECT embedding FROM chunks_vec "
+        "WHERE chunk_id = ("
+        "  SELECT c.id FROM chunks c WHERE c.session_id = ? "
+        "  ORDER BY c.turn_index ASC LIMIT 1"
+        ")",
         (session_id,),
     ).fetchone()
     if cur_row is None or cur_row[0] is None:
@@ -121,10 +123,11 @@ def find_contrasting_session(
 
         for cand_sid, cand_outcome in candidates:
             emb_row = db.execute(
-                "SELECT cv.embedding FROM chunks_vec cv "
-                "JOIN chunks c ON c.id = cv.chunk_id "
-                "WHERE c.session_id = ? "
-                "ORDER BY c.turn_index ASC LIMIT 1",
+                "SELECT embedding FROM chunks_vec "
+                "WHERE rowid = ("
+                "  SELECT c.id FROM chunks c WHERE c.session_id = ? "
+                "  ORDER BY c.turn_index ASC LIMIT 1"
+                ")",
                 (cand_sid,),
             ).fetchone()
             if emb_row is None or emb_row[0] is None:
