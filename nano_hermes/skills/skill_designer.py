@@ -83,7 +83,7 @@ def _cluster_sessions(
             valid_vecs.append(np.frombuffer(emb_bytes, dtype=np.float32).copy())
             valid_indices.append(idx)
         except Exception:
-            pass
+            log.debug("skill_designer: bad embedding blob for session idx %d", idx, exc_info=True)
 
     if not valid_vecs:
         return []

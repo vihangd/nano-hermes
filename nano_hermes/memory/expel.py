@@ -19,6 +19,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from ..utils.error_classifier import classify_llm_response
+from .cheatsheet import _embed_lesson as _embed_fact, _parse_marked
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -38,8 +39,15 @@ TASK B (outcome: {outcome_b}):
 {task_b}
 Key events: {events_b}
 
-Output ONLY the insight text. \
+Output exactly two lines:
+INSIGHT: <the insight>
+WHEN: <one-line situation where this insight applies>
 If no meaningful insight can be extracted, output exactly: SKIP"""
+
+
+def _parse_insight(raw: str) -> tuple[str, str]:
+    """Parse INSIGHT/WHEN response; tolerate models that ignore the format."""
+    return _parse_marked(raw, "INSIGHT")
 
 
 def _outcome_class(outcome: str) -> str:
@@ -151,15 +159,16 @@ def find_contrasting_session(
 
 
 def _store_insight(
-    db: sqlite3.Connection, insight: str, task_category: str
+    db: sqlite3.Connection, insight: str, task_category: str, condition: str = ""
 ) -> int:
-    """Insert contrastive insight into semantic_facts. Returns row id."""
+    """Insert contrastive insight into semantic_facts. ``context`` holds the
+    applicability condition retrieval matches against. Returns row id."""
     cur = db.execute(
         "INSERT INTO semantic_facts "
         "(content, source_chunk_ids, keywords, tags, context, importance, "
         " fact_type, task_category, created_at) "
         "VALUES (?, '[]', '[]', '[]', ?, 6, 'expel', ?, ?)",
-        (insight, task_category, task_category, time.time()),
+        (insight, condition or task_category, task_category, time.time()),
     )
     db.commit()
     return int(cur.lastrowid)
@@ -220,13 +229,18 @@ async def extract_contrastive_insight(
         log.debug("expel: LLM error %s — skipping", err.reason.value)
         return None
 
-    insight = (resp.content or "").strip()
-    if not insight or insight.upper().startswith("SKIP") or len(insight) < 20:
+    raw = (resp.content or "").strip()
+    if not raw or raw.upper().startswith("SKIP"):
+        return None
+    insight, condition = _parse_insight(raw)
+    if not insight or len(insight) < 20:
         return None
 
     # Use the current session's first chunk as task category.
     first_chunk = _chunk_text(hook.db, session_id, limit=120)
-    fact_id = _store_insight(hook.db, insight, first_chunk)
+    applies_when = condition or first_chunk
+    fact_id = _store_insight(hook.db, insight, first_chunk, applies_when)
+    await _embed_fact(hook, fact_id, applies_when)
     log.info(
         "expel: stored contrastive insight (session %d ↔ %d, sim≥%.2f, fact=%d)",
         session_id,

@@ -128,6 +128,9 @@ class NanoHermesHook(AgentHook):
         self._reflection_embed_tasks: set[asyncio.Task] = set()
         # Pending cheatsheet/expel background tasks (same GC guard pattern).
         self._lesson_tasks: set[asyncio.Task] = set()
+        # Fact ids of lessons injected this session — trust is adjusted by the
+        # session outcome at the boundary, then this is cleared.
+        self._injected_lesson_ids: dict[int, float] = {}
 
         # Cache for last_user_text: (id(messages), len(messages), result).
         # Avoids a full reverse scan every after_iteration when nothing changed.
@@ -296,6 +299,43 @@ class NanoHermesHook(AgentHook):
         self._pending_injections = []
         return pending
 
+    def _apply_lesson_trust(self, outcome: str) -> None:
+        """Move trust of this session's injected lessons by the outcome, then clear."""
+        ids = self._injected_lesson_ids
+        self._injected_lesson_ids = {}
+        if not ids:
+            return
+        cfg = self.config.decay
+        base = cfg.fact_trust_helpful_delta if outcome == "success" else -cfg.fact_trust_unhelpful_delta
+        try:
+            # Weight each lesson's delta by how relevant it was to this task —
+            # a marginal filler injection barely moves; a bullseye match earns full credit.
+            self.db.executemany(
+                "UPDATE semantic_facts "
+                "SET trust_score = MAX(0.0, MIN(2.0, trust_score + ?)) WHERE id = ?",
+                [(base * rel, fid) for fid, rel in ids.items()],
+            )
+            self.db.commit()
+        except Exception:
+            log.debug("trust: failed to update injected-lesson trust", exc_info=True)
+
+    def _mark_skills_viewed(self, skills_loaded) -> None:
+        """Record that loaded skills were seen this session (curator anti-stale signal)."""
+        names = list(skills_loaded)
+        if not names:
+            return
+        import time  # noqa: PLC0415
+        now = time.time()
+        try:
+            self.db.executemany(
+                "UPDATE skill_stats SET last_viewed_at = ?, "
+                "view_count = view_count + 1 WHERE name = ?",
+                [(now, n) for n in names],
+            )
+            self.db.commit()
+        except Exception:
+            log.debug("telemetry: failed to mark skills viewed", exc_info=True)
+
     # ------------------------------------------------------------------
     # AgentHook lifecycle
     # ------------------------------------------------------------------
@@ -388,7 +428,11 @@ class NanoHermesHook(AgentHook):
                 if task_text:
                     top_k = getattr(self.config.skill_stats, "cheatsheet_top_k", 3)
                     lessons = await retrieve_lessons(self, task_text, top_k=top_k)
-                    msg = build_injection_message(lessons)
+                    if lessons:
+                        self._injected_lesson_ids.update(
+                            {fid: rel for fid, _, rel in lessons}
+                        )
+                    msg = build_injection_message([text for _, text, _ in lessons])
                     if msg:
                         self._inject(context.messages, msg)
             except Exception:
@@ -674,6 +718,7 @@ class NanoHermesHook(AgentHook):
                         importance_floor=decay.fact_evict_importance_floor,
                         superseded_grace_days=decay.superseded_grace_days,
                         max_per_run=decay.max_evictions_per_run,
+                        trust_floor=decay.fact_trust_min,
                     )
                 # Reclaim space when rows were actually removed. FTS5 and vec0
                 # shadow tables don't return pages without an explicit VACUUM.
@@ -723,6 +768,7 @@ class NanoHermesHook(AgentHook):
         if completed_id is not None:
             # Session boundary: finalize trajectory, reset skill state, prune dicts.
             skills_used, skills_loaded, had_errors = self._skill_tracker.reset_session()
+            self._mark_skills_viewed(skills_loaded)
             if len(skills_loaded) >= 2:
                 from .skills.composition import record_composition  # noqa: PLC0415
                 record_composition(self.db, skills_loaded)
@@ -736,6 +782,7 @@ class NanoHermesHook(AgentHook):
             self._maybe_schedule_principle_curation()
             import asyncio  # noqa: PLC0415
             outcome = "fail" if had_errors else "success"
+            self._apply_lesson_trust(outcome)
             msgs_snapshot = list(messages)
             # Dynamic Cheatsheet: schedule lesson extraction for the completed session.
             if getattr(self.config.skill_stats, "cheatsheet_enabled", False):

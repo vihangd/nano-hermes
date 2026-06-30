@@ -8,6 +8,7 @@ purpose (background consolidation gets latitude).
 """
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from nanobot.agent.memory import MemoryStore as NanobotMemoryStore
@@ -15,6 +16,8 @@ from nanobot.agent.memory import MemoryStore as NanobotMemoryStore
 from .._atomic import atomic_write_text
 from ..config import MemoryBudgets
 from .guard import scan_memory_content
+
+log = logging.getLogger(__name__)
 
 
 # Cached encoder + a sentinel marking "tiktoken unavailable, use the byte
@@ -33,6 +36,7 @@ def _encoder() -> object | None:
             import tiktoken
             _ENC = tiktoken.get_encoding("cl100k_base")
         except Exception:
+            log.debug("tiktoken unavailable — falling back to byte estimate", exc_info=True)
             _ENC = False  # negative cache — don't retry the failed import
     return _ENC or None
 

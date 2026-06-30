@@ -235,6 +235,7 @@ async def _ask_superseded(
         )
         content = (resp.content or "").strip()
     except Exception:
+        log.warning("bitemporal: supersession LLM call failed", exc_info=True)
         return []
     if not content:
         return []

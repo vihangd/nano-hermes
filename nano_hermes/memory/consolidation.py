@@ -205,6 +205,7 @@ async def distill_hub_to_fact(hook: Any, hub: dict) -> dict | None:
         )
         content = (resp.content or "").strip()
     except Exception:
+        log.warning("consolidation: distillation LLM call failed", exc_info=True)
         return None
     if not content:
         return None

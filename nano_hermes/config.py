@@ -380,6 +380,14 @@ class DecayConfig(BaseModel):
     # Additive weight of the recency term in global-reflection scoring
     # (comparable to the existing citation_weight=0.2).
     reflection_decay_weight: float = Field(default=0.15, ge=0)
+    # --- Auto trust-scoring (cheatsheet/expel facts) ---
+    # A fact's trust starts at 1.0 (neutral) and moves by the outcome of the
+    # sessions it was injected into. Retrieval ranks by distance / trust and
+    # hides facts below the floor; clamped to [0, 2]. Inert unless cheatsheet/
+    # expel are enabled (only those facts are injected).
+    fact_trust_helpful_delta: float = Field(default=0.05, ge=0)
+    fact_trust_unhelpful_delta: float = Field(default=0.10, ge=0)
+    fact_trust_min: float = Field(default=0.3, ge=0)
 
 
 class NanoHermesConfig(BaseModel):

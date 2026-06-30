@@ -15,12 +15,14 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import aiohttp
-import numpy as np
 
 from ..config import EmbeddingConfig, EmbeddingProvider
+
+if TYPE_CHECKING:
+    import numpy as np
 
 log = logging.getLogger(__name__)
 
@@ -145,6 +147,7 @@ class EmbeddingChain:
         return _embeddings_in_index_order(data)
 
     def _postprocess(self, raw: list[float]) -> np.ndarray:
+        import numpy as np  # noqa: PLC0415
         v = np.asarray(raw, dtype=np.float32)
         if v.shape[0] != self.config.native_dims:
             raise ValueError(

@@ -49,6 +49,17 @@ def _add_chunk(db, session_id, content="do the thing"):
     return int(cur.lastrowid)
 
 
+def _add_chunk_emb(db, session_id, vec, content="do the thing"):
+    import numpy as np
+    chunk_id = _add_chunk(db, session_id, content)
+    db.execute(
+        "INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)",
+        (chunk_id, np.asarray(vec, dtype=np.float32).tobytes()),
+    )
+    db.commit()
+    return chunk_id
+
+
 class TestOutcomeHelpers:
     def test_outcome_class_success(self):
         assert _outcome_class("success") == "success"
@@ -90,6 +101,38 @@ class TestFindContrastingSession:
         _add_chunk(hook.db, sid2)
         _add_trajectory(hook.db, sid2, "fail")
         assert find_contrasting_session(hook.db, sid1, "success") is None
+
+    def test_finds_similar_opposite_outcome(self, tmp_path):
+        # Regression guard: candidate embedding must be looked up by chunk_id,
+        # not rowid — exercises the cosine-pairing loop end to end.
+        dims = 512
+        near = [1.0] + [0.0] * (dims - 1)
+        far = [0.0, 1.0] + [0.0] * (dims - 2)
+        hook = _hook(tmp_path)
+        cur = _add_session(hook.db, "cur")
+        match = _add_session(hook.db, "match")
+        other = _add_session(hook.db, "other")
+        _add_chunk_emb(hook.db, cur, near)
+        _add_chunk_emb(hook.db, match, near)   # cosine 1.0 with cur
+        _add_chunk_emb(hook.db, other, far)    # cosine 0.0 with cur
+        _add_trajectory(hook.db, match, "fail")
+        _add_trajectory(hook.db, other, "fail")
+        result = find_contrasting_session(hook.db, cur, "success", threshold=0.5)
+        assert result is not None
+        assert result[0] == match
+        assert result[1] == "fail"
+
+    def test_below_threshold_returns_none(self, tmp_path):
+        dims = 512
+        near = [1.0] + [0.0] * (dims - 1)
+        far = [0.0, 1.0] + [0.0] * (dims - 2)
+        hook = _hook(tmp_path)
+        cur = _add_session(hook.db, "cur")
+        cand = _add_session(hook.db, "cand")
+        _add_chunk_emb(hook.db, cur, near)
+        _add_chunk_emb(hook.db, cand, far)     # cosine 0.0 < threshold
+        _add_trajectory(hook.db, cand, "fail")
+        assert find_contrasting_session(hook.db, cur, "success", threshold=0.5) is None
 
 
 class TestStoreInsight:

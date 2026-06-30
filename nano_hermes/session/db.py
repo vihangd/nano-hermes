@@ -436,17 +436,41 @@ _MIGRATIONS = [
 )""",
     "CREATE INDEX IF NOT EXISTS idx_prompt_versions_name "
     "ON prompt_versions(prompt_name, active)",
+    # Phase 15 (auto trust-scoring): mutable per-fact reliability, moved by the
+    # session outcome of injected lessons. Neutral 1.0 = unrated (distance/trust
+    # unchanged). Only cheatsheet/expel facts are injected, so others stay 1.0.
+    "ALTER TABLE semantic_facts ADD COLUMN trust_score REAL NOT NULL DEFAULT 1.0",
+    # Phase 15 (skill telemetry): track context-load activity, not just formal
+    # use, so a frequently-viewed skill isn't staled as if dormant.
+    "ALTER TABLE skill_stats ADD COLUMN last_viewed_at REAL",
+    "ALTER TABLE skill_stats ADD COLUMN view_count INTEGER NOT NULL DEFAULT 0",
 ]
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
-    """Apply additive ALTER TABLE migrations idempotently."""
+    """Apply additive migrations idempotently, gated by PRAGMA user_version."""
+    # _MIGRATIONS is append-only, so its length is a monotonic schema version.
+    target = len(_MIGRATIONS)
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    if current >= target:
+        return
+    clean = True
     for sql in _MIGRATIONS:
         try:
             conn.execute(sql)
             conn.commit()
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as e:
+            # "duplicate column" / "already exists" are expected on a legacy DB
+            # whose rows predate the version stamp — benign. Anything else (e.g.
+            # "database is locked") means this column may not exist; don't stamp,
+            # so the next open retries instead of silently skipping it forever.
+            if "duplicate column" in str(e) or "already exists" in str(e):
+                continue
+            log.warning("migration failed, will retry next open: %s", e)
+            clean = False
+    if clean:
+        conn.execute(f"PRAGMA user_version = {target}")
+        conn.commit()
 
 
 def _migrate_vec0_to_cosine(conn: sqlite3.Connection, target_dims: int) -> None:
@@ -607,6 +631,7 @@ def evict_low_value_facts(
     importance_floor: int,
     superseded_grace_days: int,
     max_per_run: int,
+    trust_floor: float = 0.0,
     now: float | None = None,
 ) -> int:
     """Bound the otherwise-unbounded ``semantic_facts`` table.
@@ -641,12 +666,15 @@ def evict_low_value_facts(
     remaining = max_per_run - removed
     if retention_days > 0 and remaining > 0:
         cutoff = now_ts - retention_days * 86400
+        # Evict old facts that are either low-importance OR distrusted (a lesson
+        # driven below the retrieval floor is hidden anyway — reclaim its disk).
         removed += conn.execute(
             "DELETE FROM semantic_facts WHERE id IN ("
             "  SELECT id FROM semantic_facts "
-            "  WHERE invalid_at IS NULL AND created_at < ? AND importance < ? "
-            "  ORDER BY importance ASC, created_at ASC LIMIT ?)",
-            (cutoff, importance_floor, remaining),
+            "  WHERE invalid_at IS NULL AND created_at < ? "
+            "    AND (importance < ? OR trust_score < ?) "
+            "  ORDER BY trust_score ASC, importance ASC, created_at ASC LIMIT ?)",
+            (cutoff, importance_floor, trust_floor, remaining),
         ).rowcount
 
     conn.commit()

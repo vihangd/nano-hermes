@@ -151,6 +151,36 @@ class TestRunOproGeneratesCandidates:
         ).fetchone()[0]
         assert count == 2
 
+    async def test_promotes_higher_scored_candidate(self, tmp_path):
+        # current rate = 8/20 = 40%; a pre-scored candidate at 80% must win.
+        hook = _hook(tmp_path, {"opro_cycle_interval": 1, "opro_candidates_per_round": 1})
+        hook._evolution_cycle_count = 1
+        _seed_gepa_improvements(hook, 8)
+        record_gepa_rounds(hook.db, 20)
+        valid_body = (
+            "Better {skill_name} {round_n}/{max_rounds}: "
+            "{current_body} // {failure_context}"
+        )
+        hook.db.execute(
+            "INSERT INTO prompt_versions "
+            "(prompt_name, body, active, score, scored_at, created_at) "
+            "VALUES ('gepa_mutation', ?, 0, 80.0, ?, ?)",
+            (valid_body, time.time(), time.time()),
+        )
+        hook.db.commit()
+
+        empty = MagicMock(finish_reason="stop", content="")
+        with patch.object(
+            hook._loop.provider, "chat_with_retry", AsyncMock(return_value=empty)
+        ):
+            await run_opro(hook)
+
+        active = hook.db.execute(
+            "SELECT body FROM prompt_versions "
+            "WHERE prompt_name='gepa_mutation' AND active=1"
+        ).fetchone()
+        assert active is not None and active[0] == valid_body
+
     async def test_rejects_candidate_missing_variables(self, tmp_path):
         hook = _hook(tmp_path, {"opro_cycle_interval": 1, "opro_candidates_per_round": 1})
         hook._evolution_cycle_count = 1

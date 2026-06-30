@@ -55,6 +55,13 @@
   "expel_enabled": false,
   "expel_similarity_threshold": 0.75,
 
+  "_decay_trust": "Auto trust-scoring of injected cheatsheet/expel lessons. Trust moves by session outcome; retrieval ranks by distance/trust and hides facts below the floor. Inert unless cheatsheet/expel on.",
+  "decay": {
+    "fact_trust_helpful_delta": 0.05,
+    "fact_trust_unhelpful_delta": 0.10,
+    "fact_trust_min": 0.3
+  },
+
   "memory": {
     "memory_md_tokens": 512,
     "user_md_tokens": 320,

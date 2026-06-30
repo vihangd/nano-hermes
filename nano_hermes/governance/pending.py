@@ -13,12 +13,15 @@ be approved from the running agent via the ``pending_review`` tool.
 """
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
 from ..config import NanoHermesConfig
 from ..session.db import open_db
 from . import write_approval as wa
+
+log = logging.getLogger(__name__)
 
 
 def _load_config(workspace: Path) -> NanoHermesConfig:
@@ -31,6 +34,10 @@ def _load_config(workspace: Path) -> NanoHermesConfig:
     try:
         return NanoHermesConfig.model_validate(_load_config_files(workspace))
     except Exception:
+        log.warning(
+            "pending: config load failed for %s — falling back to DEFAULTS "
+            "(write-approval governance posture reset to off)", workspace, exc_info=True
+        )
         return NanoHermesConfig.model_validate({})
 
 

@@ -75,7 +75,7 @@ def _find_dormant(
           AND pinned = 0
           AND use_count >= ?
           AND last_used_at IS NOT NULL
-          AND last_used_at < ?
+          AND MAX(last_used_at, COALESCE(last_viewed_at, 0)) < ?
         ORDER BY last_used_at ASC
         """,
         (from_status, min_uses, cutoff),
