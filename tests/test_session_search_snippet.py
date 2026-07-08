@@ -7,7 +7,80 @@ from nano_hermes.session.search import (
     _contains_cjk,
     _like_escape,
     _match_centered_snippet,
+    sanitize_fts_query,
 )
+
+
+class TestSanitizeFtsQuery:
+    def _run(self, sql_query):
+        import sqlite3
+        c = sqlite3.connect(":memory:")
+        c.execute("CREATE VIRTUAL TABLE t USING fts5(body)")
+        c.execute("INSERT INTO t VALUES ('the deployment rollback caused an outage')")
+        sq = sanitize_fts_query(sql_query)
+        if not sq:
+            return "empty"
+        return c.execute("SELECT count(*) FROM t WHERE t MATCH ?", (sq,)).fetchone()[0]
+
+    def test_prose_recall_restored(self):
+        # Raw prose AND-joins to 0 hits; sanitized OR-query recovers the match.
+        assert self._run("what happened with the deployment rollback") == 1
+
+    def test_special_chars_no_syntax_error(self):
+        # Unquoted "(prod)?" throws fts5 syntax error; quoting makes it literal.
+        assert self._run("rollback (prod)?") == 1
+
+    def test_punctuation_only_is_empty(self):
+        assert sanitize_fts_query("?! ...") == ""
+
+    def test_terms_are_quoted_and_or_joined(self):
+        assert sanitize_fts_query("alpha beta") == '"alpha" OR "beta"'
+
+    def test_embedded_quote_stripped(self):
+        assert sanitize_fts_query('foo"bar') == '"foobar"'
+
+    def test_cjk_kept_as_single_quoted_token(self):
+        assert sanitize_fts_query("部署回滚") == '"部署回滚"'
+
+
+class TestFtsOrderByRank:
+    """Regression: the lexical channel must return BM25-ranked ids, not rowid
+    order — hybrid_search's FTS subquery relies on `ORDER BY rank`."""
+
+    def _db(self, tmp_path):
+        from nano_hermes.session.db import open_db
+        db = open_db(str(tmp_path / "state.db"), 512)
+        db.execute("INSERT INTO sessions (session_key, started_at) VALUES ('s', 0)")
+        return db
+
+    def _add_chunk(self, db, content):
+        cur = db.execute(
+            "INSERT INTO chunks (session_id, turn_index, role, content, created_at) "
+            "VALUES (1, 0, 'user', ?, 0)",
+            (content,),
+        )
+        db.commit()
+        return int(cur.lastrowid)
+
+    def test_high_bm25_ranks_ahead_of_lower_rowid(self, tmp_path):
+        from nano_hermes.session.search import _fts_rows
+        db = self._db(tmp_path)
+        # Low BM25 term buried in a long doc, inserted FIRST (lower rowid).
+        weak = self._add_chunk(db, "a long note about many topics including rollback and more prose here")
+        # High BM25: short doc, term repeated, inserted SECOND (higher rowid).
+        strong = self._add_chunk(db, "rollback rollback rollback")
+        ids = [
+            r[0]
+            for r in _fts_rows(
+                db,
+                "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
+                "rollback",
+                10,
+            )
+        ]
+        # BM25 order → strong (higher rowid) first; rowid order would put weak first.
+        assert ids[0] == strong
+        assert set(ids) == {weak, strong}
 
 
 class TestContainsCjk:

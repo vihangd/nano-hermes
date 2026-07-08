@@ -41,6 +41,48 @@ def _like_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+_FTS_STOPWORDS = frozenset(
+    "a an and are as at be but by for from in is it of on or that the this to "
+    "was were will with what how why when who".split()
+)
+
+
+def sanitize_fts_query(text: str) -> str:
+    """Free prose → a safe FTS5 OR-query of quoted terms.
+
+    FTS5 AND-joins bare tokens (zeroing recall on prose) and raises a syntax
+    error on punctuation; quoting each term and OR-joining restores recall and
+    makes special characters literal. Common stopwords are dropped so they
+    don't widen the BM25 candidate scan. Natural-language only — FTS5 operators
+    / phrases / prefixes are quoted literal, not interpreted. Returns '' when
+    no usable term remains.
+    """
+    terms: list[str] = []
+    stop: list[str] = []
+    for raw in text.split():
+        t = raw.replace('"', "")
+        if not any(c.isalnum() for c in t):
+            continue
+        (stop if t.lower() in _FTS_STOPWORDS else terms).append(f'"{t}"')
+    return " OR ".join(terms or stop)  # keep stopwords only if nothing else left
+
+
+def _fts_rows(executor, sql: str, query_text: str, *params) -> list:
+    """Run one FTS5 text query safely: sanitize prose → OR-query, skip on an
+    empty query, and drop the lexical channel on a malformed query instead of
+    raising. *sql* holds one ``MATCH ?`` placeholder (bound to the sanitized
+    query) followed by placeholders for *params*; ``ORDER BY rank`` belongs in
+    *sql* so results come back BM25-ranked, not rowid-ordered.
+    """
+    fts_q = sanitize_fts_query(query_text)
+    if not fts_q:
+        return []
+    try:
+        return executor.execute(sql, (fts_q, *params)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+
 def _match_centered_snippet(text: str, query: str, max_chars: int = 240) -> str:
     """Return up to *max_chars* of *text*, centered on where *query* matches.
 
@@ -132,10 +174,12 @@ def hybrid_search(
     query_vec: np.ndarray,
     cfg: RetrievalConfig,
 ) -> list[Hit]:
-    fts_rows = conn.execute(
-        "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? LIMIT ?",
-        (query_text, cfg.fts_k),
-    ).fetchall()
+    fts_rows = _fts_rows(
+        conn,
+        "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
+        query_text,
+        cfg.fts_k,
+    )
     fts_ids = [r[0] for r in fts_rows]
 
     # FTS5's unicode61 tokenizer doesn't segment CJK text, so queries in
@@ -266,18 +310,17 @@ class SessionSearchTool(Tool):
         # FTS5's MATCH operator requires the real table name, not an alias —
         # `f MATCH ?` parses as referencing a column called `f`. Join from
         # chunks_fts and order by its hidden BM25 `rank` column.
-        try:
-            rows = self._hook.db.execute(
-                "SELECT chunks.id, chunks.session_id, chunks.content "
-                "FROM chunks_fts "
-                "JOIN chunks ON chunks.id = chunks_fts.rowid "
-                "WHERE chunks_fts MATCH ? "
-                "ORDER BY chunks_fts.rank "
-                "LIMIT ?",
-                (query, cfg.final_k),
-            ).fetchall()
-        except Exception:
-            rows = []
+        rows = _fts_rows(
+            self._hook.db,
+            "SELECT chunks.id, chunks.session_id, chunks.content "
+            "FROM chunks_fts "
+            "JOIN chunks ON chunks.id = chunks_fts.rowid "
+            "WHERE chunks_fts MATCH ? "
+            "ORDER BY chunks_fts.rank "
+            "LIMIT ?",
+            query,
+            cfg.final_k,
+        )
         if not rows and _contains_cjk(query):
             rows = self._hook.db.execute(
                 "SELECT id, session_id, content FROM chunks "

@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.tools.base import Tool, tool_parameters
 
+from .search import _fts_rows
+
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
 
@@ -116,15 +118,17 @@ def fts_discovery(
     Deduplicates by session: only the best (FTS rank) match per session is
     used as the anchor; remaining matches in the same session are ignored.
     """
-    rows = conn.execute(
+    rows = _fts_rows(
+        conn,
         "SELECT chunks.id, chunks.session_id, chunks_fts.rank "
         "FROM chunks_fts "
         "JOIN chunks ON chunks.id = chunks_fts.rowid "
         "WHERE chunks_fts MATCH ? "
         "ORDER BY chunks_fts.rank "
         "LIMIT ?",
-        (query, limit * 10),  # fetch extras to cover multi-match sessions
-    ).fetchall()
+        query,
+        limit * 10,  # fetch extras to cover multi-match sessions
+    )
 
     # Deduplicate by session_id — keep best rank (smallest abs(rank), FTS5 uses negative ranks)
     seen_sessions: dict[int, tuple[int, float]] = {}  # session_id -> (chunk_id, rank)

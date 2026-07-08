@@ -9,7 +9,6 @@ Falls back to a LIKE-based text search when all embedding providers fail.
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -17,7 +16,7 @@ from nanobot.agent.tools.base import Tool, tool_parameters
 
 from ..decay import recency_decay
 from ..embedding.chain import AllProvidersFailed
-from .search import _contains_cjk, _like_escape, reciprocal_rank_fusion
+from .search import _contains_cjk, _fts_rows, _like_escape, reciprocal_rank_fusion
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -163,14 +162,13 @@ class TrajectorySearchTool(Tool):
         """BM25-ranked trajectory ids for *query*, or [] on an unparsable
         FTS expression (a malformed query just drops the lexical channel —
         dense still runs)."""
-        try:
-            rows = self._hook.db.execute(
-                "SELECT rowid FROM trajectories_fts "
-                "WHERE trajectories_fts MATCH ? ORDER BY rank LIMIT ?",
-                (query, limit),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return []
+        rows = _fts_rows(
+            self._hook.db,
+            "SELECT rowid FROM trajectories_fts "
+            "WHERE trajectories_fts MATCH ? ORDER BY rank LIMIT ?",
+            query,
+            limit,
+        )
         ids = [r[0] for r in rows]
         # FTS5's tokenizer doesn't segment CJK; fall back to a LIKE scan.
         if not ids and _contains_cjk(query):
