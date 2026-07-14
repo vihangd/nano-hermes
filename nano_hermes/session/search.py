@@ -6,6 +6,7 @@ degrade to FTS5-only so the tool still returns something useful.
 """
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ from nanobot.agent.tools.base import Tool, tool_parameters
 
 from ..config import RetrievalConfig
 from .mmr import MMRHit, mmr_rerank
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -307,29 +310,37 @@ class SessionSearchTool(Tool):
     def _fts_only_fallback(
         self, query: str, cfg: RetrievalConfig, *, reason: str
     ) -> str:
-        # FTS5's MATCH operator requires the real table name, not an alias —
-        # `f MATCH ?` parses as referencing a column called `f`. Join from
-        # chunks_fts and order by its hidden BM25 `rank` column.
-        rows = _fts_rows(
-            self._hook.db,
-            "SELECT chunks.id, chunks.session_id, chunks.content "
-            "FROM chunks_fts "
-            "JOIN chunks ON chunks.id = chunks_fts.rowid "
-            "WHERE chunks_fts MATCH ? "
-            "ORDER BY chunks_fts.rank "
-            "LIMIT ?",
-            query,
-            cfg.final_k,
-        )
-        if not rows and _contains_cjk(query):
-            rows = self._hook.db.execute(
-                "SELECT id, session_id, content FROM chunks "
-                "WHERE content LIKE ? ESCAPE '\\' LIMIT ?",
-                (f"%{_like_escape(query)}%", cfg.final_k),
-            ).fetchall()
-        if not rows:
+        # Last-resort path: it is returned straight from search()'s except
+        # handlers with no outer guard, so it must never raise. _fts_rows only
+        # swallows OperationalError and the CJK LIKE scan below is unguarded, so
+        # wrap the whole body and degrade to the graceful message on any error.
+        try:
+            # FTS5's MATCH operator requires the real table name, not an alias —
+            # `f MATCH ?` parses as referencing a column called `f`. Join from
+            # chunks_fts and order by its hidden BM25 `rank` column.
+            rows = _fts_rows(
+                self._hook.db,
+                "SELECT chunks.id, chunks.session_id, chunks.content "
+                "FROM chunks_fts "
+                "JOIN chunks ON chunks.id = chunks_fts.rowid "
+                "WHERE chunks_fts MATCH ? "
+                "ORDER BY chunks_fts.rank "
+                "LIMIT ?",
+                query,
+                cfg.final_k,
+            )
+            if not rows and _contains_cjk(query):
+                rows = self._hook.db.execute(
+                    "SELECT id, session_id, content FROM chunks "
+                    "WHERE content LIKE ? ESCAPE '\\' LIMIT ?",
+                    (f"%{_like_escape(query)}%", cfg.final_k),
+                ).fetchall()
+            if not rows:
+                return f"no matches (embedding unavailable: {reason})"
+            return "\n".join(
+                f"[{r[1]}#{r[0]}] {_match_centered_snippet(r[2], query)}"
+                for r in rows
+            )
+        except Exception:
+            log.debug("session_search fallback query failed", exc_info=True)
             return f"no matches (embedding unavailable: {reason})"
-        return "\n".join(
-            f"[{r[1]}#{r[0]}] {_match_centered_snippet(r[2], query)}"
-            for r in rows
-        )

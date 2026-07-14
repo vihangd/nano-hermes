@@ -713,13 +713,14 @@ class ReflectionCoordinator:
         if not task_text:
             return []
 
-        # Build an FTS5 OR query from the unique substantive words in the task
-        # text (>= 4 chars), so partial matches surface relevant principles.
+        # Principle-specific term selection (unique substantive words >= 4 chars,
+        # capped) — deliberately narrower than the chunk-search sanitize_fts_query.
+        # Quote each term (same convention) for FTS5 operator/punctuation safety.
         words = _re.findall(r"[a-zA-Z][a-zA-Z0-9_]*", task_text[:500])
         terms = list(dict.fromkeys(w.lower() for w in words if len(w) >= 4))[:12]
         if not terms:
             return []
-        fts_query = " OR ".join(terms)
+        fts_query = " OR ".join(f'"{t}"' for t in terms)
         # When evolution is on, widen the FTS candidate pool and re-rank by
         # proven value (helpful - harmful) + recency, so a topically-relevant
         # but stale/harmful principle yields to a proven recent one.

@@ -1,6 +1,8 @@
 """Tests for session_search snippet centering and CJK LIKE fallback."""
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from nano_hermes.session.search import (
@@ -13,7 +15,6 @@ from nano_hermes.session.search import (
 
 class TestSanitizeFtsQuery:
     def _run(self, sql_query):
-        import sqlite3
         c = sqlite3.connect(":memory:")
         c.execute("CREATE VIRTUAL TABLE t USING fts5(body)")
         c.execute("INSERT INTO t VALUES ('the deployment rollback caused an outage')")
@@ -249,3 +250,26 @@ class TestCjkFallbackIntegration:
         assert chunk_id in chunk_ids, (
             f"CJK LIKE fallback failed — chunk {chunk_id} not in {chunk_ids}"
         )
+
+
+class TestTerminalFallbackNeverRaises:
+    """The last-resort _fts_only_fallback is returned straight from search()'s
+    except handlers with no outer guard — it must never propagate an error."""
+
+    def test_non_operationalerror_returns_graceful(self, tmp_path, monkeypatch):
+        from conftest import _make_loop
+
+        import nano_hermes
+        from nano_hermes.config import RetrievalConfig
+
+        loop = _make_loop(tmp_path)
+        nano_hermes.install(loop)
+        tool = loop.tools.get("session_search")
+
+        def _boom(*a, **k):
+            raise sqlite3.DatabaseError("disk I/O error")  # NOT an OperationalError
+
+        monkeypatch.setattr("nano_hermes.session.search._fts_rows", _boom)
+        out = tool._fts_only_fallback("some query", RetrievalConfig(), reason="embedder down")
+        assert out.startswith("no matches")
+        assert "embedder down" in out
