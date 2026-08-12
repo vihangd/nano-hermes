@@ -16,6 +16,7 @@ import numpy as np
 from nanobot.agent.tools.base import Tool, tool_parameters
 
 from ..config import RetrievalConfig
+from .db import FTS_TABLES, is_fts_corruption, mark_fts_stale
 from .mmr import MMRHit, mmr_rerank
 
 log = logging.getLogger(__name__)
@@ -70,6 +71,15 @@ def sanitize_fts_query(text: str) -> str:
     return " OR ".join(terms or stop)  # keep stopwords only if nothing else left
 
 
+_FTS_TABLE_RE = re.compile(r"(\w+_fts)\s+MATCH", re.IGNORECASE)
+
+
+def _fts_table_from_sql(sql: str) -> str:
+    """Name the FTS table a query matched against, for health reporting."""
+    m = _FTS_TABLE_RE.search(sql)
+    return m.group(1) if m else "unknown"
+
+
 def _fts_rows(executor, sql: str, query_text: str, *params) -> list:
     """Run one FTS5 text query safely: sanitize prose → OR-query, skip on an
     empty query, and drop the lexical channel on a malformed query instead of
@@ -82,7 +92,19 @@ def _fts_rows(executor, sql: str, query_text: str, *params) -> list:
         return []
     try:
         return executor.execute(sql, (fts_q, *params)).fetchall()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        # A bad MATCH expression is per-query and self-correcting, but a corrupt
+        # index degrades hybrid retrieval to vector-only for good. Record the
+        # latter so nano_status can report it and open_db can rebuild it,
+        # instead of failing silently forever.
+        if is_fts_corruption(exc):
+            table = _fts_table_from_sql(sql)
+            log.warning("FTS index unhealthy (%s): %s", table, exc)
+            # Only flag a table the rebuild can actually act on. A marker for an
+            # unidentifiable or unknown table would never be cleared, leaving
+            # nano_status permanently reporting a degradation nothing can fix.
+            if table in FTS_TABLES:
+                mark_fts_stale(executor, table)
         return []
 
 

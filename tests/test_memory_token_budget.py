@@ -81,6 +81,10 @@ class TestMemoryBudgetsDefaults:
 
 def _make_budgeted(memory_tokens: int = 50) -> BudgetedMemory:
     store = MagicMock()
+    # Un-guarded store: no preserved raw reader. Must be set explicitly —
+    # MagicMock would otherwise auto-create a truthy callable and BudgetedMemory
+    # would "read" a mock instead of the text under test.
+    store._nh_raw_read_memory = None
     store.read_memory.return_value = ""
     store.read_user.return_value = ""
     store.read_soul.return_value = ""
@@ -157,6 +161,7 @@ class TestBudgetedMemoryAddTokenBudget:
         """add() is a higher-level method that catches budget errors and
         returns them as a string — verify the flow end-to-end."""
         store = MagicMock()
+        store._nh_raw_read_memory = None  # un-guarded store (see _make_budgeted)
         store.read_memory.return_value = ""
         store.memory_file = MagicMock()
         budgets = MemoryBudgets(memory_md_tokens=2, user_md_tokens=2, soul_md_tokens=2)

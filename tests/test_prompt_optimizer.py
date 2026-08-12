@@ -40,14 +40,20 @@ class TestGetActivePrompt:
 
     def test_returns_db_row_when_active(self, tmp_path):
         hook = nano_hermes.install(_make_loop(tmp_path), config={})
+        # Must carry every required variable — get_active_prompt re-validates
+        # on read and falls back on a prompt promoted under an older contract.
+        custom = (
+            "CUSTOM PROMPT {skill_name} {round_n} {max_rounds} {lens} "
+            "{current_body} {failure_context}"
+        )
         hook.db.execute(
             "INSERT INTO prompt_versions (prompt_name, body, active, created_at) "
-            "VALUES ('gepa_mutation', 'CUSTOM PROMPT', 1, ?)",
-            (time.time(),),
+            "VALUES ('gepa_mutation', ?, 1, ?)",
+            (custom, time.time()),
         )
         hook.db.commit()
         result = get_active_prompt(hook.db, "gepa_mutation", "FALLBACK")
-        assert result == "CUSTOM PROMPT"
+        assert result == custom
 
     def test_inactive_row_ignored(self, tmp_path):
         hook = nano_hermes.install(_make_loop(tmp_path), config={})
@@ -83,7 +89,7 @@ class TestScorePrompt:
 class TestValidatePrompt:
     def test_valid_prompt_passes(self):
         body = (
-            "skill: {skill_name} round {round_n}/{max_rounds} "
+            "skill: {skill_name} round {round_n}/{max_rounds} {lens} "
             "body: {current_body} failures: {failure_context}"
         )
         assert _validate_prompt(body, "gepa_mutation") is True
@@ -133,7 +139,7 @@ class TestRunOproGeneratesCandidates:
         record_gepa_rounds(hook.db, 15)
 
         valid_body = (
-            "Improve {skill_name} round {round_n}/{max_rounds}. "
+            "Improve {skill_name} round {round_n}/{max_rounds}. {lens} "
             "Current: {current_body}. Failures: {failure_context}."
         )
         mock_resp = MagicMock()
@@ -158,7 +164,7 @@ class TestRunOproGeneratesCandidates:
         _seed_gepa_improvements(hook, 8)
         record_gepa_rounds(hook.db, 20)
         valid_body = (
-            "Better {skill_name} {round_n}/{max_rounds}: "
+            "Better {skill_name} {round_n}/{max_rounds}: {lens} "
             "{current_body} // {failure_context}"
         )
         hook.db.execute(
@@ -201,3 +207,64 @@ class TestRunOproGeneratesCandidates:
             "SELECT COUNT(*) FROM prompt_versions"
         ).fetchone()[0]
         assert count == 0
+
+
+class TestRequiredVarsContractHolds:
+    """The meta-prompt tells the LLM which variables to copy; the validator
+    decides which are mandatory. If they drift apart, every generated
+    candidate is rejected and OPRO silently stops promoting anything.
+    """
+
+    def test_meta_prompt_advertises_every_required_var(self):
+        from nano_hermes.governance.prompt_optimizer import (
+            _META_PROMPT_TEMPLATE,
+            _REQUIRED_VARS,
+        )
+        for var in _REQUIRED_VARS["gepa_mutation"]:
+            # The meta-prompt escapes braces for .format(), so {x} appears {{x}}.
+            assert f"{{{var}}}" in _META_PROMPT_TEMPLATE, (
+                f"{var} is required by the validator but the meta-prompt never "
+                "tells the generator to include it"
+            )
+
+
+class TestActivePromptRevalidatedOnRead:
+    def test_stale_active_prompt_falls_back(self, tmp_path):
+        import sqlite3 as _sq
+        from nano_hermes.governance.prompt_optimizer import get_active_prompt
+
+        db = _sq.connect(":memory:")
+        db.execute(
+            "CREATE TABLE prompt_versions (prompt_name TEXT, body TEXT, "
+            "active INT, scored_at REAL)"
+        )
+        # Promoted under the older contract — no {lens}.
+        db.execute(
+            "INSERT INTO prompt_versions VALUES ('gepa_mutation', ?, 1, 1.0)",
+            ("{skill_name} {round_n} {max_rounds} {current_body} {failure_context}",),
+        )
+        db.commit()
+
+        out = get_active_prompt(db, "gepa_mutation", "BUILTIN")
+        assert out == "BUILTIN"
+
+    def test_conforming_active_prompt_is_used(self, tmp_path):
+        import sqlite3 as _sq
+        from nano_hermes.governance.prompt_optimizer import get_active_prompt
+
+        db = _sq.connect(":memory:")
+        db.execute(
+            "CREATE TABLE prompt_versions (prompt_name TEXT, body TEXT, "
+            "active INT, scored_at REAL)"
+        )
+        good = (
+            "{skill_name} {round_n} {max_rounds} {lens} "
+            "{current_body} {failure_context}"
+        )
+        db.execute(
+            "INSERT INTO prompt_versions VALUES ('gepa_mutation', ?, 1, 1.0)",
+            (good,),
+        )
+        db.commit()
+
+        assert get_active_prompt(db, "gepa_mutation", "BUILTIN") == good

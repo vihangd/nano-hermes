@@ -16,6 +16,45 @@ from nanobot.bus.queue import MessageBus
 from nano_hermes.hook import NanoHermesHook
 
 
+def _make_loop_attrs_settable(*names: str) -> None:
+    """Let tests assign read-only ``AgentLoop`` properties across nanobot versions.
+
+    Pinned nanobot 0.2.2 exposes ``provider`` / ``model`` as plain attributes,
+    so the suite injects fakes with ``hook._loop.provider = MagicMock()``.
+    Upstream turned both into read-only properties resolving through
+    ``runtime_resolver``, which makes every such assignment raise
+    AttributeError — swamping the against-HEAD compat run with ~100 failures
+    that say nothing about nano-hermes (production code never assigns these;
+    it only ever reads them).
+
+    Re-adding setters in the test process keeps that compat signal meaningful
+    without rewriting every call site. Reads fall through to the real resolver
+    whenever a test hasn't overridden the value.
+    """
+    unset = object()
+
+    for name in names:
+        prop = getattr(AgentLoop, name, None)
+        if not isinstance(prop, property) or prop.fset is not None:
+            continue  # settable already (0.2.2) — nothing to do
+        slot = f"_test_{name}"
+
+        def _get(self, _fget=prop.fget, _slot=slot):
+            # Sentinel, not None: some tests deliberately set these to None to
+            # exercise the "not configured" path, which must not fall through
+            # to the real resolver.
+            override = getattr(self, _slot, unset)
+            return _fget(self) if override is unset else override
+
+        def _set(self, value, _slot=slot):
+            setattr(self, _slot, value)
+
+        setattr(AgentLoop, name, property(_get, _set))
+
+
+_make_loop_attrs_settable("provider", "model")
+
+
 # ---------------------------------------------------------------------------
 # Loop factory + fixture
 # ---------------------------------------------------------------------------

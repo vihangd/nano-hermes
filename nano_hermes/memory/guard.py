@@ -164,17 +164,33 @@ def sanitize_loaded_memory(text: str) -> tuple[str, list[str]]:
     return clean, reasons
 
 
-def install_loadtime_memory_scan(store: object) -> None:
-    """Wrap a nanobot ``MemoryStore.get_memory_context`` so the MEMORY.md
-    block is sanitised at the moment it enters the system prompt.
+#: Attribute the guard installs on the store holding the *unsanitised*
+#: ``read_memory``. Read-modify-write callers (memory_patch) must use this —
+#: editing a sanitised copy would persist ``[BLOCKED: …]`` over real content.
+RAW_READ_ATTR = "_nh_raw_read_memory"
 
-    Only the prompt-injection path is wrapped — the agent's own read/edit
-    path (``read_memory``) is left untouched so ``memory_patch`` still sees
-    and edits the real on-disk content. Idempotent: a second call is a no-op.
+
+def install_loadtime_memory_scan(store: object) -> None:
+    """Wrap a nanobot ``MemoryStore.read_memory`` so MEMORY.md is sanitised
+    at the moment it enters the system prompt.
+
+    ``read_memory`` is the seam because it is the one method every prompt path
+    goes through, in every nanobot version we support: 0.2.2 assembles the
+    block via ``get_memory_context()`` (which calls ``read_memory`` itself),
+    while newer nanobot inlined that wrapper and calls ``read_memory``
+    directly, leaving ``get_memory_context`` orphaned. Wrapping the orphan
+    silently disabled this scan — sanitising at ``read_memory`` covers both.
+
+    Because the same method also feeds the agent's read-modify-write edit
+    path, the unwrapped callable is preserved on the store as
+    ``RAW_READ_ATTR``; ``BudgetedMemory.read`` uses it so ``memory_patch``
+    keeps seeing and rewriting the real on-disk text. The file itself is never
+    modified here. Idempotent: a second call is a no-op.
     """
-    original = getattr(store, "get_memory_context", None)
+    original = getattr(store, "read_memory", None)
     if original is None or getattr(original, "_nh_loadtime_scan", False):
         return
+    setattr(store, RAW_READ_ATTR, original)
 
     def wrapped() -> str:
         text = original()
@@ -190,4 +206,4 @@ def install_loadtime_memory_scan(store: object) -> None:
         return clean
 
     wrapped._nh_loadtime_scan = True  # type: ignore[attr-defined]
-    store.get_memory_context = wrapped  # type: ignore[attr-defined]
+    store.read_memory = wrapped  # type: ignore[attr-defined]

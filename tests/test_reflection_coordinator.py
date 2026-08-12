@@ -428,3 +428,71 @@ class TestMMRTrajectoryInjection:
         # (this tests the threshold filter, not the MMR algo specifically)
         # We just verify no exception is raised and result is either None or only matching ones
         assert result is None or "unrelated task xyz" not in (result or {}).get("content", "")
+
+
+class TestInjectionQueryEmbedCache:
+    """The iteration-0 injection paths embed the *first* user message, so the
+    text repeats every turn. Embedding is a remote call — re-issuing it once
+    (or twice, with global scope on) per turn is a foreground network
+    round-trip on a Pi. Cache it, keyed on the text.
+    """
+
+    def _counting_embed(self, monkeypatch):
+        """Patch EmbeddingChain.embed with a call-counting fake."""
+        import numpy as np
+        from conftest import _FAKE_DIMS
+
+        calls: list[list[str]] = []
+
+        async def _embed(self, texts):
+            calls.append(list(texts))
+            out = []
+            for _ in texts:
+                v = np.zeros(_FAKE_DIMS, dtype=np.float32)
+                v[0] = 1.0
+                out.append(v)
+            return out
+
+        monkeypatch.setattr(
+            "nano_hermes.embedding.chain.EmbeddingChain.embed", _embed
+        )
+        return calls
+
+    async def test_repeated_task_text_embeds_once(self, hook, coord, monkeypatch):
+        calls = self._counting_embed(monkeypatch)
+        messages = [{"role": "user", "content": "deploy the staging cluster"}]
+
+        # Two turns of the same conversation → same first user message.
+        await coord.get_trajectory_injection(messages)
+        await coord.get_trajectory_injection(messages)
+
+        assert len(calls) == 1, f"expected 1 embed call, got {len(calls)}: {calls}"
+
+    async def test_changed_task_text_re_embeds(self, hook, coord, monkeypatch):
+        calls = self._counting_embed(monkeypatch)
+
+        await coord.get_trajectory_injection(
+            [{"role": "user", "content": "deploy the staging cluster"}]
+        )
+        # A compaction can advance past the old first message, so the task text
+        # changes. A session-keyed cache would wrongly serve the stale vector;
+        # a text-keyed one must miss and re-embed.
+        await coord.get_trajectory_injection(
+            [{"role": "user", "content": "roll back the database migration"}]
+        )
+
+        assert len(calls) == 2
+        assert calls[0] != calls[1]
+
+    async def test_cache_is_shared_with_global_reflection_path(
+        self, hook, coord, monkeypatch
+    ):
+        # Both injection paths embed the same first-user-message, so enabling
+        # both must still cost only one embed per distinct task text.
+        calls = self._counting_embed(monkeypatch)
+        task = "deploy the staging cluster"
+
+        await coord.get_trajectory_injection([{"role": "user", "content": task}])
+        await coord._fetch_global_reflections(task, 3)
+
+        assert len(calls) == 1

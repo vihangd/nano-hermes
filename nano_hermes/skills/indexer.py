@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -38,7 +39,15 @@ from nanobot.agent.skills import SkillsLoader as NanobotSkillsLoader
 
 from ..config import SkillStatsConfig
 from ..embedding.chain import EmbeddingChain
-from .external import discover_external_skills, expand_external_dirs
+from .external import (
+    _parse_frontmatter,
+    discover_external_skills,
+    expand_external_dirs,
+)
+
+# A `description:` value continued on following indented lines — the regex
+# frontmatter parser would keep only the first line.
+_DESC_CONTINUES_RE = re.compile(r"^description:.*\n[ \t]+\S", re.MULTILINE)
 
 log = logging.getLogger(__name__)
 
@@ -149,9 +158,35 @@ class SkillIndexer:
                 # description inline.
                 out[entry["name"]] = entry.get("description", "")
             else:
-                meta = self._skills_loader.get_skill_metadata(entry["name"]) or {}
-                out[entry["name"]] = meta.get("description", "")
+                out[entry["name"]] = self._description_for(entry)
         return out
+
+    def _description_for(self, entry: dict[str, Any]) -> str:
+        """Read one skill's description, preferring a direct file read.
+
+        ``get_skill_metadata`` is correct but expensive: newer nanobot resolves
+        it through a full ``list_skills()`` directory scan *per call*, which
+        turns this per-entry loop into O(N^2) stats on SD-card storage — on the
+        foreground ``skill_search`` path. The entry already carries ``path``, so
+        parse that file directly and keep the loop O(N).
+        """
+        path = entry.get("path")
+        if path:
+            try:
+                content = Path(path).read_text(encoding="utf-8")
+            except OSError:
+                content = ""
+            desc = _parse_frontmatter(content).get("description", "").strip()
+            # The regex parser only understands single-line plain scalars. Two
+            # shapes silently lose text and must defer to the real YAML parse:
+            #   description: >      → yields the ">"/"|" indicator, not the text
+            #   description: first  → yields only the first line when the value
+            #     continued           continues on following indented lines
+            # Indexing either would embed a truncated or nonsense description.
+            if desc and desc[0] not in ">|" and not _DESC_CONTINUES_RE.search(content):
+                return desc
+        meta = self._skills_loader.get_skill_metadata(entry["name"]) or {}
+        return meta.get("description", "")
 
     def find_external_skill(self, name: str) -> Path | None:
         """Return the directory containing an external SKILL.md by name,

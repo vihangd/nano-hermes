@@ -16,9 +16,8 @@ tools: ``memory_patch``, ``session_browse``, ``session_search``,
 ``workflow_suggest``.
 
 It does NOT duplicate nanobot's existing memory/skill prompt injection —
-nanobot's ContextBuilder already handles that via
-``MemoryStore.get_memory_context()`` and
-``SkillsLoader.build_skills_summary()``.
+nanobot's ContextBuilder already handles that via ``MemoryStore.read_memory()``
+and ``SkillsLoader.build_skills_summary()``.
 """
 from __future__ import annotations
 

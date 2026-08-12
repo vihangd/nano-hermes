@@ -23,6 +23,8 @@ from ..reflect.salience import (
 )
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from ..config import NanoHermesConfig
     from ..embedding.chain import EmbeddingChain
 
@@ -78,6 +80,23 @@ class ReflectionCoordinator:
         # active → completed; delivered as a system message on the next
         # iteration via take_goal_completion.
         self._goal_completion_objective: str | None = None
+        # Injection-query embedding cache. Both iteration-0 injection paths
+        # embed the *first* user message of the conversation, so the text is
+        # identical every turn and the embed is a wasted network round-trip.
+        # Keyed on the text, NOT the session: a compaction can advance past
+        # the old first message, and a session-keyed entry would then serve a
+        # stale vector for a task that changed. Text-keyed just misses.
+        self._query_vec_cache: tuple[str, "np.ndarray"] | None = None
+
+    async def _embed_query(self, task_text: str) -> "np.ndarray":
+        """Embed *task_text*, reusing the last result when the text repeats."""
+        cached = self._query_vec_cache
+        if cached is not None and cached[0] == task_text:
+            return cached[1]
+        async with self._embedder_factory() as chain:
+            [vec] = await chain.embed([task_text])
+        self._query_vec_cache = (task_text, vec)
+        return vec
 
     # ------------------------------------------------------------------
     # Salience
@@ -496,8 +515,7 @@ class ReflectionCoordinator:
         """
         import numpy as np
 
-        async with self._embedder_factory() as chain:
-            [query_vec] = await chain.embed([task_text])
+        query_vec = await self._embed_query(task_text)
 
         vec_blob = query_vec.astype(np.float32).tobytes()
         fetch_k = min(limit * 4, 50)
@@ -586,8 +604,7 @@ class ReflectionCoordinator:
 
             import numpy as np
 
-            async with self._embedder_factory() as chain:
-                [vec] = await chain.embed([task_text])
+            vec = await self._embed_query(task_text)
 
             vec_blob = vec.astype(np.float32).tobytes()
             mmr_lambda = self._config.retrieval.mmr_lambda
@@ -720,14 +737,20 @@ class ReflectionCoordinator:
         terms = list(dict.fromkeys(w.lower() for w in words if len(w) >= 4))[:12]
         if not terms:
             return []
-        fts_query = " OR ".join(f'"{t}"' for t in terms)
         # When evolution is on, widen the FTS candidate pool and re-rank by
         # proven value (helpful - harmful) + recency, so a topically-relevant
         # but stale/harmful principle yields to a proven recent one.
         pcfg = self._config.principles
         fetch = limit * 3 if pcfg.enabled else limit
         try:
-            rows = self._db.execute(
+            # Routed through _fts_rows (which applies the same quote-and-OR
+            # convention via sanitize_fts_query) so principles_fts shares the
+            # corruption detection the other FTS tables get — querying it
+            # directly left it the one declared-but-unmonitored index.
+            from ..session.search import _fts_rows  # noqa: PLC0415
+
+            rows = _fts_rows(
+                self._db,
                 "SELECT p.id, p.condition, p.action, p.expected_outcome, "
                 "       p.success_count, p.harmful_count, p.created_at "
                 "FROM principles_fts pf "
@@ -735,8 +758,9 @@ class ReflectionCoordinator:
                 "WHERE principles_fts MATCH ? "
                 "ORDER BY pf.rank "
                 "LIMIT ?",
-                (fts_query, fetch),
-            ).fetchall()
+                " ".join(terms),
+                fetch,
+            )
         except Exception:
             log.debug("principle injection FTS5 query failed", exc_info=True)
             return []

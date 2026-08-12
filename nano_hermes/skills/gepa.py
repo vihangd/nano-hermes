@@ -42,11 +42,32 @@ log = logging.getLogger(__name__)
 # Immutable prompts — never derived from skill content
 # ---------------------------------------------------------------------------
 
+# Per-round inspection lenses. Rotating the framing keeps later rounds from
+# re-finding what round 1 already found: an identical prompt run N times
+# produces correlated mutations (hermes-agent 411a07481). Indexed by round,
+# wrapping if max_rounds exceeds the tuple length.
+#
+# These are hard-coded and MUST stay that way — like the prompts below, a lens
+# is never derived from skill content, failure context, or anything in the DB.
+_MUTATION_LENSES = (
+    "LENS — COVERAGE: read the failures cold, before the skill's own claims. "
+    "Which failure cases does the current text simply not address at all? "
+    "Add what is missing.",
+    "LENS — EXECUTION: walk the skill's instructions step by step as an agent "
+    "would follow them literally. Where are they ambiguous, out of order, or "
+    "silently assume context the agent won't have? Make them followable.",
+    "LENS — CONTRACT: audit the skill strictly against its own stated "
+    "description and scope. Where does it over-promise, contradict itself, or "
+    "drift beyond what it claims to do? Tighten it to what it can deliver.",
+)
+
 _MUTATION_PROMPT = """\
 You are improving an AI agent skill that has been failing.
 
 SKILL NAME: {skill_name}
 MUTATION ROUND: {round_n}/{max_rounds}
+
+{lens}
 
 CURRENT SKILL TEXT:
 ---
@@ -230,6 +251,7 @@ async def evolve_skill(
             skill_name=candidate.skill_name,
             round_n=round_n,
             max_rounds=max_rounds,
+            lens=_MUTATION_LENSES[(round_n - 1) % len(_MUTATION_LENSES)],
             current_body=current_body,
             failure_context=failure_text,
         )

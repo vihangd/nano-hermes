@@ -214,3 +214,135 @@ class TestIndexerInsertStatus:
         ).fetchone()
         assert row is not None
         assert row[0] == "draft"
+
+
+class TestDescriptionsAvoidLoaderRoundTrip:
+    """``_descriptions`` used to call ``get_skill_metadata`` per entry. Newer
+    nanobot resolves that through a full ``list_skills()`` directory scan on
+    every call, making the loop O(N^2) stats on SD-card storage — on the
+    foreground ``skill_search`` path. Entries already carry ``path``, so the
+    description is read straight from the file.
+    """
+
+    def _indexer(self, tmp_path, counter):
+        from unittest.mock import MagicMock
+        from nano_hermes.skills.indexer import SkillIndexer
+
+        loader = MagicMock()
+
+        def _meta(name):
+            counter.append(name)
+            return {"description": f"from-loader:{name}"}
+
+        loader.get_skill_metadata.side_effect = _meta
+        return SkillIndexer(
+            db=MagicMock(),
+            skills_loader=loader,
+            embedder_factory=MagicMock(),
+            stats_config=None,
+        )
+
+    def _write_skill(self, tmp_path, name, body):
+        d = tmp_path / name
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "SKILL.md"
+        p.write_text(body, encoding="utf-8")
+        return {"name": name, "path": str(p), "source": "workspace"}
+
+    def test_plain_description_read_from_file_without_loader(self, tmp_path):
+        calls: list[str] = []
+        idx = self._indexer(tmp_path, calls)
+        entry = self._write_skill(
+            tmp_path, "plain",
+            "---\nname: plain\ndescription: Does a plain thing.\n---\nbody\n",
+        )
+
+        out = idx._descriptions([entry])
+
+        assert out["plain"] == "Does a plain thing."
+        assert calls == [], "loader must not be consulted for clean frontmatter"
+
+    def test_folded_block_scalar_falls_back_to_loader(self, tmp_path):
+        # The regex parser yields ">" (non-empty!) for a folded scalar, so a
+        # naive "empty description" guard would index ">" as the description.
+        calls: list[str] = []
+        idx = self._indexer(tmp_path, calls)
+        entry = self._write_skill(
+            tmp_path, "folded",
+            "---\nname: folded\ndescription: >\n  a folded description\n  over lines\n---\nbody\n",
+        )
+
+        out = idx._descriptions([entry])
+
+        assert out["folded"] == "from-loader:folded"
+        assert calls == ["folded"]
+        assert ">" not in out["folded"]
+
+    def test_literal_block_scalar_falls_back_to_loader(self, tmp_path):
+        calls: list[str] = []
+        idx = self._indexer(tmp_path, calls)
+        entry = self._write_skill(
+            tmp_path, "literal",
+            "---\nname: literal\ndescription: |\n  literal desc\n---\nbody\n",
+        )
+
+        out = idx._descriptions([entry])
+
+        assert out["literal"] == "from-loader:literal"
+
+    def test_unreadable_file_falls_back_to_loader(self, tmp_path):
+        calls: list[str] = []
+        idx = self._indexer(tmp_path, calls)
+        entry = {
+            "name": "missing",
+            "path": str(tmp_path / "nope" / "SKILL.md"),
+            "source": "workspace",
+        }
+
+        out = idx._descriptions([entry])
+
+        assert out["missing"] == "from-loader:missing"
+
+    def test_external_entry_still_uses_inline_description(self, tmp_path):
+        calls: list[str] = []
+        idx = self._indexer(tmp_path, calls)
+        entry = {
+            "name": "ext", "path": "/nonexistent/SKILL.md",
+            "source": "external", "description": "inline ext desc",
+        }
+
+        out = idx._descriptions([entry])
+
+        assert out["ext"] == "inline ext desc"
+        assert calls == []
+
+    def test_multiline_plain_scalar_falls_back_to_loader(self, tmp_path):
+        # The regex parser keeps only the first line of a continued plain
+        # scalar. Indexing that would embed a silently truncated description.
+        calls: list[str] = []
+        idx = self._indexer(tmp_path, calls)
+        entry = self._write_skill(
+            tmp_path, "multi",
+            "---\nname: multi\ndescription: first line of the description\n"
+            "  continued on a second line\n---\nbody\n",
+        )
+
+        out = idx._descriptions([entry])
+
+        assert out["multi"] == "from-loader:multi"
+        assert calls == ["multi"]
+
+    def test_single_line_description_still_fast_path(self, tmp_path):
+        # Guard the fix above from over-firing: a following *unindented* key
+        # is not a continuation, so this must stay on the no-loader path.
+        calls: list[str] = []
+        idx = self._indexer(tmp_path, calls)
+        entry = self._write_skill(
+            tmp_path, "single",
+            "---\nname: single\ndescription: just one line\nversion: 2\n---\nbody\n",
+        )
+
+        out = idx._descriptions([entry])
+
+        assert out["single"] == "just one line"
+        assert calls == []

@@ -535,6 +535,9 @@ def open_db(
     _migrate_vec0_to_cosine(conn, target_dims)
     _apply_migrations(conn)
     _backfill_trajectories_fts(conn)
+    # Self-heal any index a previous run flagged as corrupt. Only does work
+    # when a marker is actually set, so a healthy DB pays one indexed lookup.
+    rebuild_stale_fts(conn)
     conn.commit()
     return conn
 
@@ -567,6 +570,96 @@ def _backfill_trajectories_fts(conn: sqlite3.Connection) -> None:
         conn.commit()
     except sqlite3.OperationalError:
         pass  # table missing on a partially-migrated DB — next open retries
+
+
+# ---------------------------------------------------------------------------
+# FTS health
+# ---------------------------------------------------------------------------
+
+FTS_TABLES = ("chunks_fts", "trajectories_fts", "principles_fts")
+_FTS_STALE_PREFIX = "fts_stale:"
+
+# A malformed MATCH expression and a corrupt index both surface as
+# OperationalError. Only the latter is worth remembering: the query errors are
+# per-query and self-correcting, while corruption silently degrades hybrid
+# retrieval to vector-only forever.
+_FTS_CORRUPTION_MARKERS = ("malformed", "corrupt", "disk image", "no such table")
+
+
+def is_fts_corruption(exc: BaseException) -> bool:
+    """Whether *exc* looks like index corruption rather than a bad query."""
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _FTS_CORRUPTION_MARKERS)
+
+
+def mark_fts_stale(conn: sqlite3.Connection, table: str) -> None:
+    """Record that *table*'s FTS index is untrustworthy. Best-effort.
+
+    Called from a read path that has just seen a database error, so the
+    connection may itself be unhealthy — never raise from here.
+    """
+    try:
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?, '1') "
+            "ON CONFLICT(key) DO NOTHING",
+            (f"{_FTS_STALE_PREFIX}{table}",),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        log.debug("could not record FTS stale marker for %s", table, exc_info=True)
+
+
+def stale_fts_tables(conn: sqlite3.Connection) -> list[str]:
+    """Return the FTS tables currently flagged stale."""
+    try:
+        rows = conn.execute(
+            "SELECT key FROM meta WHERE key LIKE ?", (f"{_FTS_STALE_PREFIX}%",)
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return sorted(r[0][len(_FTS_STALE_PREFIX):] for r in rows)
+
+
+def _clear_fts_marker(conn: sqlite3.Connection, table: str) -> None:
+    """Remove one stale marker. Best-effort, mirrors mark_fts_stale."""
+    try:
+        conn.execute(
+            "DELETE FROM meta WHERE key = ?", (f"{_FTS_STALE_PREFIX}{table}",)
+        )
+        conn.commit()
+    except sqlite3.Error:
+        log.debug("could not clear FTS stale marker for %s", table, exc_info=True)
+
+
+def rebuild_stale_fts(conn: sqlite3.Connection) -> list[str]:
+    """Rebuild any FTS index flagged stale; clear the flag on success.
+
+    Uses FTS5's native ``'rebuild'`` command, which repopulates the index from
+    the content table in one statement — no chunked re-indexing needed. Returns
+    the tables successfully rebuilt.
+    """
+    repaired: list[str] = []
+    for table in stale_fts_tables(conn):
+        if table not in FTS_TABLES:
+            # Never interpolate an unrecognised name into SQL — and drop the
+            # marker rather than leaving it to report a degradation forever
+            # that no rebuild can clear.
+            _clear_fts_marker(conn, table)
+            log.warning("dropped unrecognised FTS stale marker: %s", table)
+            continue
+        try:
+            conn.execute(f"INSERT INTO {table}({table}) VALUES('rebuild')")
+            conn.execute(
+                "DELETE FROM meta WHERE key = ?", (f"{_FTS_STALE_PREFIX}{table}",)
+            )
+            conn.commit()
+            repaired.append(table)
+            log.info("rebuilt stale FTS index: %s", table)
+        except sqlite3.Error:
+            # Leave the flag set so the next open retries and nano_status
+            # keeps reporting the degradation.
+            log.warning("FTS rebuild failed for %s", table, exc_info=True)
+    return repaired
 
 
 def purge_older_than(conn: sqlite3.Connection, days: int) -> dict[str, int]:

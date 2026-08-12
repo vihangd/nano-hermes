@@ -90,6 +90,18 @@ class NanoStatusTool(Tool):
         nudge = "yes" if hook._nudge_pending else "no"
         session_label = str(session_id) if session_id is not None else "none"
 
+        # A stale FTS index silently drops the lexical half of hybrid search,
+        # so surface it rather than letting recall quietly degrade.
+        from ..session.db import stale_fts_tables  # noqa: PLC0415
+
+        stale = stale_fts_tables(hook.db)
+        fts_line = (
+            f"\nfts: DEGRADED — stale index: {', '.join(stale)} "
+            "(rebuilt automatically on next start)"
+            if stale
+            else ""
+        )
+
         return (
             f"session: {session_label}\n"
             f"turns: {turns}\n"
@@ -99,4 +111,5 @@ class NanoStatusTool(Tool):
             f"{skill_counts['active']} active, "
             f"{skill_counts['deprecated']} deprecated\n"
             f"db size: {db_size}"
+            f"{fts_line}"
         )

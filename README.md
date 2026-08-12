@@ -299,7 +299,7 @@ Fourteen tools land on `loop.tools`:
 | `skill_rate(name, outcome)` | Manually rate a skill after use (`outcome ∈ {success, failure}`). Records cases where the hook can't infer the outcome. Using a `stale` skill reactivates it. |
 | `skill_export(...)` | Export skill/usage data (training-export helper). |
 | `reflect(content)` | Store a 2–4 sentence self-critique for the current session. Injected into the next iteration's prompt. With `reflection_scope="global"`, also embedded for cross-session recall. |
-| `nano_status()` | Read-only snapshot of internal state: session ID, turns archived, salience score, nudge pending, reflection count, skill counts by lifecycle stage, DB size on disk. |
+| `nano_status()` | Read-only snapshot of internal state: session ID, turns archived, salience score, nudge pending, reflection count, skill counts by lifecycle stage, DB size on disk. Adds an `fts: DEGRADED` line if a full-text index was found corrupt (see *Troubleshooting*). |
 | `workflow_suggest(k=3)` | Cluster successful past trajectories by embedding similarity; surface recurring task patterns as workflow candidates. Requires `workflow_induction.enabled = True`. |
 | `pending_review(action, id?)` | Review autonomous writes held by the write-approval gate (only relevant when `write_approval="approve"`). `action ∈ {list, diff, approve, reject}`. Approving a skill write is refused if the skill changed on disk since it was staged. |
 
@@ -387,6 +387,7 @@ Beyond the per-turn memory/skill machinery, nano-hermes ships a set of self-impr
 |---|---|---|---|
 | **Memory decay + eviction** | on | Bounds the `semantic_facts` store — evicts superseded + old, low-importance facts during the background purge; recency-decays trajectory/reflection ranking | `decay.enabled`, `decay.fact_retention_days` (90), `decay.fact_evict_importance_floor` (4) |
 | **Skill provenance + pinning** | on | Only agent-proposed skills (`origin='agent'`) auto-evolve; builtin/hand-authored skills are protected. Pin exempts any skill | always on; `propose_skill(action="pin"/"unpin", name=…)` |
+| **Load-time memory scan** | on | Defence-in-depth against prompt injection stored in `MEMORY.md` (poisoned by a compromised web page, a pasted transcript, or a write that predates the write-time gate). The copy that enters the system prompt has injection patterns replaced with `[BLOCKED: …]`; **the file on disk is never modified**, and `memory_patch` still reads and rewrites the real text, so a redaction can't be accidentally persisted over your notes | `memory_loadtime_scan` (default `true`) |
 | **Skill lifecycle (stale → reactivate)** | on | Dormant skills go `active → stale` (still searchable, demoted) then `stale → deprecated`; using one again reactivates it. Dormancy counts both formal use **and** context-load views (`last_viewed_at`), so a frequently-read-but-not-"used" skill isn't staled prematurely | `skill_stats.curator_enabled`, `curator_stale_after_days` (30), `curator_archive_after_days` (90) |
 | **Auto trust-scoring** | on (inert unless cheatsheet/expel on) | Each injected cheatsheet/expel lesson carries a `trust_score` (neutral 1.0) auto-adjusted by the outcome of sessions it was injected into (`success` ↑, `fail` ↓, clamped `[0,2]`), with each lesson's delta **weighted by its retrieval relevance** (`1 − distance`) so a marginal filler injection barely moves while a bullseye match earns full credit. Retrieval ranks by `distance / trust` and hides facts below the floor; low-trust facts also evict first. Zero agent burden, zero added LLM | `decay.fact_trust_helpful_delta` (0.05), `decay.fact_trust_unhelpful_delta` (0.10), `decay.fact_trust_min` (0.3) |
 | **Failure-case retrieval (K≈4)** | off | When trajectory context injection is on, injects up to `inject_k` similar past cases, framing successes as "worked" and failures as "avoid" | `trajectory.inject_context` (off by default), `trajectory.inject_k` (4) |
@@ -435,6 +436,8 @@ Set `rewrite_session_interval` to a non-zero value (e.g. 5). After every N compl
 ### Stage 1 — GEPA (off by default)
 
 GEPA (Genetic-Pareto Prompt Evolution) is a gentler iterative pass. It targets active skills with failure rate ≥ `gepa_failure_threshold` (default 40%) and ≥ `gepa_min_uses` uses. For each candidate it runs up to `gepa_max_mutations` rounds of LLM mutation, scores each mutant on a Pareto frontier over (estimated improvement, token count), and promotes the best one via `propose_skill edit`.
+
+Each round uses a **different inspection lens** (coverage → execution → contract, wrapping if there are more rounds than lenses). Re-running one identical prompt N times produces correlated mutations, so a later round mostly re-finds what the first already found; rotating the framing makes the rounds look for different classes of defect. The lenses are hard-coded and never derived from skill content.
 
 Enable once you have ≥5 sessions of failure data:
 
@@ -517,6 +520,9 @@ sqlite_vec.load(conn)
 print("vec OK")
 ```
 If this fails, `pip install sqlite-vec --no-binary :all:` to build from source.
+
+**`nano_status` reports `fts: DEGRADED — stale index: …`.**
+A full-text index (`chunks_fts`, `trajectories_fts`, or `principles_fts`) returned a corruption error — usually SD-card damage. Retrieval still works but has silently dropped to vector-only for that table, so exact-identifier matches (error codes, file paths, tool names) will be missed. The index is rebuilt automatically the next time the DB is opened; restart the agent to clear it. Nothing is lost — FTS is derived from the content tables.
 
 **I want to see salience scores.**
 ```python

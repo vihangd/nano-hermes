@@ -15,7 +15,7 @@ from nanobot.agent.memory import MemoryStore as NanobotMemoryStore
 
 from .._atomic import atomic_write_text
 from ..config import MemoryBudgets
-from .guard import scan_memory_content
+from .guard import RAW_READ_ATTR, scan_memory_content
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +94,13 @@ class BudgetedMemory:
 
     def read(self, slot: Slot) -> str:
         if slot == "memory":
-            return self.store.read_memory()
+            # add/replace/remove read-modify-write this value back to disk, so
+            # it must be the raw file text. The load-time guard sanitises
+            # store.read_memory (that copy feeds the system prompt) and leaves
+            # the unwrapped reader here; editing the sanitised copy would
+            # persist "[BLOCKED: …]" over the user's real notes.
+            raw = getattr(self.store, RAW_READ_ATTR, None)
+            return raw() if callable(raw) else self.store.read_memory()
         if slot == "user":
             return self.store.read_user()
         if slot == "soul":

@@ -19,10 +19,9 @@ Safety:
 from __future__ import annotations
 
 import logging
-import re
 import sqlite3
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -33,7 +32,7 @@ log = logging.getLogger(__name__)
 _REQUIRED_VARS: dict[str, list[str]] = {
     "gepa_mutation": [
         "{skill_name}", "{round_n}", "{max_rounds}",
-        "{current_body}", "{failure_context}",
+        "{lens}", "{current_body}", "{failure_context}",
     ],
 }
 
@@ -49,7 +48,10 @@ skill mutation (higher = more rounds succeeded). Range 0–100.
 
 Generate a NEW mutation prompt that would achieve a HIGHER score.
 The prompt MUST include these exact template variables (copy them verbatim):
-  {{skill_name}}, {{round_n}}, {{max_rounds}}, {{current_body}}, {{failure_context}}
+  {{skill_name}}, {{round_n}}, {{max_rounds}}, {{lens}}, {{current_body}}, {{failure_context}}
+
+{{lens}} is substituted with a per-round inspection lens that varies by round —
+place it where it will frame how the skill is examined.
 
 Output ONLY the new prompt text — no explanation, no preamble.
 """
@@ -63,13 +65,29 @@ def get_active_prompt(
     prompt_name: str,
     fallback: str,
 ) -> str:
-    """Return the active OPRO-optimized prompt, or *fallback* if none exists."""
+    """Return the active OPRO-optimized prompt, or *fallback* if none exists.
+
+    The active prompt is re-validated on read, not just at promotion time: when
+    a new required variable is introduced, prompts promoted under the older
+    contract are still sitting in the table marked active. Serving one would
+    silently drop whatever that variable controls (no error — ``str.format``
+    ignores unused kwargs), so a stale prompt falls back to the built-in.
+    """
     row = db.execute(
         "SELECT body FROM prompt_versions WHERE prompt_name = ? AND active = 1 "
         "ORDER BY scored_at DESC LIMIT 1",
         (prompt_name,),
     ).fetchone()
-    return row[0] if row else fallback
+    if not row:
+        return fallback
+    if not _validate_prompt(row[0], prompt_name):
+        log.warning(
+            "active %s prompt is missing required variables — using built-in "
+            "fallback until OPRO promotes a conforming one",
+            prompt_name,
+        )
+        return fallback
+    return row[0]
 
 
 def _score_prompt(db: sqlite3.Connection, window_days: int = 30) -> float | None:
