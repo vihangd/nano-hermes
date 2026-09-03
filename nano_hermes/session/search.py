@@ -92,7 +92,12 @@ def _fts_rows(executor, sql: str, query_text: str, *params) -> list:
         return []
     try:
         return executor.execute(sql, (fts_q, *params)).fetchall()
-    except sqlite3.OperationalError as exc:
+    except sqlite3.DatabaseError as exc:
+        # DatabaseError, not OperationalError: SQLITE_CORRUPT ("database disk
+        # image is malformed") surfaces as the bare parent class, so catching
+        # the narrower one meant genuine corruption propagated instead of
+        # degrading — the case this handler exists for.
+        #
         # A bad MATCH expression is per-query and self-correcting, but a corrupt
         # index degrades hybrid retrieval to vector-only for good. Record the
         # latter so nano_status can report it and open_db can rebuild it,
@@ -105,7 +110,10 @@ def _fts_rows(executor, sql: str, query_text: str, *params) -> list:
             # nano_status permanently reporting a degradation nothing can fix.
             if table in FTS_TABLES:
                 mark_fts_stale(executor, table)
-        return []
+            return []
+        if isinstance(exc, sqlite3.OperationalError):
+            return []  # malformed query: drop the lexical channel for this call
+        raise  # a real defect (ProgrammingError, IntegrityError…) stays loud
 
 
 def _match_centered_snippet(text: str, query: str, max_chars: int = 240) -> str:

@@ -30,7 +30,7 @@ import numpy as np
 from ..embedding.chain import AllProvidersFailed, EmbeddingChain
 from ..embedding.contextual import add_context_preamble
 from ..redact import redact
-from .db import run_vec_write
+from .db import fts_guarded_write, run_vec_write
 
 log = logging.getLogger(__name__)
 
@@ -192,11 +192,20 @@ class SessionArchiver:
             # Capture first user message as task context for embeddings.
             if msg.get("role") == "user" and session_id not in self._session_tasks:
                 self._session_tasks[session_id] = text[:500]
-            cur.execute(
-                "INSERT INTO chunks "
-                "(session_id, turn_index, role, content, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (session_id, idx, msg["role"], text, now),
+            # Guarded per row, not per batch: a batch-level retry would
+            # re-insert the rows that already landed before the failure. If
+            # chunks_fts is corrupt the trigger would otherwise fail this
+            # canonical INSERT and the hook's archive-level except would
+            # swallow it, silently losing the transcript.
+            fts_guarded_write(
+                self._db,
+                "chunks_fts",
+                lambda: cur.execute(
+                    "INSERT INTO chunks "
+                    "(session_id, turn_index, role, content, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (session_id, idx, msg["role"], text, now),
+                ),
             )
             new_ids.append(int(cur.lastrowid))
             new_texts.append(text)

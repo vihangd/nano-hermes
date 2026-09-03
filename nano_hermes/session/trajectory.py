@@ -24,6 +24,7 @@ import numpy as np
 
 from ..embedding.chain import AllProvidersFailed, EmbeddingChain
 from .archiver import _extract_text
+from .db import fts_guarded_write
 from .db import run_vec_write
 
 log = logging.getLogger(__name__)
@@ -62,17 +63,23 @@ class TrajectoryWriter:
         reflection_text = "\n".join(reflections) if reflections else None
 
         try:
-            cur = self._db.execute(
-                "INSERT INTO trajectories "
-                "(session_id, task, skills_used, outcome, reflection, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    session_id,
-                    task,
-                    json.dumps(skills_used),
-                    outcome,
-                    reflection_text,
-                    time.time(),
+            # trajectories_ai mirrors this row into trajectories_fts; a
+            # corrupt index must not cost the canonical trajectory.
+            cur = fts_guarded_write(
+                self._db,
+                "trajectories_fts",
+                lambda: self._db.execute(
+                    "INSERT INTO trajectories "
+                    "(session_id, task, skills_used, outcome, reflection, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        task,
+                        json.dumps(skills_used),
+                        outcome,
+                        reflection_text,
+                        time.time(),
+                    ),
                 ),
             )
             self._db.commit()

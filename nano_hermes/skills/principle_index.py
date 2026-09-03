@@ -17,7 +17,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+import sqlite3
+
 from ..embedding.chain import AllProvidersFailed
+from ..session.db import is_fts_corruption, mark_fts_stale
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -110,11 +113,24 @@ async def upsert_principle(
         (condition, action, expected_outcome or None, now, now, origin),
     )
     pid = int(cur.lastrowid)
-    db.execute(
-        "INSERT INTO principles_fts (rowid, condition, action, content_id) "
-        "VALUES (?, ?, ?, ?)",
-        (pid, condition, action, pid),
-    )
+    # principles_fts is populated explicitly rather than by an insert trigger,
+    # so fts_guarded_write's detach-and-retry cannot help here — retrying this
+    # same statement would fail identically. Mark the index stale and skip the
+    # mirror instead: the canonical principle still lands, and the next open
+    # rebuilds the index from it.
+    try:
+        db.execute(
+            "INSERT INTO principles_fts (rowid, condition, action, content_id) "
+            "VALUES (?, ?, ?, ?)",
+            (pid, condition, action, pid),
+        )
+    except sqlite3.DatabaseError as exc:
+        if not is_fts_corruption(exc):
+            raise
+        # mark, don't detach: principles_fts has no INSERT trigger, so dropping
+        # its DELETE-sync trigger would unblock nothing and would leave ghost
+        # index rows for principles deleted before the next open.
+        mark_fts_stale(db, "principles_fts")
     if vec is not None:
         _store_vec(db, pid, vec)
     db.commit()

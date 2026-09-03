@@ -568,8 +568,11 @@ def _backfill_trajectories_fts(conn: sqlite3.Connection) -> None:
             (_FTS_BACKFILL_FLAG,),
         )
         conn.commit()
-    except sqlite3.OperationalError:
-        pass  # table missing on a partially-migrated DB — next open retries
+    except sqlite3.DatabaseError:
+        # DatabaseError, not OperationalError: SQLITE_CORRUPT surfaces as the
+        # bare parent class, so catching the narrower one let a genuinely
+        # corrupt index escape open_db before rebuild_stale_fts could repair it.
+        pass  # table missing or unusable — next open retries
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +581,23 @@ def _backfill_trajectories_fts(conn: sqlite3.Connection) -> None:
 
 FTS_TABLES = ("chunks_fts", "trajectories_fts", "principles_fts")
 _FTS_STALE_PREFIX = "fts_stale:"
+
+# Sync triggers that write into each derived FTS index. These are why a corrupt
+# index is not merely a search problem: `chunks_ai` fires inside the canonical
+# `INSERT INTO chunks`, so a broken chunks_fts fails the transcript write
+# itself. Detaching them keeps canonical data flowing while the index is
+# unusable. Hard-coded, never taken from a caller — these names are
+# interpolated into DDL.
+#
+# Only FTS sinks belong here: `semantic_facts_ad` and `principles_ad_vec`
+# target vec0 tables and are unaffected by FTS corruption.
+_FTS_TRIGGERS: dict[str, tuple[str, ...]] = {
+    "chunks_fts": ("chunks_ai", "chunks_ad"),
+    "trajectories_fts": ("trajectories_ai", "trajectories_ad"),
+    # principles_fts is populated explicitly by skills/principle_index.py;
+    # only the delete path is a trigger.
+    "principles_fts": ("principles_ad",),
+}
 
 # A malformed MATCH expression and a corrupt index both surface as
 # OperationalError. Only the latter is worth remembering: the query errors are
@@ -620,6 +640,83 @@ def stale_fts_tables(conn: sqlite3.Connection) -> list[str]:
     return sorted(r[0][len(_FTS_STALE_PREFIX):] for r in rows)
 
 
+def detach_fts(conn: sqlite3.Connection, table: str) -> None:
+    """Take *table*'s derived index out of the canonical write path.
+
+    Marks the index stale and drops its sync triggers in one transaction, so a
+    corrupt FTS table can no longer fail the write it mirrors. The canonical
+    rows stay authoritative; the index is rebuilt from them at a later
+    ``open_db``, which replays ``_SCHEMA`` (``CREATE TRIGGER IF NOT EXISTS``)
+    and so restores the triggers before ``rebuild_stale_fts`` runs.
+
+    Best-effort by design: this is called from a failing write path, where the
+    connection may already be unhealthy. A failure here leaves the original
+    error to propagate rather than masking it.
+    """
+    if table not in _FTS_TRIGGERS:
+        log.warning("refusing to detach unknown FTS table %r", table)
+        return
+    # A SAVEPOINT, not `with conn:`. This runs mid-write with the caller's
+    # earlier rows still uncommitted on the same connection; a connection-level
+    # context manager would ROLLBACK *those* too if the detach itself failed,
+    # destroying the very data this function exists to protect.
+    try:
+        conn.execute("SAVEPOINT nh_fts_detach")
+        try:
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES(?, '1') "
+                "ON CONFLICT(key) DO NOTHING",
+                (f"{_FTS_STALE_PREFIX}{table}",),
+            )
+            for trigger in _FTS_TRIGGERS[table]:
+                conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        except sqlite3.Error:
+            conn.execute("ROLLBACK TO nh_fts_detach")
+            raise
+        finally:
+            conn.execute("RELEASE nh_fts_detach")
+        # Commit the detach itself. RELEASE only folds it into the caller's
+        # transaction, and that commit is conditional (archiver commits only
+        # `if new_ids`), so a later failure in the same batch would discard the
+        # marker and the trigger drop — the recovery would be forgotten exactly
+        # when it is needed.
+        conn.commit()
+        log.warning(
+            "detached %s from the write path (index unusable); canonical rows "
+            "continue, index rebuilds on next start",
+            table,
+        )
+    except sqlite3.Error:
+        log.debug("could not detach %s", table, exc_info=True)
+
+
+def fts_guarded_write(conn: sqlite3.Connection, table: str, op: Callable[[], object]):
+    """Run *op*; if a corrupt *table* breaks it, detach the index and retry once.
+
+    Derived-index corruption must not cost canonical data. Without this a
+    broken chunks_fts makes every ``INSERT INTO chunks`` raise through
+    ``chunks_ai``, and the hook's archive-level ``except`` swallows it — the
+    transcript is silently lost for the life of the process.
+
+    Only corruption is handled: any other DatabaseError propagates untouched,
+    so genuine write bugs stay loud.
+    """
+    try:
+        return op()
+    except sqlite3.DatabaseError as exc:
+        if not is_fts_corruption(exc):
+            raise
+        # Detaching drops triggers — a destructive schema change — so require
+        # more than the shared substring heuristic used for the cheap,
+        # idempotent read-path marker. "no such table" for some *other* table
+        # (a partially-migrated DB, a typo in a future caller) must not silently
+        # strip this index's sync triggers.
+        if table not in str(exc) and "malformed" not in str(exc).lower():
+            raise
+        detach_fts(conn, table)
+        return op()
+
+
 def _clear_fts_marker(conn: sqlite3.Connection, table: str) -> None:
     """Remove one stale marker. Best-effort, mirrors mark_fts_stale."""
     try:
@@ -631,12 +728,32 @@ def _clear_fts_marker(conn: sqlite3.Connection, table: str) -> None:
         log.debug("could not clear FTS stale marker for %s", table, exc_info=True)
 
 
+# How each FTS table is repopulated. Only external-content tables can use
+# FTS5's native 'rebuild', which reads the table named by ``content=``.
+# principles_fts is STANDALONE: it stores its own copy, so 'rebuild' merely
+# re-tokenises rows already present and cannot recover a row that was never
+# indexed. It has to be refilled from `principles` explicitly.
+_FTS_REBUILD_SQL: dict[str, tuple[str, ...]] = {
+    "chunks_fts": ("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')",),
+    "trajectories_fts": (
+        "INSERT INTO trajectories_fts(trajectories_fts) VALUES('rebuild')",
+    ),
+    "principles_fts": (
+        "DELETE FROM principles_fts",
+        "INSERT INTO principles_fts (rowid, condition, action, content_id) "
+        "SELECT id, condition, action, id FROM principles",
+    ),
+}
+
+
 def rebuild_stale_fts(conn: sqlite3.Connection) -> list[str]:
     """Rebuild any FTS index flagged stale; clear the flag on success.
 
-    Uses FTS5's native ``'rebuild'`` command, which repopulates the index from
-    the content table in one statement — no chunked re-indexing needed. Returns
-    the tables successfully rebuilt.
+    External-content tables use FTS5's native ``'rebuild'``. The standalone
+    ``principles_fts`` is refilled from ``principles`` instead — ``'rebuild'``
+    succeeds there but is a no-op for missing rows, which previously left a
+    principle permanently unsearchable while the marker was cleared and
+    nano_status reported healthy. Returns the tables successfully rebuilt.
     """
     repaired: list[str] = []
     for table in stale_fts_tables(conn):
@@ -648,7 +765,8 @@ def rebuild_stale_fts(conn: sqlite3.Connection) -> list[str]:
             log.warning("dropped unrecognised FTS stale marker: %s", table)
             continue
         try:
-            conn.execute(f"INSERT INTO {table}({table}) VALUES('rebuild')")
+            for stmt in _FTS_REBUILD_SQL[table]:
+                conn.execute(stmt)
             conn.execute(
                 "DELETE FROM meta WHERE key = ?", (f"{_FTS_STALE_PREFIX}{table}",)
             )
