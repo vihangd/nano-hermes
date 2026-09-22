@@ -37,6 +37,10 @@ log = logging.getLogger(__name__)
 
 # Meta-KV key tracking the last full VACUUM, for the purge cooldown gate.
 _META_LAST_VACUUM = "vacuum.last_run_at"
+# Cap on the per-conversation save-nudge counters. Keyed by id(messages), so
+# entries outlive the lists they describe; a handful of live chats is the
+# realistic ceiling.
+_MAX_TRACKED_CONVERSATIONS = 32
 
 # Re-export for backward compatibility with any code that imports from here.
 from .coordinator.reflection import _NUDGE_TEXT  # noqa: F401, E402
@@ -135,10 +139,16 @@ class NanoHermesHook(AgentHook):
         # Cache for last_user_text: (id(messages), len(messages), result).
         # Avoids a full reverse scan every after_iteration when nothing changed.
         self._last_user_text_cache: tuple[int, int, str | None] = (0, 0, None)
-        # Count of user-role messages seen — drives the save-nudge cadence by
-        # detecting new turns via list growth (text equality misses repeated
-        # identical prompts like "go", "again").
-        self._last_user_msg_count: int = 0
+        # Per-conversation count of user-role messages seen — drives the
+        # save-nudge cadence by detecting new turns via list growth (text
+        # equality misses repeated identical prompts like "go", "again").
+        # Keyed by id(messages) like archiver._session_ids/_watermarks,
+        # because one hook instance serves every chat the loop runs: a shared
+        # scalar either pins one chat's delta at 0 or replays another chat's
+        # history as fresh turns. Not keyed by session id — interleaved chats
+        # cross a session boundary on every switch, so that id is not stable
+        # for a conversation. An absent key means "not yet hydrated".
+        self._user_msg_counts: dict[int, int] = {}
 
     # ------------------------------------------------------------------
     # Public API surface (unchanged for external callers)
@@ -360,14 +370,20 @@ class NanoHermesHook(AgentHook):
                 self._inject(context.messages, msg)
             # Memory-save nudge hydration: count prior user turns in the
             # resumed conversation so the cadence picks up where it left
-            # off rather than firing instantly on restart.
-            recent_user_turns = sum(
-                1 for m in context.messages if m.get("role") == "user"
-            )
-            self._last_user_msg_count = recent_user_turns
-            self._reflection_coord.hydrate_save_counter_from_history(
-                recent_user_turns=recent_user_turns,
-            )
+            # off rather than firing instantly on restart. Once per
+            # conversation — re-running it every turn pins the stored count
+            # to the current one (so after_iteration's delta is always 0 and
+            # note_user_turn never fires) and clears _save_nudge_pending on
+            # the way to take_save_nudge below, which together made the
+            # nudge unreachable in the real hook path.
+            if id(context.messages) not in self._user_msg_counts:
+                recent_user_turns = sum(
+                    1 for m in context.messages if m.get("role") == "user"
+                )
+                self._user_msg_counts[id(context.messages)] = recent_user_turns
+                self._reflection_coord.hydrate_save_counter_from_history(
+                    recent_user_turns=recent_user_turns,
+                )
 
         # Inject a matching past trajectory on iteration 0 (opt-in via config).
         if context.iteration == 0 and self.config.trajectory.inject_context:
@@ -484,11 +500,25 @@ class NanoHermesHook(AgentHook):
         # growth, not text equality — two identical "go" messages should
         # advance the counter by two, not one.
         user_msg_count = sum(1 for m in msgs if m.get("role") == "user")
-        new_user_turns = user_msg_count - self._last_user_msg_count
-        if new_user_turns > 0:
-            for _ in range(new_user_turns):
-                self._reflection_coord.note_user_turn()
-            self._last_user_msg_count = user_msg_count
+        key = id(msgs)
+        last_count = self._user_msg_counts.get(key, user_msg_count)
+        # Clamped to one: nanobot appends a single user message per turn, so a
+        # larger delta means the key was stale (id(messages) can be recycled
+        # onto a dead conversation's entry, which skips hydration). Replaying
+        # a whole resumed transcript through note_user_turn would arm the
+        # nudge instantly — the store below then self-heals the count.
+        for _ in range(min(user_msg_count - last_count, 1)):
+            self._reflection_coord.note_user_turn()
+        # Stored unconditionally, so in-place compaction re-anchors the count
+        # instead of leaving a stale high-water mark that makes every later
+        # delta negative and retires the cadence for good (same rule
+        # archiver._archive applies to its watermarks). The turn that arrived
+        # in the compacting iteration goes uncounted — the cadence slips one
+        # turn per consolidation, which is fine for a heuristic nudge.
+        self._user_msg_counts[key] = user_msg_count
+        while len(self._user_msg_counts) > _MAX_TRACKED_CONVERSATIONS:
+            # Insertion-ordered: drop the least recently added conversation.
+            self._user_msg_counts.pop(next(iter(self._user_msg_counts)))
 
         # RMM: bump view/cite counters for reflections injected this iteration
         # against the assistant response text.

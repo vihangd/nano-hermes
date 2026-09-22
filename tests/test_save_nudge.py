@@ -139,3 +139,102 @@ class TestMemoryPatchResetsCounter:
         coord.note_user_turn()
         coord.note_user_turn()
         assert coord.take_save_nudge() is None
+
+
+class TestNudgeReachesTheHookPath:
+    """The nudge must survive the real before/after_iteration lifecycle.
+
+    The cadence lived entirely in ReflectionCoordinator tests above, so a
+    hook-level regression (hydration re-running every turn) went unnoticed:
+    unit-green, integration-dead.
+    """
+
+    async def _turns(self, hook, n, *, msgs=None, compact_at=None, label="turn"):
+        """Drive ``n`` user turns; return 1/0 per turn for nudge delivered."""
+        from nanobot.agent.hook import AgentHookContext  # noqa: PLC0415
+
+        msgs = [] if msgs is None else msgs
+        delivered = []
+        for turn in range(n):
+            if compact_at is not None and turn == compact_at:
+                msgs[:] = msgs[-2:]
+            msgs.append({"role": "user", "content": f"{label} {turn}"})
+            ctx = AgentHookContext(iteration=0, messages=msgs)
+            await hook.before_iteration(ctx)
+            delivered.append(
+                int(
+                    any(
+                        "Memory check-in" in str(m.get("content", ""))
+                        for m in msgs
+                    )
+                )
+            )
+            msgs[:] = [
+                m
+                for m in msgs
+                if "Memory check-in" not in str(m.get("content", ""))
+            ]
+            msgs.append({"role": "assistant", "content": "ack"})
+            await hook.after_iteration(ctx)
+        return delivered
+
+    async def test_nudge_is_delivered_on_cadence(self, tmp_path):
+        hook = _make_hook(tmp_path, interval=5)
+        delivered = await self._turns(hook, 14)
+        assert delivered == [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0]
+
+    async def test_nudge_survives_history_compaction(self, tmp_path):
+        hook = _make_hook(tmp_path, interval=5)
+        # Compaction shifts the cadence by one turn but must not retire it.
+        delivered = await self._turns(hook, 14, compact_at=7)
+        assert delivered == [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0]
+
+    async def test_resume_does_not_nudge_on_first_turn(self, tmp_path):
+        hook = _make_hook(tmp_path, interval=5)
+        history = []
+        for i in range(25):
+            history.append({"role": "user", "content": f"old {i}"})
+            history.append({"role": "assistant", "content": "ok"})
+        delivered = await self._turns(hook, 1, msgs=history)
+        assert delivered == [0]
+
+    async def test_counter_is_per_conversation(self, tmp_path):
+        """One hook serves every chat the loop runs.
+
+        A process-wide counter leaks across conversations: the long chat's
+        count makes the short chat's delta permanently negative (nudge dead),
+        while the short chat's count replays the long chat's history as fresh
+        turns (nudge on every single turn).
+        """
+        hook = _make_hook(tmp_path, interval=5)
+        chat_a, chat_b = [], []
+        for i in range(30):
+            chat_a.append({"role": "user", "content": f"old {i}"})
+            chat_a.append({"role": "assistant", "content": "ok"})
+        a_hits, b_hits = [], []
+        for _ in range(8):
+            a_hits += await self._turns(hook, 1, msgs=chat_a, label="a")
+            b_hits += await self._turns(hook, 1, msgs=chat_b, label="b")
+        # The cadence is shared, so 16 combined turns at interval=5 must
+        # deliver several nudges — not zero, which is what a scalar counter
+        # degrades to once the long chat pins the short one's delta.
+        assert sum(a_hits) + sum(b_hits) >= 2, (a_hits, b_hits)
+        # And no conversation is spammed: a scalar counter nudges the short
+        # chat on every turn, because the long chat's count replays as new.
+        assert sum(b_hits) <= 2, b_hits
+
+    async def test_recycled_list_address_does_not_replay_history(self, tmp_path):
+        """id(messages) can collide with a dead conversation's entry.
+
+        A stale entry skips hydration, so the delta against a resumed
+        transcript would replay its whole history as fresh turns and arm
+        the nudge immediately — the very thing the clamp prevents.
+        """
+        hook = _make_hook(tmp_path, interval=5)
+        history = []
+        for i in range(25):
+            history.append({"role": "user", "content": f"old {i}"})
+            history.append({"role": "assistant", "content": "ok"})
+        hook._user_msg_counts[id(history)] = 1  # simulate a recycled address
+        delivered = await self._turns(hook, 2, msgs=history)
+        assert delivered == [0, 0]
