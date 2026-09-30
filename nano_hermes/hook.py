@@ -361,11 +361,19 @@ class NanoHermesHook(AgentHook):
             self._purge_task = asyncio.create_task(self._background_purge())
             self._curator_task = asyncio.create_task(self._background_curator())
 
-        # Archive here, not only in after_iteration: this window has been
-        # through get_history, so its messages are in the form the archiver can
-        # fingerprint and re-locate next turn. See session/archiver.py.
+        # Archive here, not only in after_iteration: on iteration 0 this window
+        # has been through get_history, so its messages are in the form the
+        # archiver can fingerprint and re-locate next turn. Later iterations see
+        # the *same list* with this turn's raw assistant/tool messages appended
+        # (nanobot's runner mutates it in place), which the replay sanitizer will
+        # rewrite — so those count as mid-turn and are adopted by role off the
+        # next real window. See session/archiver.py.
         try:
-            self.archiver.archive_and_embed(context.messages, context.session_key)
+            self.archiver.archive_and_embed(
+                context.messages,
+                context.session_key,
+                mid_turn=context.iteration > 0,
+            )
         except Exception:
             log.exception("nano-hermes archive failed")
 

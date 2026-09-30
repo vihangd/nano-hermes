@@ -457,6 +457,73 @@ class TestSaturatedWindowThroughTheRealHook:
         rows = [r[0] for r in hook.db.execute("SELECT content FROM chunks ORDER BY id")]
         assert rows == ["first", "answer", "what did I ask"]
 
+    def test_tool_loop_iterations_do_not_restart_the_conversation(self, loop):
+        """``before_iteration`` fires once per *iteration*, not once per turn.
+
+        nanobot's runner builds the window once and then mutates that same list
+        in place — the assistant message and each tool result are appended to it
+        (``runner.py:482``, ``:511``) before the next iteration's
+        ``before_iteration``. So from iteration 1 on, the window holds raw
+        mid-turn messages that ``get_history``'s replay sanitizer will rewrite.
+        Confirming their fingerprints there made the next turn's window align
+        nowhere: new session, full re-archive, on every tool-using turn.
+        """
+        from nanobot.session.manager import Session
+
+        cap, turns = 12, 8
+        hook = nano_hermes.install(loop)
+        session = Session(key="chan:1")
+        expected: list[str] = []
+
+        async def drive():
+            for t in range(turns):
+                session.add_message("user", f"u{t}")
+                expected.append(f"u{t}")
+                msgs = [{"role": "system", "content": "sys"}] + _history(
+                    session, cap, True
+                )
+                appended: list[tuple[str, str]] = []
+                # Iteration 0: fresh window, then the tool call and its result.
+                # The reply carries a line the replay sanitizer deletes.
+                per_iteration = [
+                    [
+                        ("assistant", f"calling\nmessage(to='x{t}')"),
+                        ("tool", f"res{t}"),
+                    ],
+                    [("assistant", f"done\n[image: /tmp/p{t}.png]")],
+                ]
+                for it, produced in enumerate(per_iteration):
+                    ctx = AgentHookContext(
+                        messages=msgs, iteration=it, session_key="chan:1"
+                    )
+                    await hook.before_iteration(ctx)
+                    for role, content in produced:
+                        msg = {"role": role, "content": content}
+                        if role == "tool":
+                            msg["tool_call_id"] = f"c{t}"
+                        msgs.append(msg)
+                        expected.append(content)
+                        appended.append((role, content))
+                    await hook.after_iteration(ctx)
+                for role, content in appended:
+                    session.add_message(role, content)
+            await hook.archiver.drain()
+
+        asyncio.run(drive())
+
+        db = hook.db
+        rows = [r[0] for r in db.execute("SELECT content FROM chunks ORDER BY id")]
+        # Replayed user turns carry a ``[Message Time: ...]`` prefix, so compare
+        # on the tail; what matters is one row per emitted message, in order.
+        assert [r.rsplit("\n", 1)[-1] for r in rows] == [
+            e.rsplit("\n", 1)[-1] for e in expected
+        ]
+        assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+        turn_indexes = [
+            r[0] for r in db.execute("SELECT turn_index FROM chunks ORDER BY id")
+        ]
+        assert turn_indexes == list(range(1, len(expected) + 1))
+
     @pytest.mark.parametrize("include_timestamps", [False, True])
     def test_one_conversation_stays_one_session(self, loop, include_timestamps):
         from nanobot.session.manager import Session

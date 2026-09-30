@@ -344,7 +344,7 @@ class SessionArchiver:
             self._pending_roles.pop(key, None)
             start = 0
         else:
-            start = self._adopt_pending(key, entries, overlap)
+            start = self._adopt_pending(key, entries, overlap, confirm=not mid_turn)
 
         session_id = self._session_ids.get(key)
         if session_id is None:
@@ -394,8 +394,14 @@ class SessionArchiver:
             # Appended during this turn, so these fingerprints are of the raw
             # form; the replayed form can differ (sanitizer, time prefix). Only
             # the roles are recorded, and the next pass adopts the real
-            # fingerprints off the window.
-            self._pending_roles[key] = archived_roles
+            # fingerprints off the window. Accumulated, not replaced: a
+            # tool-using turn makes several mid-turn passes over the same
+            # growing list (nanobot's runner mutates it in place and fires
+            # ``before_iteration`` again), and every one of those messages is
+            # still pending until a real window replays it.
+            self._pending_roles[key] = (
+                list(self._pending_roles.get(key, ())) + archived_roles
+            )
         elif archived_roles:
             self._pending_roles.pop(key, None)
         del confirmed[:-_MAX_FINGERPRINTS]
@@ -408,6 +414,8 @@ class SessionArchiver:
         key: str | int,
         entries: list[tuple[dict[str, Any], str, str]],
         overlap: int,
+        *,
+        confirm: bool = True,
     ) -> int:
         """Return the index to start archiving from, past any pending messages.
 
@@ -418,6 +426,11 @@ class SessionArchiver:
         them. Role matching stops at the first mismatch, which is what keeps a
         message the sanitizer dropped entirely from shifting the run and
         swallowing a genuinely new message.
+
+        ``confirm=False`` on a mid-turn pass: that list is the raw one the
+        runner is still appending to, so its fingerprints must not be trusted —
+        skip past the pending messages without adopting them, and leave them
+        pending for the next real window.
         """
         pending = self._pending_roles.get(key)
         confirmed = self._fingerprints.setdefault(key, [])
@@ -426,9 +439,11 @@ class SessionArchiver:
             for role in pending:
                 if start >= len(entries) or entries[start][0].get("role") != role:
                     break
-                confirmed.append(entries[start][2])
+                if confirm:
+                    confirmed.append(entries[start][2])
                 start += 1
-            self._pending_roles.pop(key, None)
+            if confirm:
+                self._pending_roles.pop(key, None)
         return start
 
     def _session_turn_count(self, session_id: int) -> int:
