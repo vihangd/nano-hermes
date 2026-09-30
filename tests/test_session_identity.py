@@ -388,16 +388,21 @@ def _window(
 ) -> list[dict]:
     """The window nanobot actually hands the hook, built by the real upstream code.
 
-    Production is ``ContextBuilder.build_messages(history=get_history(...),
-    current_message=...)`` — not ``get_history`` on its own. The difference is
-    load-bearing: the loop persists the user message *before* the turn
-    (``_persist_user_message_early``), so the last history entry already has the
-    same role, and ``build_messages`` merges the current message plus the
-    ``[Runtime Context …]`` block into it (``context.py:230-255``). The window's
-    last message therefore never equals the form the next turn replays. Feeding
-    fixtures straight from ``get_history`` hid that for three rounds; going
-    through the real builder means the fixture can't drift from upstream without
-    a test failing.
+    Production is ``_build_initial_messages`` → ``ContextBuilder.build_messages(
+    history=get_history(...), current_message=...)``, and the *order* is
+    load-bearing: the loop reads the history at ``loop.py:1465`` and only
+    persists the user message afterwards at ``loop.py:1478``. So history does
+    **not** contain the current message, the roles do not line up, and
+    ``build_messages`` appends a fresh ``"<current>\n\n[Runtime Context …]"``
+    entry instead of merging (``context.py:230-255`` is the merge branch — it
+    fires only when history already ends with a ``user`` entry, i.e. right after
+    in-place compaction or an interrupted turn). This helper persists after
+    building, like the loop does, so callers must not add the message first.
+
+    Feeding fixtures straight from ``get_history`` hid the appended tail for
+    three rounds, and pre-persisting hid the append/merge distinction for one
+    more; going through the real builder in the real order means the fixture
+    can't drift from upstream without a test failing.
     """
     import inspect
 
@@ -412,9 +417,11 @@ def _window(
         "chat_id": "1",
     }
     accepted = inspect.signature(loop.context.build_messages).parameters
-    return loop.context.build_messages(
+    msgs = loop.context.build_messages(
         **{k: v for k, v in kwargs.items() if k in accepted}
     )
+    session.add_message(role, current_message)
+    return msgs
 
 
 class TestSaturatedWindowThroughTheRealHook:
@@ -463,7 +470,6 @@ class TestSaturatedWindowThroughTheRealHook:
         async def drive():
             nonlocal emitted
             for t in range(turns):
-                session.add_message("user", f"u{t}")
                 emitted += 1
                 msgs = _window(loop, session, cap, f"u{t}")
                 await hook.before_iteration(
@@ -549,7 +555,6 @@ class TestSaturatedWindowThroughTheRealHook:
 
         async def drive():
             for t in range(turns):
-                session.add_message("user", f"u{t}")
                 expected.append(f"u{t}")
                 msgs = _window(loop, session, cap, f"u{t}")
                 appended: list[tuple[str, str]] = []
@@ -606,7 +611,6 @@ class TestSaturatedWindowThroughTheRealHook:
         async def drive():
             nonlocal emitted
             for t in range(turns):
-                session.add_message("user", f"u{t}")
                 emitted += 1
                 msgs = _window(
                     loop, session, cap, f"u{t}", include_timestamps=include_timestamps
@@ -701,3 +705,130 @@ class TestMidTurnMessagesAreAdoptedNotDuplicated:
         rows = [r[0] for r in db.execute("SELECT content FROM chunks ORDER BY id")]
         assert len(rows) == 2 and rows[1] == "ok"
         assert "abcdefghijklmnopqrstuvwxyz" not in rows[0]
+
+
+class TestTheLiveEntryIsOnlyDeduplicatedWhenItWasMerged:
+    """``build_messages`` appends the current message; it merges only sometimes.
+
+    ``loop.py:1465`` builds the history before ``loop.py:1478`` persists the user
+    message, so the roles usually don't line up and the live entry is a fresh
+    ``"<current>\\n\\n[Runtime Context …]"``. The merge branch
+    (``context.py:230-255``) fires only when the history already ends with a
+    ``user`` entry: right after in-place compaction, or when an interrupted turn
+    is retried. Cleaning the tail therefore has to key on evidence of a merge
+    (the ``[Message Time:`` stamp a replayed message carries), not on position.
+    """
+
+    def _turn(self, loop, hook, session, text, *, cap=120):
+        history = [dict(m) for m in _history(session, cap, True)]
+        msgs = loop.context.build_messages(
+            history=history, current_message=text, channel="cli"
+        )
+        session.add_message("user", text)
+        return msgs
+
+    def test_a_repeated_paragraph_in_an_appended_message_survives_whole(self, loop):
+        from nanobot.session.manager import Session
+
+        hook = nano_hermes.install(loop)
+        session = Session(key="chan:1")
+        prompt = "A\n\nB\n\nA\n\nB"
+
+        async def drive():
+            msgs = self._turn(loop, hook, session, prompt)
+            await hook.before_iteration(
+                AgentHookContext(messages=msgs, iteration=0, session_key="chan:1")
+            )
+            await hook.archiver.drain()
+
+        asyncio.run(drive())
+        rows = [r[0] for r in hook.db.execute("SELECT content FROM chunks ORDER BY id")]
+        # Unstamped, so unmerged: the paragraph dedup must not fire and eat "A\n\nB".
+        assert rows == [prompt]
+
+    def test_a_merged_retry_drops_the_duplicated_prompt(self, loop):
+        from nanobot.session.manager import Session
+
+        hook = nano_hermes.install(loop)
+        session = Session(key="chan:1")
+        # An interrupted turn leaves the user message persisted with no reply, so
+        # the next build merges the same text into it.
+        session.add_message("user", "u1")
+
+        stamped = False
+
+        async def drive():
+            nonlocal stamped
+            msgs = self._turn(loop, hook, session, "u1")
+            stamped = str(msgs[-1]["content"]).startswith("[Message Time:")
+            await hook.before_iteration(
+                AgentHookContext(messages=msgs, iteration=0, session_key="chan:1")
+            )
+            await hook.archiver.drain()
+
+        asyncio.run(drive())
+        rows = [r[0] for r in hook.db.execute("SELECT content FROM chunks ORDER BY id")]
+        assert len(rows) == 1
+        assert "[Runtime Context" not in rows[0]
+        if stamped:
+            assert rows[0].count("u1") == 1
+        else:
+            # nanobot HEAD stopped stamping replayed messages, so there is no
+            # evidence a merge happened and the duplicate has to be kept — a
+            # message that legitimately ends with a repeated paragraph matters
+            # more than one doubled prompt. Same class as the other
+            # stamp-dependent residual in the module docstring.
+            assert rows[0] == "u1\n\nu1"
+
+    def test_in_place_compaction_keeps_the_summary_and_opens_one_session(self, loop):
+        from nanobot.session.manager import Session
+
+        hook = nano_hermes.install(loop)
+        session = Session(key="chan:1")
+
+        async def turn(text, compact=False):
+            if compact:
+                session.messages = []
+                session.add_message("user", "SUMMARY of u0")
+            msgs = self._turn(loop, hook, session, text)
+            await hook.before_iteration(
+                AgentHookContext(messages=msgs, iteration=0, session_key="chan:1")
+            )
+            msgs.append({"role": "assistant", "content": f"reply to {text}"})
+            await hook.after_iteration(
+                AgentHookContext(messages=msgs, iteration=0, session_key="chan:1")
+            )
+            session.add_message("assistant", f"reply to {text}")
+
+        async def drive():
+            await turn("u0")
+            await turn("u1", compact=True)
+            await turn("u2")
+            await hook.archiver.drain()
+
+        asyncio.run(drive())
+        db = hook.db
+        rows = [r[0] for r in db.execute("SELECT content FROM chunks ORDER BY id")]
+        # The compacted window merges summary + current message into one entry;
+        # neither half may be truncated, and the block never reaches the corpus.
+        merged = [r for r in rows if "SUMMARY of u0" in r]
+        assert len(merged) == 1 and merged[0].endswith("u1")
+        assert [r for r in rows if "[Runtime Context" in r] == []
+        # Compaction is indistinguishable from /new, so it opens a session and
+        # writes the trajectory the old one would otherwise never get.
+        assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 2
+        assert db.execute("SELECT COUNT(*) FROM trajectories").fetchone()[0] == 1
+        # Known residual: the merged row holds "u1" in a form no later window
+        # repeats, so the window that replays "u1" and its reply separately
+        # archives them a second time. Two duplicate rows per compaction,
+        # pinned deliberately — the alternative (keeping the unresolved pending
+        # items) measured 29 chunks for 24 messages on a post-compaction tool
+        # turn, because a kept item goes on matching later entries by role.
+        assert rows.count("reply to u1") == 2
+        # The replayed half comes back as its own row only where nanobot stamps
+        # it; unstamped (HEAD) it matches the merged row's fingerprint prefix and
+        # is skipped instead.
+        replayed = [
+            r for r in rows if "SUMMARY" not in r and (r == "u1" or r.endswith("\nu1"))
+        ]
+        assert len(replayed) == 1

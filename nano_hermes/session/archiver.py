@@ -54,19 +54,33 @@ per-message or per-session-instance id.
 Two message shapes cannot be fingerprinted from the window. The first is the
 reply appended *during* the turn, which ``after_iteration`` archives before any
 ``get_history`` has rewritten it. The second is the window's **last entry on
-every pass**: ``ContextBuilder.build_messages`` merges the current message plus
-the runtime-context block into it when the roles line up (``context.py:230-255``
-— and they do, because nanobot persists the user message before the turn), so
-its live text is ``"[Message Time: t]\nu1\n\nu1\n\n[Runtime Context …]"``
-against a replayed ``"[Message Time: t]\nu1"``. Confirming that fingerprint
-made every single turn take the new-conversation branch: one ``sessions`` row
-and one trajectory per turn, the whole ``session_key`` scheme inert.
+every pass**: ``ContextBuilder.build_messages`` appends the current message plus
+the runtime-context block, so its live text is
+``"u1\n\n[Runtime Context …]"`` against a replayed
+``"[Message Time: t]\nu1"``. Confirming that fingerprint made every single turn
+take the new-conversation branch: one ``sessions`` row and one trajectory per
+turn, the whole ``session_key`` scheme inert.
+
+That entry is *appended*, not merged, on an ordinary turn: the loop reads the
+history at ``loop.py:1465`` and only persists the user message afterwards at
+``loop.py:1478``, so the roles never line up. The merge branch
+(``context.py:230-255``) fires only when the history already ends with a
+``user`` entry — right after in-place compaction, whose summary is stored as
+one, or when an interrupted turn is retried. This premise has been wrong twice;
+the two line numbers are cited so the next reader can re-check it instead of
+inferring it.
 
 Both shapes are recorded as *pending* by role only; the next pass skips them by
 role and adopts their replayed fingerprints. Losing that would mean losing the
 last reply of every session. The live entry's *text* is cleaned before the
 insert (``_clean_live_tail``) so the retrieval corpus doesn't carry a metadata
 block per turn — cleaning cannot rescue the fingerprint, only the corpus.
+
+A merged entry holds two messages in one row, and the window that replays them
+separately archives both again: two duplicate rows per compaction. Deliberate —
+keeping the unresolved pending items instead measured 29 chunks for 24 messages
+on a post-compaction tool turn, because a kept item goes on matching later
+entries by role and shifts every window after it.
 
 ``session_key`` is conversation identity, not session-instance identity, so a
 zero overlap under an unchanged key is what opens a new ``sessions`` row. It
@@ -112,33 +126,47 @@ _MAX_TRACKED_CONVERSATIONS = 32
 # the coordinator import cycle.
 _RUNTIME_SENTINEL = "[Runtime Context"
 
+# Prefix ``get_history`` stamps onto a replayed message. A window entry that
+# carries it came from history; the live current message does not, because
+# ``build_messages`` appends ``current_message`` verbatim. That is the only
+# evidence available for "this entry is the merge of a history message and the
+# current one" — see :func:`_clean_live_tail`.
+_MESSAGE_TIME_PREFIX = "[Message Time:"
+
 
 def _clean_live_tail(text: str, *, merged: bool = False) -> str:
-    """Strip what ``build_messages`` merged into the window's last message.
+    """Strip the runtime-context block, and a merge duplicate when there is one.
 
-    That entry is live, not replayed: nanobot persists the user message before
-    the turn (``loop._persist_user_message_early``) and then merges the same
-    text plus the runtime-context block into the last history entry. Archiving
-    it verbatim puts a per-turn metadata block (time, cwd, channel) and a
-    duplicated prompt into every user chunk — that is, into FTS5 and into the
-    embedder. The fingerprint is deliberately *not* taken from the cleaned
-    text: no amount of cleaning makes the live form equal the replayed form,
-    which is why that entry is pending-by-role rather than confirmed.
+    The usual live entry is *appended*, not merged: nanobot builds the history
+    at ``loop.py:1465`` and only persists the user message afterwards at
+    ``loop.py:1478``, so the roles do not line up and ``build_messages`` adds a
+    fresh ``current_message + [Runtime Context …]`` entry. Archiving it verbatim
+    puts a per-turn metadata block (time, cwd, channel) into every user chunk —
+    that is, into FTS5 and into the embedder.
+
+    The merge branch (``context.py:230-255``) only fires when the history
+    already ends with a ``user`` entry: right after in-place compaction, whose
+    summary is stored as one, or after an interrupted turn. Then the text is
+    ``"[Message Time: t]\n<history>" + "\n\n" + "<current>"`` and the
+    paragraph dedup below applies. It is gated on *merged*, which the caller
+    derives from the ``[Message Time:`` stamp, because an unstamped live entry
+    is an unmerged one and a real message may legitimately end with a repeated
+    paragraph (``"A\n\nB\n\nA\n\nB"`` must survive whole).
+
+    The fingerprint is deliberately *not* taken from the cleaned text: no
+    amount of cleaning makes the live form equal the replayed form, which is
+    why a live entry is pending-by-role rather than confirmed.
     """
     cut = text.find(_RUNTIME_SENTINEL)
     if cut > 0:
         text = text[:cut].rstrip()
     if not merged:
-        # Only the merged tip can carry the duplicated prompt, and only it may
-        # be split this way: a replayed message can legitimately end with a
-        # repeated paragraph. nanobot HEAD reaches here with no runtime block at
-        # all (it moved to ``runtime_context_blocks``), so the cut above is not a
-        # reliable stand-in for "this message was merged".
         return text
-    # The merge appended the prompt that ``_persist_user_message_early`` had
-    # already written into history: ``"[Message Time: t]\nu1" + "\n\n" + "u1"``.
-    # Leftmost split wins, so a prompt that itself contains a blank line is
-    # de-duplicated whole rather than one paragraph at a time.
+    # The merge repeats the history entry's own text when the interrupted turn
+    # is being retried: ``"[Message Time: t]\nu1" + "\n\n" + "u1"``. Leftmost
+    # split wins, so a prompt that itself contains a blank line is de-duplicated
+    # whole rather than one paragraph at a time. A post-compaction merge
+    # (``"<summary>\n\n<current>"``) matches nothing here and is kept whole.
     at = text.find("\n\n")
     while at != -1:
         head, tail = text[:at], text[at + 2:]
@@ -300,10 +328,14 @@ def _align(
             start == last or entries[start][0].get("role") != role
         ):
             # The final entry of a window is always freshly appended — the live
-            # merged message on an iteration-0 pass, this turn's raw reply on a
+            # current message on an iteration-0 pass, this turn's raw reply on a
             # mid-turn one — never the replay of a pending message. Consuming it
             # by role is how a new conversation that repeats an old prompt gets
-            # swallowed.
+            # swallowed. The remainder of the run is dropped rather than kept:
+            # a kept item the window never replays goes on matching later
+            # entries by role and shifts every window after it (measured: 29
+            # chunks for 24 messages on a post-compaction tool turn, versus 2
+            # duplicate rows from dropping it).
             break
         if mid_turn or start == last:
             # This pass is looking at the same unreplayed form again: already
@@ -517,12 +549,17 @@ class SessionArchiver:
         archived_roles: list[tuple[str, str]] = []
         last_index = len(entries) - 1
         for index, (msg, text, fp) in enumerate(entries[start:], start=start):
-            # The window's last entry is the live merged one on a non-mid-turn
-            # pass: its fingerprint must not be confirmed. Cleaning runs over
-            # every entry because a mid-turn pass can be the one that first sees
-            # it, and it is a no-op on a replayed message.
-            live_tail = not mid_turn and index == last_index
-            text = _clean_live_tail(text, merged=live_tail)
+            # The window's last entry on a non-mid-turn pass is the live
+            # current message: stored in a form no later window repeats, so its
+            # fingerprint must not be confirmed. It is *merged* with the entry
+            # before it only when the history already ended with a user turn,
+            # and the ``[Message Time:`` stamp is the evidence — an unstamped
+            # live entry came from ``current_message`` verbatim. Cleaning runs
+            # over every entry: a mid-turn pass can be the first to see one, and
+            # it is a no-op on a replayed message.
+            live = not mid_turn and index == last_index
+            merged = live and text.startswith(_MESSAGE_TIME_PREFIX)
+            text = _clean_live_tail(text, merged=merged)
             # Redact secret-shaped strings so they neither land in chunks
             # nor reach the embedding provider over the wire. The same
             # masked text feeds both the INSERT and the background embed.
@@ -550,12 +587,12 @@ class SessionArchiver:
             new_ids.append(int(cur.lastrowid))
             new_texts.append(text)
             archived_roles.append((str(msg["role"]), fp))
-            if not mid_turn and not live_tail:
+            if not mid_turn and not live:
                 confirmed.append(fp)
         self._turn_counts[session_id] = turn
         # What stays pending: the items this window did not replay, plus
         # everything just archived in a form the next window will not repeat —
-        # all of it on a mid-turn pass, and the live merged tip otherwise.
+        # all of it on a mid-turn pass, and the live current message otherwise.
         pending = list(aligned.keep)
         if mid_turn:
             pending += archived_roles
