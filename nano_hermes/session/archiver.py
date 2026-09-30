@@ -16,18 +16,59 @@ The fallback is imperfect: Python reuses ``id()`` values after GC, and two
 interleaved conversations get distinct ids, so every switch between them
 looks like a new session.
 
-``session_key`` is conversation identity, not session-instance identity, so
-the shrink rule in :meth:`_archive` (watermark past the end of the list) is
-what opens a new ``sessions`` row under an unchanged key. It fires for both
-``/new`` and in-place history compaction, and ``AgentHookContext`` exposes
-nothing that tells them apart. That conflation is load-bearing rather than a
-defect: a session boundary is the only thing that writes a trajectory, so a
-long-running conversation that is never `/new`-ed still gets one at each
-compaction.
+nanobot hands the hook a **bounded sliding window**, not a monotonically
+growing list: ``context.messages`` wraps ``Session.get_history(max_messages=...,
+max_tokens=...)``, which slices the unconsolidated tail and re-trims it to a
+legal user-turn start every turn. So a message index is only meaningful within
+one turn, and no single message's text is identity either — a window full of
+``"ok"`` replies made a one-message anchor match the wrong occurrence and stop
+archiving for good (48 messages emitted, 12 stored, nothing logged).
+
+Position therefore rides a **block alignment**: the archiver keeps an ordered
+list of fingerprints of what it has already stored for a conversation and each
+pass finds the longest suffix of that list which is also a prefix of this
+window. Everything past the overlap is new. A run of identical replies can no
+longer mislead it, because the unique turns bracketing the run are part of the
+matched block. ``overlap == 0`` against a non-empty list *is* the
+new-conversation signal — there is no length rule left.
+
+Fingerprints are taken from the window, i.e. from messages that have already
+been through ``get_history`` and nanobot's replay sanitizer. Fingerprinting the
+raw mid-turn form instead is what made every window re-archive from zero when a
+reply held a line the sanitizer drops (an image breadcrumb or a tool-call echo:
+12 messages emitted, 27 chunks, growing quadratically). The
+``[Message Time: ...]`` prefix is deliberately *kept* in the fingerprint — it is
+the only per-message identity nanobot offers, and stripping it made two
+identical prompts on different days compare equal, so a daily cron job archived
+its first day and nothing after.
+
+*Residual, version-dependent:* the prefix is what makes two identical prompts
+distinguishable, and nanobot HEAD no longer emits it (nothing there produces
+``[Message Time: ...]``; only the sanitizer still strips it, and neither version
+keeps ``timestamp`` on a history entry). Where it is absent, a ``/new`` whose
+first message is byte-identical to the last one archived under the same key
+still continues the old session. Narrow, and there is nothing in
+``AgentHookContext`` to break the tie; revisit if upstream ever exposes a
+per-message or per-session-instance id.
+
+The one message shape that cannot be fingerprinted from the window is the reply
+appended *during* the turn, which ``after_iteration`` archives before any
+``get_history`` has rewritten it. Those are recorded as *pending* by role only;
+the next pass skips them by role and adopts their replayed fingerprints. Losing
+that would mean losing the last reply of every session.
+
+``session_key`` is conversation identity, not session-instance identity, so a
+zero overlap under an unchanged key is what opens a new ``sessions`` row. It
+fires for both ``/new`` and in-place history compaction, and
+``AgentHookContext`` exposes nothing that tells them apart. That conflation is
+load-bearing rather than a defect: a session boundary is the only thing that
+writes a trajectory, so a long-running conversation that is never `/new`-ed
+still gets one at each compaction.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import sqlite3
 import time
@@ -43,6 +84,24 @@ from .db import fts_guarded_write, run_vec_write
 log = logging.getLogger(__name__)
 
 _ARCHIVABLE_ROLES = frozenset({"user", "assistant", "tool"})
+
+# How many fingerprints to retain per conversation. Only an overlap with the
+# current window matters, so this needs to exceed the largest plausible
+# ``loop._max_messages`` (120 by default) and nothing more.
+_MAX_FINGERPRINTS = 512
+
+
+def _fingerprint(role: str, text: str) -> str:
+    """Identity of one message, as it appears in a replayed window.
+
+    Hashed rather than stored verbatim so a saturated window's worth of
+    fingerprints costs kilobytes, not megabytes, per tracked conversation.
+    """
+    h = hashlib.blake2b(digest_size=16)
+    h.update(role.encode())
+    h.update(b"\x00")
+    h.update(text.encode())
+    return h.hexdigest()
 
 
 def _extract_text(msg: dict[str, Any]) -> str | None:
@@ -69,6 +128,61 @@ def _extract_text(msg: dict[str, Any]) -> str | None:
     return text or None
 
 
+def _archivable(
+    messages: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], str, str]]:
+    """The subsequence of *messages* this archiver stores, with fingerprints.
+
+    Filtered identically to the insert loop, so a fingerprint list and a window
+    are always comparable: a system prompt or a tool-calls-only assistant
+    message shifts neither.
+    """
+    out: list[tuple[dict[str, Any], str, str]] = []
+    for msg in messages:
+        role = msg.get("role")
+        if role not in _ARCHIVABLE_ROLES:
+            continue
+        text = _extract_text(msg)
+        if text is None:
+            continue
+        out.append((msg, text, _fingerprint(str(role), text)))
+    return out
+
+
+def _overlap(confirmed: list[str], window: list[str]) -> int:
+    """How many of *window*'s leading messages are already archived.
+
+    The window's first message is looked up in the archived sequence and the
+    match extended forward. A match counts only if it runs to the end of one
+    side or the other: to the end of *confirmed* (the normal case — the window
+    continues where archiving stopped) or to the end of *window* (the whole
+    window is already archived, which is what consolidation dropping messages
+    out of later windows looks like). Anything shorter is a coincidental
+    interior hit.
+
+    Both acceptance conditions are end-anchored, so an accepted match at a
+    lower starting position is never the shorter one and taking the longest is
+    the same as taking the first — ``best`` only makes that explicit. What the
+    anchoring buys is that a run of identical replies resolves to the alignment
+    which also matches the unique turns around it, instead of to the first
+    coincidence. Indexed by fingerprint rather than scanned, because a saturated
+    window against a full fingerprint list is the common case, not the rare one.
+    """
+    if not confirmed or not window:
+        return 0
+    positions: dict[str, list[int]] = {}
+    for idx, fp in enumerate(confirmed):
+        positions.setdefault(fp, []).append(idx)
+    best = 0
+    for i in positions.get(window[0], ()):
+        k = 0
+        while i + k < len(confirmed) and k < len(window) and confirmed[i + k] == window[k]:
+            k += 1
+        if k > best and (i + k == len(confirmed) or k == len(window)):
+            best = k
+    return best
+
+
 class SessionArchiver:
     def __init__(
         self,
@@ -82,10 +196,19 @@ class SessionArchiver:
         self._embedder_factory = embedder_factory
         self._target_dims = target_dims
         self._redact_secrets = redact_secrets
-        # Conversation key (session_key, else id(messages_list)) → sessions.id
-        # and high-water message index.
+        # Conversation key (session_key, else id(messages_list)) → sessions.id,
+        # the ordered fingerprints of what has already been archived, and the
+        # roles of messages archived mid-turn whose fingerprints are not yet
+        # trustworthy. See the module docstring — the fingerprint list is what
+        # positions every archive pass.
         self._session_ids: dict[str | int, int] = {}
-        self._watermarks: dict[str | int, int] = {}
+        self._fingerprints: dict[str | int, list[str]] = {}
+        self._pending_roles: dict[str | int, list[str]] = {}
+        # sessions.id → next turn_index. Per session and monotonic, because
+        # ``chunks.turn_index`` is read back as transcript order
+        # (``session/browse.py``) and as a turn count (``status/tool.py``); the
+        # window index it used to hold ran 1..cap then repeated.
+        self._turn_counts: dict[int, int] = {}
         # session_id → first user message text (task context for embeddings).
         self._session_tasks: dict[int, str] = {}
         # Pending background embedding tasks — retained so asyncio
@@ -97,7 +220,11 @@ class SessionArchiver:
     # ------------------------------------------------------------------
 
     def archive_and_embed(
-        self, messages: list[dict[str, Any]], session_key: str | None = None
+        self,
+        messages: list[dict[str, Any]],
+        session_key: str | None = None,
+        *,
+        mid_turn: bool = False,
     ) -> tuple[list[int], asyncio.Task | None]:
         """Insert new chunks synchronously and schedule embedding.
 
@@ -105,8 +232,15 @@ class SessionArchiver:
         embedding step is scheduled as a background task on that loop).
         Returns ``(new_chunk_ids, embed_task_or_none)``. Callers don't
         need to await the task; tests can via :meth:`drain`.
+
+        ``mid_turn=True`` says the tail of *messages* was appended during this
+        turn and so has not been through ``get_history`` — its fingerprints are
+        not usable for the next pass. ``after_iteration`` is the only such
+        caller; see the module docstring.
         """
-        chunk_ids, texts, session_id = self._archive(messages, session_key)
+        chunk_ids, texts, session_id = self._archive(
+            messages, session_key, mid_turn=mid_turn
+        )
         if not chunk_ids:
             return [], None
         task_ctx = self._session_tasks.get(session_id) if session_id is not None else None
@@ -136,8 +270,16 @@ class SessionArchiver:
         Exposed for :class:`NanoHermesHook` so the reflect tool can
         attach reflections to the correct session without duplicating
         the key-based bookkeeping.
+
+        Returns ``None`` when this window is a new conversation under a reused
+        key, because the mapped id belongs to the *previous* one. Reporting it
+        would attach this turn's reflections to a session that is about to be
+        ended and purged.
         """
-        return self._session_ids.get(session_key or id(messages))
+        key = session_key or id(messages)
+        if self._is_new_conversation(key, messages):
+            return None
+        return self._session_ids.get(key)
 
     def ensure_session(
         self, messages: list[dict[str, Any]], session_key: str | None = None
@@ -163,43 +305,61 @@ class SessionArchiver:
         keys_to_remove = [k for k, v in self._session_ids.items() if v == session_id]
         for k in keys_to_remove:
             self._session_ids.pop(k, None)
-            self._watermarks.pop(k, None)
+            self._fingerprints.pop(k, None)
+            self._pending_roles.pop(k, None)
         self._session_tasks.pop(session_id, None)
+        self._turn_counts.pop(session_id, None)
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
     def _archive(
-        self, messages: list[dict[str, Any]], session_key: str | None = None
+        self,
+        messages: list[dict[str, Any]],
+        session_key: str | None = None,
+        *,
+        mid_turn: bool = False,
     ) -> tuple[list[int], list[str], int | None]:
         key = session_key or id(messages)
-        watermark = self._watermarks.get(key, 0)
-        # If the list got shorter since last time, this is a different
-        # conversation under the same key — a recycled id(), or /new in the
-        # same channel. Start a new session. (In-place compaction looks the
-        # same from here and also starts one; see the module docstring.)
-        if watermark > len(messages):
+        entries = _archivable(messages)
+        if not entries:
+            # A window with nothing archivable in it (system prompt only) says
+            # nothing about conversation identity — in particular it must not
+            # look like a zero overlap and start a session.
+            return [], [], self._session_ids.get(key)
+
+        fps = [e[2] for e in entries]
+        overlap = _overlap(self._fingerprints.get(key, []), fps)
+        if overlap == 0 and self._fingerprints.get(key):
+            # Nothing this window shares with what we stored: a different
+            # conversation under the same key — /new in the same channel, or a
+            # recycled id(). (In-place compaction looks the same from here and
+            # also starts a new session; see the module docstring.)
             old_sid = self._session_ids.pop(key, None)
             if old_sid is not None:
                 self._session_tasks.pop(old_sid, None)
-            watermark = 0
+                self._turn_counts.pop(old_sid, None)
+            self._fingerprints.pop(key, None)
+            self._pending_roles.pop(key, None)
+            start = 0
+        else:
+            start = self._adopt_pending(key, entries, overlap)
 
         session_id = self._session_ids.get(key)
         if session_id is None:
             session_id = self._start_session(key, session_key)
+        turn = self._turn_counts.get(session_id)
+        if turn is None:
+            turn = self._session_turn_count(session_id)
 
         new_ids: list[int] = []
         new_texts: list[str] = []
         now = time.time()
         cur = self._db.cursor()
-        for idx in range(watermark, len(messages)):
-            msg = messages[idx]
-            if msg.get("role") not in _ARCHIVABLE_ROLES:
-                continue
-            text = _extract_text(msg)
-            if text is None:
-                continue
+        confirmed = self._fingerprints.setdefault(key, [])
+        archived_roles: list[str] = []
+        for msg, text, fp in entries[start:]:
             # Redact secret-shaped strings so they neither land in chunks
             # nor reach the embedding provider over the wire. The same
             # masked text feeds both the INSERT and the background embed.
@@ -208,6 +368,7 @@ class SessionArchiver:
             # Capture first user message as task context for embeddings.
             if msg.get("role") == "user" and session_id not in self._session_tasks:
                 self._session_tasks[session_id] = text[:500]
+            turn += 1
             # Guarded per row, not per batch: a batch-level retry would
             # re-insert the rows that already landed before the failure. If
             # chunks_fts is corrupt the trigger would otherwise fail this
@@ -220,15 +381,95 @@ class SessionArchiver:
                     "INSERT INTO chunks "
                     "(session_id, turn_index, role, content, created_at) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (session_id, idx, msg["role"], text, now),
+                    (session_id, turn, msg["role"], text, now),
                 ),
             )
             new_ids.append(int(cur.lastrowid))
             new_texts.append(text)
-        self._watermarks[key] = len(messages)
+            archived_roles.append(str(msg["role"]))
+            if not mid_turn:
+                confirmed.append(fp)
+        self._turn_counts[session_id] = turn
+        if mid_turn:
+            # Appended during this turn, so these fingerprints are of the raw
+            # form; the replayed form can differ (sanitizer, time prefix). Only
+            # the roles are recorded, and the next pass adopts the real
+            # fingerprints off the window.
+            self._pending_roles[key] = archived_roles
+        elif archived_roles:
+            self._pending_roles.pop(key, None)
+        del confirmed[:-_MAX_FINGERPRINTS]
         if new_ids:
             self._db.commit()
         return new_ids, new_texts, session_id
+
+    def _adopt_pending(
+        self,
+        key: str | int,
+        entries: list[tuple[dict[str, Any], str, str]],
+        overlap: int,
+    ) -> int:
+        """Return the index to start archiving from, past any pending messages.
+
+        Messages archived mid-turn sit just past the overlap in this window,
+        now in replayed form. They are matched by role only — their stored
+        fingerprints are of the raw form and would not compare equal — and
+        their replayed fingerprints are adopted so later overlaps can match
+        them. Role matching stops at the first mismatch, which is what keeps a
+        message the sanitizer dropped entirely from shifting the run and
+        swallowing a genuinely new message.
+        """
+        pending = self._pending_roles.get(key)
+        confirmed = self._fingerprints.setdefault(key, [])
+        start = overlap
+        if pending:
+            for role in pending:
+                if start >= len(entries) or entries[start][0].get("role") != role:
+                    break
+                confirmed.append(entries[start][2])
+                start += 1
+            self._pending_roles.pop(key, None)
+        return start
+
+    def _session_turn_count(self, session_id: int) -> int:
+        """Highest ``turn_index`` already stored for *session_id*.
+
+        Only read when the counter is cold (first pass of a process against a
+        session that already has rows), so the numbering stays monotonic across
+        a restart instead of colliding from 1 again.
+        """
+        try:
+            row = self._db.execute(
+                "SELECT COALESCE(MAX(turn_index), 0) FROM chunks WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            log.exception("failed to read turn_index for session %d", session_id)
+            return 0
+        return int(row[0]) if row else 0
+
+    def _is_new_conversation(
+        self, key: str | int, messages: list[dict[str, Any]]
+    ) -> bool:
+        """True when *messages* shares nothing with what this key has archived.
+
+        Read-only mirror of the branch in :meth:`_archive`, for
+        :meth:`current_session_id`.
+        """
+        confirmed = self._fingerprints.get(key)
+        if not confirmed:
+            return False
+        entries = _archivable(messages)
+        if not entries:
+            return False
+        if _overlap(confirmed, [e[2] for e in entries]) > 0:
+            return False
+        # A pending mid-turn message is adopted by role, not fingerprint, so a
+        # window holding only that message legitimately has zero overlap.
+        pending = self._pending_roles.get(key)
+        if pending and [e[0].get("role") for e in entries[: len(pending)]] == pending:
+            return False
+        return True
 
     def _start_session(self, key: str | int, session_key: str | None = None) -> int:
         cur = self._db.cursor()

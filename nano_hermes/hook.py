@@ -361,6 +361,14 @@ class NanoHermesHook(AgentHook):
             self._purge_task = asyncio.create_task(self._background_purge())
             self._curator_task = asyncio.create_task(self._background_curator())
 
+        # Archive here, not only in after_iteration: this window has been
+        # through get_history, so its messages are in the form the archiver can
+        # fingerprint and re-locate next turn. See session/archiver.py.
+        try:
+            self.archiver.archive_and_embed(context.messages, context.session_key)
+        except Exception:
+            log.exception("nano-hermes archive failed")
+
         # Keep current_session_id in sync with archiver (lazy-bootstrap on first call).
         self._sync_session(context.messages, context.session_key)
 
@@ -476,7 +484,12 @@ class NanoHermesHook(AgentHook):
             self._skill_tracker.record_error()
 
         try:
-            self.archiver.archive_and_embed(context.messages, context.session_key)
+            # mid_turn: the reply was appended after get_history ran, so its
+            # text is the raw form. Archived now so the last message of a
+            # session is never lost, but fingerprinted only next turn.
+            self.archiver.archive_and_embed(
+                context.messages, context.session_key, mid_turn=True
+            )
         except Exception:
             log.exception("nano-hermes archive failed")
 
@@ -516,9 +529,14 @@ class NanoHermesHook(AgentHook):
         # archiver._archive applies to its watermarks). The turn that arrived
         # in the compacting iteration goes uncounted — the cadence slips one
         # turn per consolidation, which is fine for a heuristic nudge.
+        # Pop before insert so a live conversation moves to the end: the dict is
+        # insertion-ordered, so without this the eviction below drops the
+        # oldest-*added* key even when it is the busiest one, and that
+        # conversation's nudge cadence restarts from zero.
+        self._user_msg_counts.pop(key, None)
         self._user_msg_counts[key] = user_msg_count
         while len(self._user_msg_counts) > _MAX_TRACKED_CONVERSATIONS:
-            # Insertion-ordered: drop the least recently added conversation.
+            # Least recently counted conversation.
             self._user_msg_counts.pop(next(iter(self._user_msg_counts)))
 
         # RMM: bump view/cite counters for reflections injected this iteration

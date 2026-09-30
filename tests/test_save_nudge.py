@@ -227,6 +227,38 @@ class TestNudgeReachesTheHookPath:
         # chat on every turn, because the long chat's count replays as new.
         assert sum(b_hits) <= 2, b_hits
 
+    async def test_busiest_conversation_is_not_evicted_by_idle_ones(self, tmp_path):
+        """The counter dict is insertion-ordered and capped at 32 keys.
+
+        Dropping the oldest-*added* key evicts the conversation that has been
+        talking the longest. Its next turn finds no entry, re-hydrates, and
+        resets the nudge cadence — so the symptom is a repeat hydration, not a
+        missing key (hydration puts the key straight back). Only the least
+        recently *counted* key may go, the same rule
+        ``SessionCoordinator.sync`` applies to its own boundary map.
+        """
+        hook = _make_hook(tmp_path, interval=5)
+        hydrations = []
+        coord = hook._reflection_coord
+        real = coord.hydrate_save_counter_from_history
+
+        def spy(**kwargs):
+            hydrations.append(kwargs)
+            return real(**kwargs)
+
+        coord.hydrate_save_counter_from_history = spy
+        busy = []
+        await self._turns(hook, 1, msgs=busy, label="busy", session_key="chan:busy")
+        for i in range(40):  # far past the 32-key cap
+            await self._turns(
+                hook, 1, msgs=[], label=f"idle{i}", session_key=f"chan:idle{i}"
+            )
+            await self._turns(
+                hook, 1, msgs=busy, label="busy", session_key="chan:busy"
+            )
+        # One hydration per conversation and no more: 40 idle plus the busy one.
+        assert len(hydrations) == 41, len(hydrations)
+
     async def test_recycled_list_address_does_not_replay_history(self, tmp_path):
         """id(messages) can collide with a dead conversation's entry.
 

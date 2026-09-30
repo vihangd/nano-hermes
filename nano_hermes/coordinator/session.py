@@ -98,10 +98,15 @@ class SessionCoordinator:
             completed_session_id = prev_session
 
         if existing is not None and session_key:
+            # Pop before insert so a re-synced key moves to the end: dict order
+            # is insertion order, and without this the eviction below would
+            # drop the oldest-*inserted* key even if it is the busiest one,
+            # swallowing a genuine boundary and leaving ended_at NULL forever.
+            self._sessions_by_key.pop(session_key, None)
             self._sessions_by_key[session_key] = existing
             while len(self._sessions_by_key) > _MAX_TRACKED_CONVERSATIONS:
-                # Insertion-ordered: drop the least recently added conversation.
-                # Losing an entry only costs one missed boundary.
+                # Least recently synced conversation. Losing an entry only
+                # costs one missed boundary.
                 self._sessions_by_key.pop(next(iter(self._sessions_by_key)))
         self.current_session_id = existing
         return existing, completed_session_id
