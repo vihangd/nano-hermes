@@ -51,11 +51,22 @@ still continues the old session. Narrow, and there is nothing in
 ``AgentHookContext`` to break the tie; revisit if upstream ever exposes a
 per-message or per-session-instance id.
 
-The one message shape that cannot be fingerprinted from the window is the reply
-appended *during* the turn, which ``after_iteration`` archives before any
-``get_history`` has rewritten it. Those are recorded as *pending* by role only;
-the next pass skips them by role and adopts their replayed fingerprints. Losing
-that would mean losing the last reply of every session.
+Two message shapes cannot be fingerprinted from the window. The first is the
+reply appended *during* the turn, which ``after_iteration`` archives before any
+``get_history`` has rewritten it. The second is the window's **last entry on
+every pass**: ``ContextBuilder.build_messages`` merges the current message plus
+the runtime-context block into it when the roles line up (``context.py:230-255``
+— and they do, because nanobot persists the user message before the turn), so
+its live text is ``"[Message Time: t]\nu1\n\nu1\n\n[Runtime Context …]"``
+against a replayed ``"[Message Time: t]\nu1"``. Confirming that fingerprint
+made every single turn take the new-conversation branch: one ``sessions`` row
+and one trajectory per turn, the whole ``session_key`` scheme inert.
+
+Both shapes are recorded as *pending* by role only; the next pass skips them by
+role and adopts their replayed fingerprints. Losing that would mean losing the
+last reply of every session. The live entry's *text* is cleaned before the
+insert (``_clean_live_tail``) so the retrieval corpus doesn't carry a metadata
+block per turn — cleaning cannot rescue the fingerprint, only the corpus.
 
 ``session_key`` is conversation identity, not session-instance identity, so a
 zero overlap under an unchanged key is what opens a new ``sessions`` row. It
@@ -72,7 +83,7 @@ import hashlib
 import logging
 import sqlite3
 import time
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import numpy as np
 
@@ -89,6 +100,52 @@ _ARCHIVABLE_ROLES = frozenset({"user", "assistant", "tool"})
 # current window matters, so this needs to exceed the largest plausible
 # ``loop._max_messages`` (120 by default) and nothing more.
 _MAX_FINGERPRINTS = 512
+
+# How many conversations to keep alignment state for. Matches the hook's and the
+# session coordinator's cap on the same kind of per-conversation state.
+_MAX_TRACKED_CONVERSATIONS = 32
+
+# Opening tag of the runtime-context block ``build_messages`` merges into the
+# window's last message (``context.py`` ``_RUNTIME_CONTEXT_TAG``). Matched on the
+# prefix so upstream wording changes after it don't matter, and duplicated
+# rather than imported from ``coordinator/goal.py`` to keep this module out of
+# the coordinator import cycle.
+_RUNTIME_SENTINEL = "[Runtime Context"
+
+
+def _clean_live_tail(text: str, *, merged: bool = False) -> str:
+    """Strip what ``build_messages`` merged into the window's last message.
+
+    That entry is live, not replayed: nanobot persists the user message before
+    the turn (``loop._persist_user_message_early``) and then merges the same
+    text plus the runtime-context block into the last history entry. Archiving
+    it verbatim puts a per-turn metadata block (time, cwd, channel) and a
+    duplicated prompt into every user chunk — that is, into FTS5 and into the
+    embedder. The fingerprint is deliberately *not* taken from the cleaned
+    text: no amount of cleaning makes the live form equal the replayed form,
+    which is why that entry is pending-by-role rather than confirmed.
+    """
+    cut = text.find(_RUNTIME_SENTINEL)
+    if cut > 0:
+        text = text[:cut].rstrip()
+    if not merged:
+        # Only the merged tip can carry the duplicated prompt, and only it may
+        # be split this way: a replayed message can legitimately end with a
+        # repeated paragraph. nanobot HEAD reaches here with no runtime block at
+        # all (it moved to ``runtime_context_blocks``), so the cut above is not a
+        # reliable stand-in for "this message was merged".
+        return text
+    # The merge appended the prompt that ``_persist_user_message_early`` had
+    # already written into history: ``"[Message Time: t]\nu1" + "\n\n" + "u1"``.
+    # Leftmost split wins, so a prompt that itself contains a blank line is
+    # de-duplicated whole rather than one paragraph at a time.
+    at = text.find("\n\n")
+    while at != -1:
+        head, tail = text[:at], text[at + 2:]
+        if tail and head.endswith(tail):
+            return head
+        at = text.find("\n\n", at + 1)
+    return text
 
 
 def _fingerprint(role: str, text: str) -> str:
@@ -190,6 +247,86 @@ def _overlap(confirmed: list[str], window: list[str]) -> int:
     return best
 
 
+class _Alignment(NamedTuple):
+    start: int            # first index of *entries* not yet archived
+    adopted: list[int]    # indices whose replayed fingerprint to confirm
+    keep: list[tuple[str, str]]   # pending items still unreplayed
+    new_conversation: bool
+
+
+def _align(
+    confirmed: list[str],
+    pending: list[tuple[str, str]] | None,
+    entries: list[tuple[dict[str, Any], str, str]],
+    *,
+    mid_turn: bool = False,
+) -> _Alignment:
+    """Locate *entries* against what this conversation has already archived.
+
+    ``confirmed`` are fingerprints of messages stored in their replayed form —
+    the ones a window can be matched against directly. ``pending`` are
+    ``(role, fingerprint)`` pairs for messages stored in a form the window will
+    not repeat: this turn's raw reply, and the live merged tip (see the module
+    docstring). Each pending item resolves one of three ways:
+
+    * it matches by fingerprint or by role, and this window is one a later
+      window will repeat (a replayed window, and not its final entry) — adopt
+      the fingerprint; the message is confirmed from here on.
+    * it matches, but this window won't be repeated: the same list handed to
+      another pass (there are several per turn: ``before_iteration`` per
+      iteration, ``after_iteration``, plus
+      ``current_session_id``/``ensure_session``), or the live final entry.
+      Already archived, so skip it — and leave it pending.
+    * it matches neither, so the run stops. That keeps a message the sanitizer dropped
+      entirely from shifting the rest of the run and swallowing a genuinely new
+      message. Known cost: if nanobot drops a pending message during
+      persistence instead of rewriting it (an orphan tool result,
+      ``loop.py:1647``), the rest no longer lines up and those messages are
+      archived a second time. One duplicate row on a path that logs a warning
+      upstream, versus swallowing a real message.
+
+    Pure, so :meth:`_archive` and :meth:`_is_new_conversation` cannot disagree
+    about the same window.
+    """
+    overlap = _overlap(confirmed, [e[2] for e in entries])
+    start = overlap
+    last = len(entries) - 1
+    adopted: list[int] = []
+    keep: list[tuple[str, str]] = []
+    for role, raw_fp in pending or ():
+        if start > last:
+            break
+        if entries[start][2] != raw_fp and (
+            start == last or entries[start][0].get("role") != role
+        ):
+            # The final entry of a window is always freshly appended — the live
+            # merged message on an iteration-0 pass, this turn's raw reply on a
+            # mid-turn one — never the replay of a pending message. Consuming it
+            # by role is how a new conversation that repeats an old prompt gets
+            # swallowed.
+            break
+        if mid_turn or start == last:
+            # This pass is looking at the same unreplayed form again: already
+            # archived, but its fingerprint still isn't one a later window will
+            # repeat, so it stays pending.
+            keep.append((role, raw_fp))
+        else:
+            adopted.append(start)
+        start += 1
+    if start == 0 and (confirmed or (pending and not mid_turn)):
+        # This window shares nothing with what the key has archived — neither a
+        # fingerprint overlap nor the pending run (which is tried from index 0
+        # too, because the window can slide until it *starts* at a message that
+        # is still pending). So it is a different conversation under the same
+        # key: /new in the same channel, a recycled id(), or a daily cron job
+        # repeating yesterday's prompt with a new ``[Message Time:]``. In-place
+        # compaction looks the same from here and also starts a new session;
+        # see the module docstring. A mid-turn pass is never judged on pending
+        # alone: it legitimately holds the raw list.
+        return _Alignment(0, [], [], True)
+    return _Alignment(start, adopted, keep, False)
+
+
 class SessionArchiver:
     def __init__(
         self,
@@ -210,7 +347,9 @@ class SessionArchiver:
         # positions every archive pass.
         self._session_ids: dict[str | int, int] = {}
         self._fingerprints: dict[str | int, list[str]] = {}
-        self._pending_roles: dict[str | int, list[str]] = {}
+        # (role, fingerprint) per message archived from a form the window
+        # will not repeat — see _align.
+        self._pending: dict[str | int, list[tuple[str, str]]] = {}
         # sessions.id → next turn_index. Per session and monotonic, because
         # ``chunks.turn_index`` is read back as transcript order
         # (``session/browse.py``) and as a turn count (``status/tool.py``); the
@@ -313,7 +452,7 @@ class SessionArchiver:
         for k in keys_to_remove:
             self._session_ids.pop(k, None)
             self._fingerprints.pop(k, None)
-            self._pending_roles.pop(k, None)
+            self._pending.pop(k, None)
         self._session_tasks.pop(session_id, None)
         self._turn_counts.pop(session_id, None)
 
@@ -336,9 +475,14 @@ class SessionArchiver:
             # look like a zero overlap and start a session.
             return [], [], self._session_ids.get(key)
 
-        fps = [e[2] for e in entries]
-        overlap = _overlap(self._fingerprints.get(key, []), fps)
-        if overlap == 0 and self._fingerprints.get(key):
+        aligned = _align(
+            self._fingerprints.get(key, []),
+            self._pending.get(key),
+            entries,
+            mid_turn=mid_turn,
+        )
+        start = aligned.start
+        if aligned.new_conversation:
             # Nothing this window shares with what we stored: a different
             # conversation under the same key — /new in the same channel, or a
             # recycled id(). (In-place compaction looks the same from here and
@@ -348,10 +492,15 @@ class SessionArchiver:
                 self._session_tasks.pop(old_sid, None)
                 self._turn_counts.pop(old_sid, None)
             self._fingerprints.pop(key, None)
-            self._pending_roles.pop(key, None)
+            self._pending.pop(key, None)
             start = 0
-        else:
-            start = self._adopt_pending(key, entries, overlap, confirm=not mid_turn)
+        elif not mid_turn and aligned.adopted:
+            # This window replayed those pending messages, so their real
+            # fingerprints are finally knowable — adopt them. A mid-turn pass
+            # must not: that list is the raw one the runner is still appending
+            # to, and its tail will be rewritten before it comes back.
+            confirmed_fps = self._fingerprints.setdefault(key, [])
+            confirmed_fps.extend(entries[i][2] for i in aligned.adopted)
 
         session_id = self._session_ids.get(key)
         if session_id is None:
@@ -365,8 +514,15 @@ class SessionArchiver:
         now = time.time()
         cur = self._db.cursor()
         confirmed = self._fingerprints.setdefault(key, [])
-        archived_roles: list[str] = []
-        for msg, text, fp in entries[start:]:
+        archived_roles: list[tuple[str, str]] = []
+        last_index = len(entries) - 1
+        for index, (msg, text, fp) in enumerate(entries[start:], start=start):
+            # The window's last entry is the live merged one on a non-mid-turn
+            # pass: its fingerprint must not be confirmed. Cleaning runs over
+            # every entry because a mid-turn pass can be the one that first sees
+            # it, and it is a no-op on a replayed message.
+            live_tail = not mid_turn and index == last_index
+            text = _clean_live_tail(text, merged=live_tail)
             # Redact secret-shaped strings so they neither land in chunks
             # nor reach the embedding provider over the wire. The same
             # masked text feeds both the INSERT and the background embed.
@@ -393,72 +549,56 @@ class SessionArchiver:
             )
             new_ids.append(int(cur.lastrowid))
             new_texts.append(text)
-            archived_roles.append(str(msg["role"]))
-            if not mid_turn:
+            archived_roles.append((str(msg["role"]), fp))
+            if not mid_turn and not live_tail:
                 confirmed.append(fp)
         self._turn_counts[session_id] = turn
+        # What stays pending: the items this window did not replay, plus
+        # everything just archived in a form the next window will not repeat —
+        # all of it on a mid-turn pass, and the live merged tip otherwise.
+        pending = list(aligned.keep)
         if mid_turn:
-            # Appended during this turn, so these fingerprints are of the raw
-            # form; the replayed form can differ (sanitizer, time prefix). Only
-            # the roles are recorded, and the next pass adopts the real
-            # fingerprints off the window. Accumulated, not replaced: a
-            # tool-using turn makes several mid-turn passes over the same
-            # growing list (nanobot's runner mutates it in place and fires
-            # ``before_iteration`` again), and every one of those messages is
-            # still pending until a real window replays it.
-            self._pending_roles[key] = (
-                list(self._pending_roles.get(key, ())) + archived_roles
+            pending += archived_roles
+        elif start <= last_index:
+            pending.append(
+                (str(entries[last_index][0]["role"]), entries[last_index][2])
             )
-        elif archived_roles:
-            self._pending_roles.pop(key, None)
+        if pending:
+            self._pending[key] = pending
+        else:
+            self._pending.pop(key, None)
         del confirmed[:-_MAX_FINGERPRINTS]
+        self._evict_idle_conversations(key)
         if new_ids:
             self._db.commit()
         return new_ids, new_texts, session_id
 
-    def _adopt_pending(
-        self,
-        key: str | int,
-        entries: list[tuple[dict[str, Any], str, str]],
-        overlap: int,
-        *,
-        confirm: bool = True,
-    ) -> int:
-        """Return the index to start archiving from, past any pending messages.
+    def _evict_idle_conversations(self, key: str | int) -> None:
+        """Bound per-conversation state to the busiest _MAX_TRACKED_CONVERSATIONS.
 
-        Messages archived mid-turn sit just past the overlap in this window,
-        now in replayed form. They are matched by role only — their stored
-        fingerprints are of the raw form and would not compare equal — and
-        their replayed fingerprints are adopted so later overlaps can match
-        them. Role matching stops at the first mismatch, which is what keeps a
-        message the sanitizer dropped entirely from shifting the run and
-        swallowing a genuinely new message.
+        Nothing else releases it: ``prune_session_by_id`` runs at a boundary, by
+        which point :meth:`_archive` has already popped and remapped the key, so
+        it matches nothing — and a channel that is simply never spoken to again
+        crosses no boundary at all. Without this a long-lived process serving
+        many channels keeps a fingerprint list per channel forever.
 
-        Known cost of stopping at the first mismatch: if nanobot drops a
-        mid-turn message during persistence instead of rewriting it (an orphan
-        tool result, ``loop.py:1647``), the rest of the run no longer lines up
-        and those messages are archived a second time. One duplicate row on a
-        path that logs a warning upstream, versus swallowing a real message —
-        the trade goes this way deliberately.
-
-        ``confirm=False`` on a mid-turn pass: that list is the raw one the
-        runner is still appending to, so its fingerprints must not be trusted —
-        skip past the pending messages without adopting them, and leave them
-        pending for the next real window.
+        Everything goes together, session id included: dropping the
+        fingerprints alone would leave the next window aligning against an empty
+        list inside a live session and re-archiving it as duplicates. Dropping
+        the id too makes that window open a fresh session instead — one bogus
+        boundary for a conversation that has been idle for 32 others. The
+        session-id-keyed state goes with it, since that is the last reference to
+        the id and nothing else would ever release it.
         """
-        pending = self._pending_roles.get(key)
-        confirmed = self._fingerprints.setdefault(key, [])
-        start = overlap
-        if pending:
-            for role in pending:
-                if start >= len(entries) or entries[start][0].get("role") != role:
-                    break
-                if confirm:
-                    confirmed.append(entries[start][2])
-                start += 1
-            if confirm:
-                self._pending_roles.pop(key, None)
-        return start
+        self._fingerprints[key] = self._fingerprints.pop(key)
+        while len(self._fingerprints) > _MAX_TRACKED_CONVERSATIONS:
+            idle = next(iter(self._fingerprints))
+            self._fingerprints.pop(idle, None)
+            self._pending.pop(idle, None)
+            idle_sid = self._session_ids.pop(idle, None)
+            if idle_sid is not None:
+                self._session_tasks.pop(idle_sid, None)
+                self._turn_counts.pop(idle_sid, None)
 
     def _session_turn_count(self, session_id: int) -> int:
         """Highest ``turn_index`` already stored for *session_id*.
@@ -482,23 +622,17 @@ class SessionArchiver:
     ) -> bool:
         """True when *messages* shares nothing with what this key has archived.
 
-        Read-only mirror of the branch in :meth:`_archive`, for
-        :meth:`current_session_id`.
+        Read-only mirror of the branch in :meth:`_archive` — the same
+        :func:`_align` call, so the two cannot drift apart.
         """
-        confirmed = self._fingerprints.get(key)
-        if not confirmed:
-            return False
         entries = _archivable(messages)
         if not entries:
             return False
-        if _overlap(confirmed, [e[2] for e in entries]) > 0:
-            return False
-        # A pending mid-turn message is adopted by role, not fingerprint, so a
-        # window holding only that message legitimately has zero overlap.
-        pending = self._pending_roles.get(key)
-        if pending and [e[0].get("role") for e in entries[: len(pending)]] == pending:
-            return False
-        return True
+        return _align(
+            self._fingerprints.get(key, []),
+            self._pending.get(key),
+            entries,
+        ).new_conversation
 
     def _start_session(self, key: str | int, session_key: str | None = None) -> int:
         cur = self._db.cursor()

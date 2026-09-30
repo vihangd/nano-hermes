@@ -51,15 +51,18 @@ class NanoStatusTool(Tool):
         hook = self._hook
         session_id = hook.current_session_id
 
-        # Turn count for the current session
+        # Archived-message count for the current session. ``turn_index``
+        # numbers messages, not turns (session/archiver.py), and starts at 1, so
+        # the max *is* the count — the old ``+ 1`` reported one message too many
+        # and called it turns.
         if session_id is not None:
             row = hook.db.execute(
-                "SELECT MAX(turn_index) FROM chunks WHERE session_id = ?",
+                "SELECT COALESCE(MAX(turn_index), 0) FROM chunks WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
-            turns = (row[0] or 0) + 1 if row and row[0] is not None else 0
+            archived = int(row[0]) if row else 0
         else:
-            turns = 0
+            archived = 0
 
         # Reflection count for the current session
         if session_id is not None:
@@ -104,7 +107,7 @@ class NanoStatusTool(Tool):
 
         return (
             f"session: {session_label}\n"
-            f"turns: {turns}\n"
+            f"messages: {archived}\n"
             f"salience: {hook._salience_score:.1f} (nudge pending: {nudge})\n"
             f"reflections: {ref_count}\n"
             f"skills: {skill_counts['draft']} draft, "

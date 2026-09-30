@@ -333,6 +333,34 @@ class TestStaleSessionIdAfterNew:
         assert archiver.ensure_session(fresh, "chan:1") != first
 
 
+class TestPerConversationStateIsBounded:
+    def test_idle_conversations_are_evicted(self, archiver_factory):
+        """Alignment state is capped per conversation, not per process lifetime.
+
+        ``prune_session_by_id`` cannot do it: at a boundary ``_archive`` has
+        already remapped the key, so it matches nothing, and an idle channel
+        crosses no boundary at all. A gateway serving hundreds of channels would
+        otherwise hold a fingerprint list for every one of them forever.
+        """
+        from nano_hermes.session.archiver import _MAX_TRACKED_CONVERSATIONS
+
+        archiver, _db = archiver_factory()
+        keys = [f"chan:{i}" for i in range(_MAX_TRACKED_CONVERSATIONS + 8)]
+        for key in keys:
+            archiver.ensure_session([{"role": "user", "content": f"hi {key}"}], key)
+        assert len(archiver._fingerprints) == _MAX_TRACKED_CONVERSATIONS
+        assert set(archiver._fingerprints) == set(keys[-_MAX_TRACKED_CONVERSATIONS:])
+        # Evicted together, so no window ever aligns against an empty list
+        # inside a live session.
+        assert set(archiver._pending) <= set(archiver._fingerprints)
+        assert set(archiver._session_ids) <= set(archiver._fingerprints)
+        # The session-id-keyed state goes too: the popped id was its last
+        # reference, so nothing else would ever release it.
+        live_sids = set(archiver._session_ids.values())
+        assert set(archiver._session_tasks) <= live_sids
+        assert set(archiver._turn_counts) <= live_sids
+
+
 def _history(session, cap: int, include_timestamps: bool) -> list[dict]:
     """``get_history`` kwargs, tolerating upstream signature drift.
 
@@ -348,6 +376,45 @@ def _history(session, cap: int, include_timestamps: bool) -> list[dict]:
     if "include_timestamps" in inspect.signature(session.get_history).parameters:
         kwargs["include_timestamps"] = include_timestamps
     return session.get_history(**kwargs)
+
+
+def _window(
+    loop,
+    session,
+    cap: int,
+    current_message: str,
+    role: str = "user",
+    include_timestamps: bool = True,
+) -> list[dict]:
+    """The window nanobot actually hands the hook, built by the real upstream code.
+
+    Production is ``ContextBuilder.build_messages(history=get_history(...),
+    current_message=...)`` — not ``get_history`` on its own. The difference is
+    load-bearing: the loop persists the user message *before* the turn
+    (``_persist_user_message_early``), so the last history entry already has the
+    same role, and ``build_messages`` merges the current message plus the
+    ``[Runtime Context …]`` block into it (``context.py:230-255``). The window's
+    last message therefore never equals the form the next turn replays. Feeding
+    fixtures straight from ``get_history`` hid that for three rounds; going
+    through the real builder means the fixture can't drift from upstream without
+    a test failing.
+    """
+    import inspect
+
+    history = [dict(m) for m in _history(session, cap, include_timestamps)]
+    kwargs = {
+        "history": history,
+        "current_message": current_message,
+        "current_role": role,
+        "channel": "cli",
+        # Dropped on nanobot HEAD. Filtered rather than removed so the
+        # against-HEAD compat run fails on a real break, not a signature change.
+        "chat_id": "1",
+    }
+    accepted = inspect.signature(loop.context.build_messages).parameters
+    return loop.context.build_messages(
+        **{k: v for k, v in kwargs.items() if k in accepted}
+    )
 
 
 class TestSaturatedWindowThroughTheRealHook:
@@ -398,9 +465,7 @@ class TestSaturatedWindowThroughTheRealHook:
             for t in range(turns):
                 session.add_message("user", f"u{t}")
                 emitted += 1
-                msgs = [{"role": "system", "content": "sys"}] + _history(
-                    session, cap, True
-                )
+                msgs = _window(loop, session, cap, f"u{t}")
                 await hook.before_iteration(
                     AgentHookContext(messages=msgs, iteration=0, session_key="chan:1")
                 )
@@ -422,6 +487,13 @@ class TestSaturatedWindowThroughTheRealHook:
         # from the window index it ran 1..cap and then repeated.
         turn_indexes = [r[0] for r in db.execute("SELECT turn_index FROM chunks ORDER BY id")]
         assert turn_indexes == list(range(1, emitted + 1))
+        # The live merged tip is cleaned before the insert: the corpus that FTS5
+        # and the embedder see must not carry a runtime-metadata block per turn,
+        # nor the prompt twice.
+        contents = [r[0] for r in db.execute("SELECT content FROM chunks ORDER BY id")]
+        assert [c for c in contents if "[Runtime Context" in c] == []
+        assert contents[0].endswith("u0")
+        assert contents[0].count("u0") == 1
 
     def test_user_turn_is_archived_before_the_model_answers(self, loop):
         """``before_iteration`` archives, not just ``after_iteration``.
@@ -479,9 +551,7 @@ class TestSaturatedWindowThroughTheRealHook:
             for t in range(turns):
                 session.add_message("user", f"u{t}")
                 expected.append(f"u{t}")
-                msgs = [{"role": "system", "content": "sys"}] + _history(
-                    session, cap, True
-                )
+                msgs = _window(loop, session, cap, f"u{t}")
                 appended: list[tuple[str, str]] = []
                 # Iteration 0: fresh window, then the tool call and its result.
                 # The reply carries a line the replay sanitizer deletes.
@@ -538,8 +608,8 @@ class TestSaturatedWindowThroughTheRealHook:
             for t in range(turns):
                 session.add_message("user", f"u{t}")
                 emitted += 1
-                msgs = [{"role": "system", "content": "sys"}] + _history(
-                    session, cap, include_timestamps
+                msgs = _window(
+                    loop, session, cap, f"u{t}", include_timestamps=include_timestamps
                 )
                 await hook.before_iteration(
                     AgentHookContext(messages=msgs, iteration=0, session_key="chan:1")

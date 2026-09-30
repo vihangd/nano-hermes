@@ -38,7 +38,9 @@ class TestNanoStatus:
         tool = loop.tools.get("nano_status")
         out = await tool.execute()
         assert "session:" in out
-        assert "turns:" in out
+        # One archived message (the user turn), not two: turn_index numbers
+        # messages and starts at 1, so the max is the count.
+        assert "messages: 1\n" in out
         assert "salience:" in out
         assert "reflections:" in out
         assert "skills:" in out

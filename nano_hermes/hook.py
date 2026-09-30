@@ -149,6 +149,9 @@ class NanoHermesHook(AgentHook):
         # Not keyed by session id — that changes on every compaction. An
         # absent key means "not yet hydrated".
         self._user_msg_counts: dict[str | int, int] = {}
+        # Conversations whose save-cadence counter was hydrated in the current
+        # turn's iteration 0; see after_iteration.
+        self._hydrated_keys: set[str | int] = set()
 
     # ------------------------------------------------------------------
     # Public API surface (unchanged for external callers)
@@ -401,6 +404,11 @@ class NanoHermesHook(AgentHook):
                 self._reflection_coord.hydrate_save_counter_from_history(
                     recent_user_turns=recent_user_turns,
                 )
+                # Hydration already counted this turn's user message along with
+                # the rest of the window, so after_iteration must not count it
+                # again. Per key rather than a flag: two conversations can have
+                # turns in flight at once.
+                self._hydrated_keys.add(conv_key)
 
         # Inject a matching past trajectory on iteration 0 (opt-in via config).
         if context.iteration == 0 and self.config.trajectory.inject_context:
@@ -518,25 +526,27 @@ class NanoHermesHook(AgentHook):
             user_text=current_user_text,
         )
 
-        # Memory-save cadence: count fresh user turns by user-message count
-        # growth, not text equality — two identical "go" messages should
-        # advance the counter by two, not one.
-        user_msg_count = sum(1 for m in msgs if m.get("role") == "user")
+        # Memory-save cadence: one fresh user turn per turn, counted on
+        # iteration 0 — which fires exactly once per turn, and only for a turn
+        # that carries a user message (the subagent path has none).
+        #
+        # Not a user-message-count delta against the window: ``context.messages``
+        # is a bounded sliding window, so that population saturates at the cap
+        # and every later delta is 0. The cadence froze there — measured at five
+        # calls to ``note_user_turn`` in 24 turns, then never again, so the nudge
+        # became unreachable past the cap.
         key = context.session_key or id(msgs)
-        last_count = self._user_msg_counts.get(key, user_msg_count)
-        # Clamped to one: nanobot appends a single user message per turn, so a
-        # larger delta means the key was stale (id(messages) can be recycled
-        # onto a dead conversation's entry, which skips hydration). Replaying
-        # a whole resumed transcript through note_user_turn would arm the
-        # nudge instantly — the store below then self-heals the count.
-        for _ in range(min(user_msg_count - last_count, 1)):
+        if (
+            context.iteration == 0
+            and key not in self._hydrated_keys
+            and any(m.get("role") == "user" for m in msgs)
+        ):
             self._reflection_coord.note_user_turn()
-        # Stored unconditionally, so in-place compaction re-anchors the count
-        # instead of leaving a stale high-water mark that makes every later
-        # delta negative and retires the cadence for good (same rule
-        # archiver._archive applies to its watermarks). The turn that arrived
-        # in the compacting iteration goes uncounted — the cadence slips one
-        # turn per consolidation, which is fine for a heuristic nudge.
+        self._hydrated_keys.discard(key)
+        # The stored count is only a "this conversation has been hydrated"
+        # marker plus LRU position for the eviction below; the cadence itself no
+        # longer reads it.
+        user_msg_count = sum(1 for m in msgs if m.get("role") == "user")
         # Pop before insert so a live conversation moves to the end: the dict is
         # insertion-ordered, so without this the eviction below drops the
         # oldest-*added* key even when it is the busiest one, and that

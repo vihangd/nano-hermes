@@ -92,33 +92,43 @@ class TestHydrationFromHistory:
 
 class TestHookIntegration:
     async def test_repeated_identical_user_messages_count_as_separate_turns(self, tmp_path):
-        """Two `go` messages in a row should advance the counter by 2."""
+        """Three `go` turns in a row should advance the counter three times.
+
+        Each turn is its own ``iteration=0`` — the counter is per *turn*, and a
+        turn's later iterations must not advance it (a tool-using turn fires
+        ``after_iteration`` once per iteration). Identical text must not collapse
+        the turns either, which is why the cadence never compared text.
+        """
         from nanobot.agent.hook import AgentHookContext  # noqa: PLC0415
         hook = _make_hook(tmp_path, interval=3)
         coord = hook._reflection_coord
-        # Iteration 0 — single "go" user turn. Hydration sets counter = 0
-        # (one user turn ≤ interval-1 = 2).
         msgs = [{"role": "user", "content": "go"}]
-        ctx = AgentHookContext(iteration=0, messages=msgs)
-        await hook.before_iteration(ctx)
-        await hook.after_iteration(ctx)
+
+        async def turn(iteration=0):
+            ctx = AgentHookContext(iteration=iteration, messages=msgs)
+            await hook.before_iteration(ctx)
+            await hook.after_iteration(ctx)
+
+        # Turn 1. Hydration counts the window's single user turn; the iteration-0
+        # bump is suppressed so it isn't counted twice.
+        await turn()
+        assert coord._user_turns_since_save == 1
+        # Still turn 1, second iteration: the model called a tool. No advance.
+        msgs.append({"role": "assistant", "content": "calling"})
+        msgs.append({"role": "tool", "content": "result", "tool_call_id": "c1"})
+        await turn(iteration=1)
         assert coord._user_turns_since_save == 1
 
-        # Iteration 1 — same "go" message appears again. List grew by one
-        # user-role message; counter advances despite identical text.
-        msgs.append({"role": "assistant", "content": "ack"})
-        msgs.append({"role": "user", "content": "go"})  # duplicate text
-        ctx2 = AgentHookContext(iteration=1, messages=msgs)
-        await hook.before_iteration(ctx2)
-        await hook.after_iteration(ctx2)
-        assert coord._user_turns_since_save == 2
-
-        # Iteration 2 — third "go". Should arm nudge (interval=3).
+        # Turn 2 — same "go" text again.
         msgs.append({"role": "assistant", "content": "ack"})
         msgs.append({"role": "user", "content": "go"})
-        ctx3 = AgentHookContext(iteration=2, messages=msgs)
-        await hook.before_iteration(ctx3)
-        await hook.after_iteration(ctx3)
+        await turn()
+        assert coord._user_turns_since_save == 2
+
+        # Turn 3 — third "go". Should arm the nudge (interval=3).
+        msgs.append({"role": "assistant", "content": "ack"})
+        msgs.append({"role": "user", "content": "go"})
+        await turn()
         # Counter resets to 0 when armed; nudge waits to fire on next before_iteration.
         assert coord._save_nudge_pending or coord._user_turns_since_save == 0
 
@@ -150,7 +160,15 @@ class TestNudgeReachesTheHookPath:
     """
 
     async def _turns(
-        self, hook, n, *, msgs=None, compact_at=None, label="turn", session_key=None
+        self,
+        hook,
+        n,
+        *,
+        msgs=None,
+        compact_at=None,
+        label="turn",
+        session_key=None,
+        cap=None,
     ):
         """Drive ``n`` user turns; return 1/0 per turn for nudge delivered."""
         from nanobot.agent.hook import AgentHookContext  # noqa: PLC0415
@@ -160,6 +178,9 @@ class TestNudgeReachesTheHookPath:
         for turn in range(n):
             if compact_at is not None and turn == compact_at:
                 msgs[:] = msgs[-2:]
+            if cap is not None:
+                # What get_history does every turn: hand back a bounded window.
+                msgs[:] = msgs[-cap:]
             msgs.append({"role": "user", "content": f"{label} {turn}"})
             ctx = AgentHookContext(
                 iteration=0, messages=msgs, session_key=session_key
@@ -189,9 +210,23 @@ class TestNudgeReachesTheHookPath:
 
     async def test_nudge_survives_history_compaction(self, tmp_path):
         hook = _make_hook(tmp_path, interval=5)
-        # Compaction shifts the cadence by one turn but must not retire it.
+        # Counting turns instead of window population means compaction no longer
+        # even costs a turn of cadence: the interval holds straight through it.
         delivered = await self._turns(hook, 14, compact_at=7)
-        assert delivered == [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0]
+        assert delivered == [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0]
+
+    async def test_nudge_keeps_firing_after_the_window_saturates(self, tmp_path):
+        """The cadence must not ride on window *population*.
+
+        ``context.messages`` is a bounded sliding window, so once it saturates
+        the user-message count stops growing and a population delta is 0 for
+        every later turn. The nudge froze there: measured at five deliveries in
+        24 turns and never again, in the subsystem the cadence exists for.
+        """
+        hook = _make_hook(tmp_path, interval=5)
+        delivered = await self._turns(hook, 24, cap=6)
+        assert delivered == [0] * 5 + ([1] + [0] * 4) * 3 + [1] + [0] * 3
+        assert sum(delivered) == 4
 
     async def test_resume_does_not_nudge_on_first_turn(self, tmp_path):
         hook = _make_hook(tmp_path, interval=5)
