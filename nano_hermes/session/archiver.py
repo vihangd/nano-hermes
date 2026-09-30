@@ -136,6 +136,13 @@ def _archivable(
     Filtered identically to the insert loop, so a fingerprint list and a window
     are always comparable: a system prompt or a tool-calls-only assistant
     message shifts neither.
+
+    Runs over the whole window on every pass, and there is one pass per hook
+    call, so per-turn cost is O(iterations x window): a turn with eight tool
+    calls (nine iterations, 18 archived messages) measures 5.6 ms at the
+    120-message cap, ~145 ms on a Pi 3B+, and this function is 50% of it. If
+    that ever matters, a mid-turn pass only needs the tail past
+    ``len(confirmed) + len(pending)`` -- the head cannot change.
     """
     out: list[tuple[dict[str, Any], str, str]] = []
     for msg in messages:
@@ -426,6 +433,13 @@ class SessionArchiver:
         them. Role matching stops at the first mismatch, which is what keeps a
         message the sanitizer dropped entirely from shifting the run and
         swallowing a genuinely new message.
+
+        Known cost of stopping at the first mismatch: if nanobot drops a
+        mid-turn message during persistence instead of rewriting it (an orphan
+        tool result, ``loop.py:1647``), the rest of the run no longer lines up
+        and those messages are archived a second time. One duplicate row on a
+        path that logs a warning upstream, versus swallowing a real message —
+        the trade goes this way deliberately.
 
         ``confirm=False`` on a mid-turn pass: that list is the raw one the
         runner is still appending to, so its fingerprints must not be trusted —
