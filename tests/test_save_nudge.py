@@ -149,7 +149,9 @@ class TestNudgeReachesTheHookPath:
     unit-green, integration-dead.
     """
 
-    async def _turns(self, hook, n, *, msgs=None, compact_at=None, label="turn"):
+    async def _turns(
+        self, hook, n, *, msgs=None, compact_at=None, label="turn", session_key=None
+    ):
         """Drive ``n`` user turns; return 1/0 per turn for nudge delivered."""
         from nanobot.agent.hook import AgentHookContext  # noqa: PLC0415
 
@@ -159,7 +161,9 @@ class TestNudgeReachesTheHookPath:
             if compact_at is not None and turn == compact_at:
                 msgs[:] = msgs[-2:]
             msgs.append({"role": "user", "content": f"{label} {turn}"})
-            ctx = AgentHookContext(iteration=0, messages=msgs)
+            ctx = AgentHookContext(
+                iteration=0, messages=msgs, session_key=session_key
+            )
             await hook.before_iteration(ctx)
             delivered.append(
                 int(
@@ -225,6 +229,10 @@ class TestNudgeReachesTheHookPath:
 
     async def test_recycled_list_address_does_not_replay_history(self, tmp_path):
         """id(messages) can collide with a dead conversation's entry.
+
+        Exercises the ``session_key=None`` fallback deliberately — ``_turns``
+        passes no key, so the counter is keyed on ``id(messages)`` and the
+        poked entry below is the one the hook will read.
 
         A stale entry skips hydration, so the delta against a resumed
         transcript would replay its whole history as fresh turns and arm

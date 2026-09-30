@@ -9,8 +9,9 @@ the system prompt — context.py merges the runtime block into the user
 content — and it is stripped from persisted history, so it appears only on
 the live turn.)
 
-Rather than reach into nanobot's SessionManager (no session_key is exposed
-to the hook, and it's fragile across versions), we detect goal state by
+Rather than reach into nanobot's SessionManager (``AgentHookContext`` hands
+us a ``session_key`` but no session object, and looking one up is fragile
+across versions), we detect goal state by
 scanning ``context.messages`` for that block. We require BOTH the runtime
 sentinel and the marker so a user merely typing "Goal (active):" doesn't
 trip detection. When the block disappears between turns we treat that as a

@@ -142,13 +142,13 @@ class NanoHermesHook(AgentHook):
         # Per-conversation count of user-role messages seen — drives the
         # save-nudge cadence by detecting new turns via list growth (text
         # equality misses repeated identical prompts like "go", "again").
-        # Keyed by id(messages) like archiver._session_ids/_watermarks,
-        # because one hook instance serves every chat the loop runs: a shared
-        # scalar either pins one chat's delta at 0 or replays another chat's
-        # history as fresh turns. Not keyed by session id — interleaved chats
-        # cross a session boundary on every switch, so that id is not stable
-        # for a conversation. An absent key means "not yet hydrated".
-        self._user_msg_counts: dict[int, int] = {}
+        # Keyed on the same conversation key the archiver uses
+        # (context.session_key, else id(messages)), because one hook instance
+        # serves every chat the loop runs: a shared scalar either pins one
+        # chat's delta at 0 or replays another chat's history as fresh turns.
+        # Not keyed by session id — that changes on every compaction. An
+        # absent key means "not yet hydrated".
+        self._user_msg_counts: dict[str | int, int] = {}
 
     # ------------------------------------------------------------------
     # Public API surface (unchanged for external callers)
@@ -362,7 +362,7 @@ class NanoHermesHook(AgentHook):
             self._curator_task = asyncio.create_task(self._background_curator())
 
         # Keep current_session_id in sync with archiver (lazy-bootstrap on first call).
-        self._sync_session(context.messages)
+        self._sync_session(context.messages, context.session_key)
 
         # Inject matching principles on iteration 0 (pure FTS5, always fast).
         if context.iteration == 0:
@@ -376,11 +376,12 @@ class NanoHermesHook(AgentHook):
             # note_user_turn never fires) and clears _save_nudge_pending on
             # the way to take_save_nudge below, which together made the
             # nudge unreachable in the real hook path.
-            if id(context.messages) not in self._user_msg_counts:
+            conv_key = context.session_key or id(context.messages)
+            if conv_key not in self._user_msg_counts:
                 recent_user_turns = sum(
                     1 for m in context.messages if m.get("role") == "user"
                 )
-                self._user_msg_counts[id(context.messages)] = recent_user_turns
+                self._user_msg_counts[conv_key] = recent_user_turns
                 self._reflection_coord.hydrate_save_counter_from_history(
                     recent_user_turns=recent_user_turns,
                 )
@@ -475,11 +476,11 @@ class NanoHermesHook(AgentHook):
             self._skill_tracker.record_error()
 
         try:
-            self.archiver.archive_and_embed(context.messages)
+            self.archiver.archive_and_embed(context.messages, context.session_key)
         except Exception:
             log.exception("nano-hermes archive failed")
 
-        self._sync_session(context.messages)
+        self._sync_session(context.messages, context.session_key)
 
         # Accumulate skill observations into session-level state.
         self._skill_tracker.update_accumulators()
@@ -500,7 +501,7 @@ class NanoHermesHook(AgentHook):
         # growth, not text equality — two identical "go" messages should
         # advance the counter by two, not one.
         user_msg_count = sum(1 for m in msgs if m.get("role") == "user")
-        key = id(msgs)
+        key = context.session_key or id(msgs)
         last_count = self._user_msg_counts.get(key, user_msg_count)
         # Clamped to one: nanobot appends a single user message per turn, so a
         # larger delta means the key was stale (id(messages) can be recycled
@@ -791,9 +792,9 @@ class NanoHermesHook(AgentHook):
         except Exception:
             log.exception("nano-hermes purge failed")
 
-    def _sync_session(self, messages: list) -> None:
+    def _sync_session(self, messages: list, session_key: str | None = None) -> None:
         """Sync session state and handle boundary crossings."""
-        _existing, completed_id = self._session_coord.sync(messages)
+        _existing, completed_id = self._session_coord.sync(messages, session_key)
 
         if completed_id is not None:
             # Session boundary: finalize trajectory, reset skill state, prune dicts.

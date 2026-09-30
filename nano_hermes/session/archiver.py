@@ -9,13 +9,21 @@ Runs from ``NanoHermesHook.after_iteration``:
    provider chain and write them to ``chunks_vec``. The loop does not
    wait on the network.
 
-Session boundaries are keyed on ``id(messages_list)``. A new list (new
-run) means a new ``sessions`` row. This is pragmatic but imperfect:
-Python can reuse ``id()`` values after GC, which would glue unrelated
-runs into one synthetic session. v0.2 should graduate to real session
-tracking once nanobot exposes the ``Session`` object to hooks (it's
-currently passed to the runner via ``AgentRunSpec.session_key`` but not
-into ``AgentHookContext``).
+Conversation identity comes from nanobot's ``AgentHookContext.session_key``
+(a stable ``channel:chat`` string) when the caller supplies it, falling back
+to ``id(messages_list)`` when it doesn't — direct API users and older tests.
+The fallback is imperfect: Python reuses ``id()`` values after GC, and two
+interleaved conversations get distinct ids, so every switch between them
+looks like a new session.
+
+``session_key`` is conversation identity, not session-instance identity, so
+the shrink rule in :meth:`_archive` (watermark past the end of the list) is
+what opens a new ``sessions`` row under an unchanged key. It fires for both
+``/new`` and in-place history compaction, and ``AgentHookContext`` exposes
+nothing that tells them apart. That conflation is load-bearing rather than a
+defect: a session boundary is the only thing that writes a trajectory, so a
+long-running conversation that is never `/new`-ed still gets one at each
+compaction.
 """
 from __future__ import annotations
 
@@ -74,9 +82,10 @@ class SessionArchiver:
         self._embedder_factory = embedder_factory
         self._target_dims = target_dims
         self._redact_secrets = redact_secrets
-        # id(messages_list) → sessions.id and high-water message index.
-        self._session_ids: dict[int, int] = {}
-        self._watermarks: dict[int, int] = {}
+        # Conversation key (session_key, else id(messages_list)) → sessions.id
+        # and high-water message index.
+        self._session_ids: dict[str | int, int] = {}
+        self._watermarks: dict[str | int, int] = {}
         # session_id → first user message text (task context for embeddings).
         self._session_tasks: dict[int, str] = {}
         # Pending background embedding tasks — retained so asyncio
@@ -88,7 +97,7 @@ class SessionArchiver:
     # ------------------------------------------------------------------
 
     def archive_and_embed(
-        self, messages: list[dict[str, Any]]
+        self, messages: list[dict[str, Any]], session_key: str | None = None
     ) -> tuple[list[int], asyncio.Task | None]:
         """Insert new chunks synchronously and schedule embedding.
 
@@ -97,7 +106,7 @@ class SessionArchiver:
         Returns ``(new_chunk_ids, embed_task_or_none)``. Callers don't
         need to await the task; tests can via :meth:`drain`.
         """
-        chunk_ids, texts, session_id = self._archive(messages)
+        chunk_ids, texts, session_id = self._archive(messages, session_key)
         if not chunk_ids:
             return [], None
         task_ctx = self._session_tasks.get(session_id) if session_id is not None else None
@@ -118,33 +127,38 @@ class SessionArchiver:
         else:
             await asyncio.wait(tasks, timeout=timeout)
 
-    def current_session_id(self, messages: list[dict[str, Any]]) -> int | None:
+    def current_session_id(
+        self, messages: list[dict[str, Any]], session_key: str | None = None
+    ) -> int | None:
         """Return the ``sessions.id`` this messages list is mapped to, or
         ``None`` if ``archive_and_embed`` hasn't run against it yet.
 
         Exposed for :class:`NanoHermesHook` so the reflect tool can
         attach reflections to the correct session without duplicating
-        the id-based bookkeeping.
+        the key-based bookkeeping.
         """
-        return self._session_ids.get(id(messages))
+        return self._session_ids.get(session_key or id(messages))
 
-    def ensure_session(self, messages: list[dict[str, Any]]) -> int | None:
+    def ensure_session(
+        self, messages: list[dict[str, Any]], session_key: str | None = None
+    ) -> int | None:
         """Bootstrap a session row and archive any new chunks without embedding.
 
         Safe to call from synchronous code — no asyncio event loop required.
         Subsequent :meth:`archive_and_embed` calls use the watermark to avoid
         double-inserting chunks already written here.
         """
+        key = session_key or id(messages)
         if not messages:
-            return self._session_ids.get(id(messages))
-        self._archive(messages)
-        return self._session_ids.get(id(messages))
+            return self._session_ids.get(key)
+        self._archive(messages, session_key)
+        return self._session_ids.get(key)
 
     def prune_session_by_id(self, session_id: int) -> None:
         """Remove all internal bookkeeping entries that map to session_id.
 
         Called when a session boundary is crossed to bound dict growth.
-        Keyed by id(messages_list), not by session_id directly.
+        Keyed by conversation key, not by session_id directly.
         """
         keys_to_remove = [k for k, v in self._session_ids.items() if v == session_id]
         for k in keys_to_remove:
@@ -157,12 +171,14 @@ class SessionArchiver:
     # ------------------------------------------------------------------
 
     def _archive(
-        self, messages: list[dict[str, Any]]
+        self, messages: list[dict[str, Any]], session_key: str | None = None
     ) -> tuple[list[int], list[str], int | None]:
-        key = id(messages)
+        key = session_key or id(messages)
         watermark = self._watermarks.get(key, 0)
-        # If the list got shorter since last time, treat it as a fresh
-        # list that happens to share the same id() — start a new session.
+        # If the list got shorter since last time, this is a different
+        # conversation under the same key — a recycled id(), or /new in the
+        # same channel. Start a new session. (In-place compaction looks the
+        # same from here and also starts one; see the module docstring.)
         if watermark > len(messages):
             old_sid = self._session_ids.pop(key, None)
             if old_sid is not None:
@@ -171,7 +187,7 @@ class SessionArchiver:
 
         session_id = self._session_ids.get(key)
         if session_id is None:
-            session_id = self._start_session(key)
+            session_id = self._start_session(key, session_key)
 
         new_ids: list[int] = []
         new_texts: list[str] = []
@@ -214,11 +230,11 @@ class SessionArchiver:
             self._db.commit()
         return new_ids, new_texts, session_id
 
-    def _start_session(self, key: int) -> int:
+    def _start_session(self, key: str | int, session_key: str | None = None) -> int:
         cur = self._db.cursor()
         cur.execute(
             "INSERT INTO sessions (session_key, started_at) VALUES (?, ?)",
-            (f"loop:{int(time.time() * 1000)}", time.time()),
+            (session_key or f"loop:{int(time.time() * 1000)}", time.time()),
         )
         self._db.commit()
         session_id = int(cur.lastrowid)

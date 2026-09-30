@@ -16,6 +16,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Cap on per-conversation boundary state, so a long-lived process serving many
+# channels does not accumulate one entry per channel forever.
+_MAX_TRACKED_CONVERSATIONS = 32
+
 
 class SessionCoordinator:
     def __init__(
@@ -28,9 +32,22 @@ class SessionCoordinator:
         self._archiver = archiver
         self._db = db
         self._trajectory_writer = trajectory_writer
+        # Most recently synced session — what the reflect/rate/status tools
+        # attach to. Deliberately a scalar: those tools act on the turn in
+        # flight.
         self.current_session_id: int | None = None
+        # Boundary detection is per session_key, not on the scalar above.
+        # Interleaved chats alternate session ids (1, 2, 1, 2, ...), so
+        # comparing against a single previous value fires a bogus boundary on
+        # every switch — finalizing 1-turn "sessions", re-scoring principle
+        # trust, and advancing the evolution/curation cadence each turn.
+        # Under a stable key the boundary fires only when the *same*
+        # conversation gets a new session id: /new, or in-place compaction.
+        self._sessions_by_key: dict[str, int] = {}
 
-    def sync(self, messages: list) -> tuple[int | None, int | None]:
+    def sync(
+        self, messages: list, session_key: str | None = None
+    ) -> tuple[int | None, int | None]:
         """Sync current_session_id from archiver state.
 
         Lazy-bootstraps a session row on first call so the reflect tool
@@ -43,14 +60,27 @@ class SessionCoordinator:
         if not messages:
             return self.current_session_id, None
 
-        existing = self._archiver.current_session_id(messages)
+        existing = self._archiver.current_session_id(messages, session_key)
         if existing is None:
             try:
-                existing = self._archiver.ensure_session(messages)
+                existing = self._archiver.ensure_session(messages, session_key)
             except Exception:
                 log.exception("nano-hermes session bootstrap failed")
 
-        prev_session = self.current_session_id
+        if not session_key:
+            # Falsy, not just None — the archiver keys on ``session_key or
+            # id(messages)``, so an empty key must resolve the same way here.
+            # No stable key, so the list object is the only conversation
+            # identity available and a different list means the previous
+            # conversation is over. Reachable in production: nanobot's
+            # ``AgentRunSpec.session_key`` is optional and loop.py passes
+            # ``session.key if session else None`` into the hook context.
+            # Keyless interleaving still over-counts — nothing distinguishes it
+            # from two consecutive chats. See
+            # ``test_keyless_interleaving_still_over_counts``.
+            prev_session = self.current_session_id
+        else:
+            prev_session = self._sessions_by_key.get(session_key)
         completed_session_id: int | None = None
 
         if existing is not None and existing != prev_session and prev_session is not None:
@@ -67,6 +97,12 @@ class SessionCoordinator:
                 )
             completed_session_id = prev_session
 
+        if existing is not None and session_key:
+            self._sessions_by_key[session_key] = existing
+            while len(self._sessions_by_key) > _MAX_TRACKED_CONVERSATIONS:
+                # Insertion-ordered: drop the least recently added conversation.
+                # Losing an entry only costs one missed boundary.
+                self._sessions_by_key.pop(next(iter(self._sessions_by_key)))
         self.current_session_id = existing
         return existing, completed_session_id
 
