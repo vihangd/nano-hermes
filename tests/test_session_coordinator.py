@@ -60,7 +60,8 @@ class TestSyncExceptionPaths:
         db = MagicMock()
         db.execute.side_effect = sqlite3.OperationalError("disk full")
         coord = _make_coord(db=db, archiver=archiver)
-        coord.current_session_id = 1
+        # Keyless sync compares against the previous *keyless* session.
+        coord._keyless_session = 1
         sid, completed = coord.sync([{"role": "user", "content": "new"}])
         assert completed == 1
         assert sid == 2

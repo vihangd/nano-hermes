@@ -44,6 +44,11 @@ class SessionCoordinator:
         # Under a stable key the boundary fires only when the *same*
         # conversation gets a new session id: /new, or in-place compaction.
         self._sessions_by_key: dict[str, int] = {}
+        # Keyless runs get their own "previous", never ``current_session_id``:
+        # that scalar was last written by whichever *keyed* conversation synced
+        # most recently, so comparing against it ended and pruned a live keyed
+        # session, re-archived its window, and wrote its trajectory twice.
+        self._keyless_session: int | None = None
 
     def sync(
         self, messages: list, session_key: str | None = None
@@ -78,7 +83,7 @@ class SessionCoordinator:
             # Keyless interleaving still over-counts — nothing distinguishes it
             # from two consecutive chats. See
             # ``test_keyless_interleaving_still_over_counts``.
-            prev_session = self.current_session_id
+            prev_session = self._keyless_session
         else:
             prev_session = self._sessions_by_key.get(session_key)
         completed_session_id: int | None = None
@@ -97,6 +102,8 @@ class SessionCoordinator:
                 )
             completed_session_id = prev_session
 
+        if existing is not None and not session_key:
+            self._keyless_session = existing
         if existing is not None and session_key:
             # Pop before insert so a re-synced key moves to the end: dict order
             # is insertion order, and without this the eviction below would

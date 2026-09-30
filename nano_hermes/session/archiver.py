@@ -61,14 +61,16 @@ the runtime-context block, so its live text is
 take the new-conversation branch: one ``sessions`` row and one trajectory per
 turn, the whole ``session_key`` scheme inert.
 
-That entry is *appended*, not merged, on an ordinary turn: the loop reads the
-history at ``loop.py:1465`` and only persists the user message afterwards at
-``loop.py:1478``, so the roles never line up. The merge branch
-(``context.py:230-255``) fires only when the history already ends with a
-``user`` entry — right after in-place compaction, whose summary is stored as
-one, or when an interrupted turn is retried. This premise has been wrong twice;
-the two line numbers are cited so the next reader can re-check it instead of
-inferring it.
+That entry is *appended*, not merged, on an ordinary turn:
+``AgentLoop._state_build`` reads ``ctx.history = session.get_history(...)``
+before it calls ``_persist_user_message_early``, so the roles never line up
+(``loop.py:1465`` / ``:1478`` on the pinned nanobot-ai 0.2.2; the same order holds
+at HEAD ``b46d4dfd``, where the two sit at ``:2049`` / ``:2122``). The merge
+branch at the end of ``ContextBuilder.build_messages`` fires only when the
+history already ends with a ``user`` entry — right after in-place compaction,
+whose summary is stored as one, or when an interrupted turn is retried. This
+premise has been wrong twice; the symbols are cited so the next reader can
+re-check it instead of inferring it.
 
 Both shapes are recorded as *pending* by role only; the next pass skips them by
 role and adopts their replayed fingerprints. Losing that would mean losing the
@@ -134,17 +136,17 @@ _RUNTIME_SENTINEL = "[Runtime Context"
 _MESSAGE_TIME_PREFIX = "[Message Time:"
 
 
-def _clean_live_tail(text: str, *, merged: bool = False) -> str:
+def _clean_live_tail(text: str, *, role: str = "user", merged: bool = False) -> str:
     """Strip the runtime-context block, and a merge duplicate when there is one.
 
-    The usual live entry is *appended*, not merged: nanobot builds the history
-    at ``loop.py:1465`` and only persists the user message afterwards at
-    ``loop.py:1478``, so the roles do not line up and ``build_messages`` adds a
+    The usual live entry is *appended*, not merged: ``_state_build`` reads the
+    history before ``_persist_user_message_early`` (see the module docstring),
+    so the roles do not line up and ``build_messages`` adds a
     fresh ``current_message + [Runtime Context …]`` entry. Archiving it verbatim
     puts a per-turn metadata block (time, cwd, channel) into every user chunk —
     that is, into FTS5 and into the embedder.
 
-    The merge branch (``context.py:230-255``) only fires when the history
+    The merge branch of ``build_messages`` only fires when the history
     already ends with a ``user`` entry: right after in-place compaction, whose
     summary is stored as one, or after an interrupted turn. Then the text is
     ``"[Message Time: t]\n<history>" + "\n\n" + "<current>"`` and the
@@ -156,10 +158,22 @@ def _clean_live_tail(text: str, *, merged: bool = False) -> str:
     The fingerprint is deliberately *not* taken from the cleaned text: no
     amount of cleaning makes the live form equal the replayed form, which is
     why a live entry is pending-by-role rather than confirmed.
+
+    The runtime-context cut applies to ``user`` entries only, and only to a
+    block that starts a line — the one shape nanobot writes. A tool
+    result or reply that merely *mentions* the tag (reading ``context.py``, say)
+    is content, and cutting it lost everything after the tag from chunks, FTS5
+    and the embedder. Not gated on liveness: nanobot HEAD persists the block
+    into the stored user message and ``get_history`` replays it by default
+    (``include_runtime_context=True``), so a replayed user entry archived after
+    a restart carries it too.
     """
-    cut = text.find(_RUNTIME_SENTINEL)
-    if cut > 0:
-        text = text[:cut].rstrip()
+    if role == "user":
+        # One newline, not two: a multimodal message's text parts are joined
+        # with "\n" (``_extract_text``), so its block follows a single one.
+        cut = text.find("\n" + _RUNTIME_SENTINEL)
+        if cut > 0:
+            text = text[:cut].rstrip()
     if not merged:
         return text
     # The merge repeats the history entry's own text when the interrupted turn
@@ -309,7 +323,7 @@ def _align(
       entirely from shifting the rest of the run and swallowing a genuinely new
       message. Known cost: if nanobot drops a pending message during
       persistence instead of rewriting it (an orphan tool result,
-      ``loop.py:1647``), the rest no longer lines up and those messages are
+      ``AgentLoop._save_turn``), the rest no longer lines up and those messages are
       archived a second time. One duplicate row on a path that logs a warning
       upstream, versus swallowing a real message.
 
@@ -465,8 +479,8 @@ class SessionArchiver:
         """Bootstrap a session row and archive any new chunks without embedding.
 
         Safe to call from synchronous code — no asyncio event loop required.
-        Subsequent :meth:`archive_and_embed` calls use the watermark to avoid
-        double-inserting chunks already written here.
+        Subsequent :meth:`archive_and_embed` calls align on the fingerprints
+        recorded here, so chunks already written are not inserted twice.
         """
         key = session_key or id(messages)
         if not messages:
@@ -554,12 +568,10 @@ class SessionArchiver:
             # fingerprint must not be confirmed. It is *merged* with the entry
             # before it only when the history already ended with a user turn,
             # and the ``[Message Time:`` stamp is the evidence — an unstamped
-            # live entry came from ``current_message`` verbatim. Cleaning runs
-            # over every entry: a mid-turn pass can be the first to see one, and
-            # it is a no-op on a replayed message.
+            # live entry came from ``current_message`` verbatim.
             live = not mid_turn and index == last_index
             merged = live and text.startswith(_MESSAGE_TIME_PREFIX)
-            text = _clean_live_tail(text, merged=merged)
+            text = _clean_live_tail(text, role=str(msg.get("role")), merged=merged)
             # Redact secret-shaped strings so they neither land in chunks
             # nor reach the embedding provider over the wire. The same
             # masked text feeds both the INSERT and the background embed.

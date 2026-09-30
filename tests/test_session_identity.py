@@ -221,6 +221,33 @@ class TestKeylessFallback:
         assert sessions == 10
         assert hook._completed_session_count == 9
 
+    async def test_a_keyless_run_does_not_end_a_live_keyed_session(self, tmp_path):
+        """The keyless "previous" used to be the shared ``current_session_id``,
+        which a keyed conversation had just written. One keyless run then ended
+        and pruned alice's live session; her next turn opened a third row,
+        re-archived her window, and fired a second boundary on session 1."""
+        hook = _make_hook(tmp_path)
+        alice = []
+        for i in range(3):
+            await _turn(hook, alice, f"a {i}", "cli:alice")
+        await _turn(hook, [], "keyless", None)
+        await _turn(hook, alice, "a 3", "cli:alice")
+
+        rows = hook.db.execute(
+            "SELECT session_id, COUNT(*) FROM trajectories GROUP BY session_id"
+        ).fetchall()
+        assert rows == []
+        # Two rows: alice's one session (id 1, asserted whole below) and the
+        # keyless run's own — not alice's conversation split in two.
+        assert _counts(hook) == (2, 0)
+        contents = [
+            r[0]
+            for r in hook.db.execute(
+                "SELECT content FROM chunks WHERE session_id = 1 ORDER BY id"
+            )
+        ]
+        assert contents == ["a 0", "ack", "a 1", "ack", "a 2", "ack", "a 3", "ack"]
+
 
 class TestSlidingWindowHistory:
     """nanobot hands the hook a bounded window, not a growing list.
@@ -390,11 +417,12 @@ def _window(
 
     Production is ``_build_initial_messages`` → ``ContextBuilder.build_messages(
     history=get_history(...), current_message=...)``, and the *order* is
-    load-bearing: the loop reads the history at ``loop.py:1465`` and only
-    persists the user message afterwards at ``loop.py:1478``. So history does
+    load-bearing: ``_state_build`` reads the history before it calls
+    ``_persist_user_message_early`` (``loop.py:1465`` / ``:1478`` on the pinned
+    0.2.2; ``:2049`` / ``:2122`` at HEAD ``b46d4dfd``). So history does
     **not** contain the current message, the roles do not line up, and
     ``build_messages`` appends a fresh ``"<current>\n\n[Runtime Context …]"``
-    entry instead of merging (``context.py:230-255`` is the merge branch — it
+    entry instead of merging (the tail of ``build_messages`` is the merge branch — it
     fires only when history already ends with a ``user`` entry, i.e. right after
     in-place compaction or an interrupted turn). This helper persists after
     building, like the loop does, so callers must not add the message first.
@@ -433,7 +461,7 @@ class TestSaturatedWindowThroughTheRealHook:
     length alone therefore declares a new conversation on every turn past the
     cap: 24 turns produced 19 sessions, 18 bogus trajectories, and 4.75x
     duplicated chunks. ``include_timestamps=True`` is production's setting
-    (``loop.py:1180``) and re-prefixes replayed user turns, which can orphan
+    (``loop.py:1180`` on 0.2.2) and re-prefixes replayed user turns, which can orphan
     the anchor independently.
     """
 
@@ -710,10 +738,10 @@ class TestMidTurnMessagesAreAdoptedNotDuplicated:
 class TestTheLiveEntryIsOnlyDeduplicatedWhenItWasMerged:
     """``build_messages`` appends the current message; it merges only sometimes.
 
-    ``loop.py:1465`` builds the history before ``loop.py:1478`` persists the user
+    ``_state_build`` builds the history before ``_persist_user_message_early`` persists the user
     message, so the roles usually don't line up and the live entry is a fresh
     ``"<current>\\n\\n[Runtime Context …]"``. The merge branch
-    (``context.py:230-255``) fires only when the history already ends with a
+    (tail of ``build_messages``) fires only when the history already ends with a
     ``user`` entry: right after in-place compaction, or when an interrupted turn
     is retried. Cleaning the tail therefore has to key on evidence of a merge
     (the ``[Message Time:`` stamp a replayed message carries), not on position.
@@ -832,3 +860,32 @@ class TestTheLiveEntryIsOnlyDeduplicatedWhenItWasMerged:
             r for r in rows if "SUMMARY" not in r and (r == "u1" or r.endswith("\nu1"))
         ]
         assert len(replayed) == 1
+
+
+class TestOnlyAUserRuntimeBlockIsCut:
+    def test_a_tool_result_quoting_the_tag_is_archived_whole(self, archiver_factory):
+        """Reading nanobot or nano-hermes source puts the literal tag in a tool
+        result. Cutting at it silently dropped the rest of the file from chunks,
+        FTS5 and the embedder."""
+        archiver, db = archiver_factory()
+        source = (
+            "file contents:\n"
+            'RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only]"\n'
+            "\n[Runtime Context] at the start of a line, in a docstring\n"
+            "more code"
+        )
+        window = [
+            {
+                "role": "user",
+                "content": "what is [Runtime Context]?\n\n[Runtime Context]\nTime: t",
+            },
+            {"role": "assistant", "content": "quoting [Runtime Context] inline"},
+            {"role": "tool", "tool_call_id": "c1", "content": source},
+        ]
+        archiver.ensure_session(window, "chan:1")
+        rows = [r[0] for r in db.execute("SELECT content FROM chunks ORDER BY id")]
+        assert rows == [
+            "what is [Runtime Context]?",
+            "quoting [Runtime Context] inline",
+            source,
+        ]
