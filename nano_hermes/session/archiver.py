@@ -540,13 +540,17 @@ class SessionArchiver:
             self._fingerprints.pop(key, None)
             self._pending.pop(key, None)
             start = 0
-        elif not mid_turn and aligned.adopted:
+        # Fingerprints this pass confirms, applied only once every insert has
+        # landed: committing them earlier left a failed pass's pending items
+        # adoptable a second time, so the next window aligned against a doubled
+        # block and re-archived as duplicates.
+        new_confirmed: list[str] = []
+        if not aligned.new_conversation and not mid_turn:
             # This window replayed those pending messages, so their real
             # fingerprints are finally knowable — adopt them. A mid-turn pass
             # must not: that list is the raw one the runner is still appending
             # to, and its tail will be rewritten before it comes back.
-            confirmed_fps = self._fingerprints.setdefault(key, [])
-            confirmed_fps.extend(entries[i][2] for i in aligned.adopted)
+            new_confirmed.extend(entries[i][2] for i in aligned.adopted)
 
         session_id = self._session_ids.get(key)
         if session_id is None:
@@ -557,48 +561,56 @@ class SessionArchiver:
         new_texts: list[str] = []
         now = time.time()
         cur = self._db.cursor()
-        confirmed = self._fingerprints.setdefault(key, [])
         archived_roles: list[tuple[str, str]] = []
         last_index = len(entries) - 1
-        for index, (msg, text, fp) in enumerate(entries[start:], start=start):
-            # The window's last entry on a non-mid-turn pass is the live
-            # current message: stored in a form no later window repeats, so its
-            # fingerprint must not be confirmed. It is *merged* with the entry
-            # before it only when the history already ended with a user turn,
-            # and the ``[Message Time:`` stamp is the evidence — an unstamped
-            # live entry came from ``current_message`` verbatim.
-            live = not mid_turn and index == last_index
-            merged = live and text.startswith(_MESSAGE_TIME_PREFIX)
-            text = _clean_live_tail(text, role=str(msg.get("role")), merged=merged)
-            # Redact secret-shaped strings so they neither land in chunks
-            # nor reach the embedding provider over the wire. The same
-            # masked text feeds both the INSERT and the background embed.
-            if self._redact_secrets:
-                text = redact(text).text
-            # Capture first user message as task context for embeddings.
-            if msg.get("role") == "user" and session_id not in self._session_tasks:
-                self._session_tasks[session_id] = text[:500]
-            turn += 1
-            # Guarded per row, not per batch: a batch-level retry would
-            # re-insert the rows that already landed before the failure. If
-            # chunks_fts is corrupt the trigger would otherwise fail this
-            # canonical INSERT and the hook's archive-level except would
-            # swallow it, silently losing the transcript.
-            fts_guarded_write(
-                self._db,
-                "chunks_fts",
-                lambda: cur.execute(
-                    "INSERT INTO chunks "
-                    "(session_id, turn_index, role, content, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (session_id, turn, msg["role"], text, now),
-                ),
-            )
-            new_ids.append(int(cur.lastrowid))
-            new_texts.append(text)
-            archived_roles.append((str(msg["role"]), fp))
-            if not mid_turn and not live:
-                confirmed.append(fp)
+        try:
+            for index, (msg, text, fp) in enumerate(entries[start:], start=start):
+                # The window's last entry on a non-mid-turn pass is the live
+                # current message: stored in a form no later window repeats, so its
+                # fingerprint must not be confirmed. It is *merged* with the entry
+                # before it only when the history already ended with a user turn,
+                # and the ``[Message Time:`` stamp is the evidence — an unstamped
+                # live entry came from ``current_message`` verbatim.
+                live = not mid_turn and index == last_index
+                merged = live and text.startswith(_MESSAGE_TIME_PREFIX)
+                text = _clean_live_tail(text, role=str(msg.get("role")), merged=merged)
+                # Redact secret-shaped strings so they neither land in chunks
+                # nor reach the embedding provider over the wire. The same
+                # masked text feeds both the INSERT and the background embed.
+                if self._redact_secrets:
+                    text = redact(text).text
+                # Capture first user message as task context for embeddings.
+                if msg.get("role") == "user" and session_id not in self._session_tasks:
+                    self._session_tasks[session_id] = text[:500]
+                turn += 1
+                # Guarded per row, not per batch: a batch-level retry would
+                # re-insert the rows that already landed before the failure. If
+                # chunks_fts is corrupt the trigger would otherwise fail this
+                # canonical INSERT and the hook's archive-level except would
+                # swallow it, silently losing the transcript.
+                fts_guarded_write(
+                    self._db,
+                    "chunks_fts",
+                    lambda: cur.execute(
+                        "INSERT INTO chunks "
+                        "(session_id, turn_index, role, content, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (session_id, turn, msg["role"], text, now),
+                    ),
+                )
+                new_ids.append(int(cur.lastrowid))
+                new_texts.append(text)
+                archived_roles.append((str(msg["role"]), fp))
+                if not mid_turn and not live:
+                    new_confirmed.append(fp)
+        except BaseException:
+            # All or nothing: rows from a half-done pass would sit in chunks
+            # while the alignment state says they were never archived, and the
+            # next pass would insert them a second time.
+            self._db.rollback()
+            raise
+        confirmed = self._fingerprints.setdefault(key, [])
+        confirmed.extend(new_confirmed)
         self._turn_counts[session_id] = turn
         # What stays pending: the items this window did not replay, plus
         # everything just archived in a form the next window will not repeat —

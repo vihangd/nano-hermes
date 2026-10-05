@@ -9,8 +9,10 @@ principle-curation cadences.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 
 import numpy as np
+
 import pytest
 from nanobot.agent.hook import AgentHookContext
 
@@ -889,3 +891,44 @@ class TestOnlyAUserRuntimeBlockIsCut:
             "quoting [Runtime Context] inline",
             source,
         ]
+
+
+class TestAFailedPassChangesNothing:
+    def test_an_insert_error_mid_pass_rolls_back_rows_and_alignment(
+        self, archiver_factory
+    ):
+        """A non-FTS sqlite error escapes ``fts_guarded_write`` untouched. If the
+        rows inserted before it stay, or the fingerprints adopted before it stay
+        confirmed, the retry archives the same messages a second time."""
+        archiver, db = archiver_factory()
+        first = [
+            {"role": "user", "content": "u0"},
+            {"role": "assistant", "content": "a0"},
+        ]
+        archiver.ensure_session(first, "chan:1")
+        before = (
+            list(archiver._fingerprints["chan:1"]),
+            list(archiver._pending.get("chan:1", [])),
+            db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0],
+        )
+        db.execute(
+            "CREATE TRIGGER boom BEFORE INSERT ON chunks WHEN NEW.content = 'a1' "
+            "BEGIN SELECT RAISE(ABORT, 'disk full'); END"
+        )
+        second = first + [
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+        ]
+        with pytest.raises(sqlite3.DatabaseError):
+            archiver.ensure_session(second, "chan:1")
+        assert (
+            archiver._fingerprints["chan:1"],
+            archiver._pending.get("chan:1", []),
+            db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0],
+        ) == before
+
+        db.execute("DROP TRIGGER boom")
+        archiver.ensure_session(second, "chan:1")
+        rows = [r[0] for r in db.execute("SELECT content FROM chunks ORDER BY id")]
+        assert rows == ["u0", "a0", "u1", "a1", "u2"]
