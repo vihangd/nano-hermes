@@ -15,6 +15,7 @@ import time
 from typing import TYPE_CHECKING, Callable
 
 from ..decay import recency_decay
+from ..lru import touch
 
 from ..reflect.salience import (
     correction_score,
@@ -29,6 +30,13 @@ if TYPE_CHECKING:
     from ..embedding.chain import EmbeddingChain
 
 log = logging.getLogger(__name__)
+
+# Conversations with no session key share one cadence. Their window is a fresh
+# list every turn, so keying them by ``id(messages)`` made every turn look like
+# a first sighting: hydrated, never counted, and the nudge never fired.
+_CADENCE_KEYLESS = "__keyless__"
+
+
 
 _NUDGE_TEXT = (
     "You've just had a tool-heavy or error-prone iteration. When you "
@@ -74,8 +82,11 @@ class ReflectionCoordinator:
         # Memory-save nudge cadence counter. Incremented per user turn,
         # reset when the cadence nudge fires or memory_patch(action=add)
         # is invoked.
-        self._user_turns_since_save: int = 0
-        self._save_nudge_pending: bool = False
+        # Memory-save cadence, per conversation: [user turns since the last
+        # save, nudge armed]. One coordinator serves every chat the loop runs;
+        # shared scalars let one chat's first turn wipe another's count and
+        # delivered chat A's armed nudge into chat B.
+        self._save_cadence: dict[str, list] = {}
         # Goal-completion drop-target. Populated when /goal transitions
         # active → completed; delivered as a system message on the next
         # iteration via take_goal_completion.
@@ -267,35 +278,59 @@ class ReflectionCoordinator:
     # Memory-save nudge cadence
     # ------------------------------------------------------------------
 
-    def note_user_turn(self) -> None:
-        """Increment the user-turn counter; arm the nudge at the cadence.
+    def _cadence(self, key: str | None) -> list:
+        """*key*'s [count, armed] state, created and marked most recent."""
+        key = key or _CADENCE_KEYLESS
+        touch(self._save_cadence, key, lambda: [0, False])
+        return self._save_cadence[key]
 
-        Called once per iteration that includes a fresh user turn. The
-        nudge fires by being marked pending — `take_save_nudge` delivers
-        it on the next iteration boundary.
+    def observe_user_turn(self, key: str | None, *, window_user_turns: int) -> None:
+        """Count one fresh user turn for *key*, hydrating on first sight.
+
+        The first turn a process sees for a conversation restores the counter
+        from the window instead of counting — Hermes-style, counters survive
+        restarts — and that already includes this turn. Re-hydration only
+        happens if the conversation was evicted from the LRU, and then it
+        touches that conversation alone.
         """
+        if (key or _CADENCE_KEYLESS) in self._save_cadence:
+            self.note_user_turn(key)
+        else:
+            self.hydrate_save_counter_from_history(
+                recent_user_turns=window_user_turns, key=key
+            )
+
+    def note_user_turn(self, key: str | None = None) -> None:
+        """Increment *key*'s user-turn counter; arm its nudge at the cadence."""
         interval = getattr(self._config.reflection, "memory_save_nudge_interval", 0)
         if interval <= 0:
             return
-        self._user_turns_since_save += 1
-        if self._user_turns_since_save >= interval:
-            self._save_nudge_pending = True
-            self._user_turns_since_save = 0
+        state = self._cadence(key)
+        state[0] += 1
+        if state[0] >= interval:
+            state[1] = True
+            state[0] = 0
 
-    def note_memory_save(self) -> None:
-        """Reset the counter after the agent saves to memory.
+    def note_memory_save(self, key: str | None = None) -> None:
+        """Reset *key*'s counter after the agent saves to memory.
 
-        Prevents the cadence prompt from firing immediately after the
-        agent already wrote something — call from memory_patch on add.
+        Prevents the cadence prompt from firing immediately after the agent
+        already wrote something — call from memory_patch on add. A key this
+        coordinator has never counted (a tool call with no request context, or
+        one whose key the hook saw as keyless) resets the keyless conversation.
         """
-        self._user_turns_since_save = 0
-        self._save_nudge_pending = False
+        if key not in self._save_cadence:
+            key = None
+        state = self._cadence(key)
+        state[0] = 0
+        state[1] = False
 
-    def take_save_nudge(self) -> dict | None:
-        """Return the memory-save nudge message and clear the flag, or None."""
-        if not self._save_nudge_pending:
+    def take_save_nudge(self, key: str | None = None) -> dict | None:
+        """Return *key*'s memory-save nudge and clear it, or None."""
+        state = self._save_cadence.get(key or _CADENCE_KEYLESS)
+        if not state or not state[1]:
             return None
-        self._save_nudge_pending = False
+        state[1] = False
         return {
             "role": "system",
             "content": (
@@ -308,9 +343,9 @@ class ReflectionCoordinator:
         }
 
     def hydrate_save_counter_from_history(
-        self, *, recent_user_turns: int
+        self, *, recent_user_turns: int, key: str | None = None
     ) -> None:
-        """Restore the counter from observed history on session resume.
+        """Restore *key*'s counter from observed history on session resume.
 
         Hermes-style invariant: counters survive restarts. Clamps to
         interval-1 so a long-resumed conversation can't fire the cadence
@@ -320,8 +355,9 @@ class ReflectionCoordinator:
         interval = getattr(self._config.reflection, "memory_save_nudge_interval", 0)
         if interval <= 0:
             return
-        self._user_turns_since_save = min(max(0, recent_user_turns), interval - 1)
-        self._save_nudge_pending = False
+        state = self._cadence(key)
+        state[0] = min(max(0, recent_user_turns), interval - 1)
+        state[1] = False
 
     def reset_iteration_citations(self) -> None:
         """Drop any per-iteration retrieval log without recording it.

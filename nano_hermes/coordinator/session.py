@@ -14,11 +14,10 @@ if TYPE_CHECKING:
     from ..session.archiver import SessionArchiver
     from ..session.trajectory import TrajectoryWriter
 
+from ..lru import touch
+
 log = logging.getLogger(__name__)
 
-# Cap on per-conversation boundary state, so a long-lived process serving many
-# channels does not accumulate one entry per channel forever.
-_MAX_TRACKED_CONVERSATIONS = 32
 
 
 class SessionCoordinator:
@@ -105,16 +104,11 @@ class SessionCoordinator:
         if existing is not None and not session_key:
             self._keyless_session = existing
         if existing is not None and session_key:
-            # Pop before insert so a re-synced key moves to the end: dict order
-            # is insertion order, and without this the eviction below would
-            # drop the oldest-*inserted* key even if it is the busiest one,
-            # swallowing a genuine boundary and leaving ended_at NULL forever.
-            self._sessions_by_key.pop(session_key, None)
+            # Losing the least recently synced entry only costs one missed
+            # boundary; recency matters, or the busiest conversation could be
+            # the one evicted and its genuine boundary swallowed.
             self._sessions_by_key[session_key] = existing
-            while len(self._sessions_by_key) > _MAX_TRACKED_CONVERSATIONS:
-                # Least recently synced conversation. Losing an entry only
-                # costs one missed boundary.
-                self._sessions_by_key.pop(next(iter(self._sessions_by_key)))
+            touch(self._sessions_by_key, session_key)
         self.current_session_id = existing
         return existing, completed_session_id
 

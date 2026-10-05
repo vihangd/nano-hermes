@@ -7,6 +7,13 @@ import nano_hermes
 from conftest import _make_loop
 
 
+def _count(coord, key=None):
+    """The [count, armed] cadence state for *key* (keyless when None)."""
+    from nano_hermes.coordinator.reflection import _CADENCE_KEYLESS  # noqa: PLC0415
+
+    return coord._save_cadence.get(key or _CADENCE_KEYLESS, [0, False])
+
+
 def _make_hook(tmp_path, interval: int = 4):
     loop = _make_loop(tmp_path)
     return nano_hermes.install(
@@ -66,7 +73,7 @@ class TestHydrationFromHistory:
         # Pretend the conversation already had 20 user turns at restart —
         # clamp to (interval - 1) so we don't fire immediately.
         coord.hydrate_save_counter_from_history(recent_user_turns=20)
-        assert coord._user_turns_since_save == 4
+        assert _count(coord)[0] == 4
         # Next turn fires.
         coord.note_user_turn()
         assert coord.take_save_nudge() is not None
@@ -75,7 +82,7 @@ class TestHydrationFromHistory:
         hook = _make_hook(tmp_path, interval=4)
         coord = hook._reflection_coord
         coord.hydrate_save_counter_from_history(recent_user_turns=0)
-        assert coord._user_turns_since_save == 0
+        assert _count(coord)[0] == 0
         # Need full interval to fire.
         for _ in range(3):
             coord.note_user_turn()
@@ -87,7 +94,7 @@ class TestHydrationFromHistory:
         hook = _make_hook(tmp_path, interval=0)
         coord = hook._reflection_coord
         coord.hydrate_save_counter_from_history(recent_user_turns=100)
-        assert coord._user_turns_since_save == 0  # untouched
+        assert coord._save_cadence == {}  # untouched
 
 
 class TestHookIntegration:
@@ -109,28 +116,28 @@ class TestHookIntegration:
             await hook.before_iteration(ctx)
             await hook.after_iteration(ctx)
 
-        # Turn 1. Hydration counts the window's single user turn; the iteration-0
-        # bump is suppressed so it isn't counted twice.
+        # Turn 1. Hydration counts the window's single user turn instead of
+        # bumping, so it isn't counted twice.
         await turn()
-        assert coord._user_turns_since_save == 1
+        assert _count(coord)[0] == 1
         # Still turn 1, second iteration: the model called a tool. No advance.
         msgs.append({"role": "assistant", "content": "calling"})
         msgs.append({"role": "tool", "content": "result", "tool_call_id": "c1"})
         await turn(iteration=1)
-        assert coord._user_turns_since_save == 1
+        assert _count(coord)[0] == 1
 
         # Turn 2 — same "go" text again.
         msgs.append({"role": "assistant", "content": "ack"})
         msgs.append({"role": "user", "content": "go"})
         await turn()
-        assert coord._user_turns_since_save == 2
+        assert _count(coord)[0] == 2
 
         # Turn 3 — third "go". Should arm the nudge (interval=3).
         msgs.append({"role": "assistant", "content": "ack"})
         msgs.append({"role": "user", "content": "go"})
         await turn()
-        # Counter resets to 0 when armed; nudge waits to fire on next before_iteration.
-        assert coord._save_nudge_pending or coord._user_turns_since_save == 0
+        # Armed and delivered within the same before_iteration: counter back to 0.
+        assert _count(coord) == [0, False]
 
 
 class TestMemoryPatchResetsCounter:
@@ -144,7 +151,7 @@ class TestMemoryPatchResetsCounter:
         tool = MemoryPatchTool(hook=hook)
         out = await tool.execute(action="add", slot="memory", content="durable fact")
         assert out.startswith("ok")
-        assert coord._user_turns_since_save == 0
+        assert _count(coord)[0] == 0
         # Counter restarted — next two turns should not yet trigger.
         coord.note_user_turn()
         coord.note_user_turn()
@@ -206,14 +213,16 @@ class TestNudgeReachesTheHookPath:
     async def test_nudge_is_delivered_on_cadence(self, tmp_path):
         hook = _make_hook(tmp_path, interval=5)
         delivered = await self._turns(hook, 14)
-        assert delivered == [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0]
+        # Counted at iteration 0 and delivered in the same before_iteration, so
+        # the nudge lands on the fifth turn itself.
+        assert delivered == [0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0]
 
     async def test_nudge_survives_history_compaction(self, tmp_path):
         hook = _make_hook(tmp_path, interval=5)
         # Counting turns instead of window population means compaction no longer
         # even costs a turn of cadence: the interval holds straight through it.
         delivered = await self._turns(hook, 14, compact_at=7)
-        assert delivered == [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0]
+        assert delivered == [0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0]
 
     async def test_nudge_keeps_firing_after_the_window_saturates(self, tmp_path):
         """The cadence must not ride on window *population*.
@@ -225,7 +234,7 @@ class TestNudgeReachesTheHookPath:
         """
         hook = _make_hook(tmp_path, interval=5)
         delivered = await self._turns(hook, 24, cap=6)
-        assert delivered == [0] * 5 + ([1] + [0] * 4) * 3 + [1] + [0] * 3
+        assert delivered == ([0] * 4 + [1]) * 4 + [0] * 4
         assert sum(delivered) == 4
 
     async def test_resume_does_not_nudge_on_first_turn(self, tmp_path):
@@ -240,10 +249,9 @@ class TestNudgeReachesTheHookPath:
     async def test_counter_is_per_conversation(self, tmp_path):
         """One hook serves every chat the loop runs.
 
-        A process-wide counter leaks across conversations: the long chat's
-        count makes the short chat's delta permanently negative (nudge dead),
-        while the short chat's count replays the long chat's history as fresh
-        turns (nudge on every single turn).
+        A process-wide counter leaks across conversations: one chat's first
+        turn re-hydrates the shared count, and an armed nudge goes to whichever
+        chat iterates next.
         """
         hook = _make_hook(tmp_path, interval=5)
         chat_a, chat_b = [], []
@@ -252,15 +260,17 @@ class TestNudgeReachesTheHookPath:
             chat_a.append({"role": "assistant", "content": "ok"})
         a_hits, b_hits = [], []
         for _ in range(8):
-            a_hits += await self._turns(hook, 1, msgs=chat_a, label="a")
-            b_hits += await self._turns(hook, 1, msgs=chat_b, label="b")
-        # The cadence is shared, so 16 combined turns at interval=5 must
-        # deliver several nudges — not zero, which is what a scalar counter
-        # degrades to once the long chat pins the short one's delta.
-        assert sum(a_hits) + sum(b_hits) >= 2, (a_hits, b_hits)
-        # And no conversation is spammed: a scalar counter nudges the short
-        # chat on every turn, because the long chat's count replays as new.
-        assert sum(b_hits) <= 2, b_hits
+            a_hits += await self._turns(
+                hook, 1, msgs=chat_a, label="a", session_key="chan:a"
+            )
+            b_hits += await self._turns(
+                hook, 1, msgs=chat_b, label="b", session_key="chan:b"
+            )
+        # Each chat runs its own cadence: the resumed chat hydrates to
+        # interval-1 and fires on its second turn, then every fifth; the fresh
+        # chat fires on its fifth.
+        assert a_hits == [0, 1, 0, 0, 0, 0, 1, 0], a_hits
+        assert b_hits == [0, 0, 0, 0, 1, 0, 0, 0], b_hits
 
     async def test_busiest_conversation_is_not_evicted_by_idle_ones(self, tmp_path):
         """The counter dict is insertion-ordered and capped at 32 keys.
@@ -294,22 +304,70 @@ class TestNudgeReachesTheHookPath:
         # One hydration per conversation and no more: 40 idle plus the busy one.
         assert len(hydrations) == 41, len(hydrations)
 
-    async def test_recycled_list_address_does_not_replay_history(self, tmp_path):
-        """id(messages) can collide with a dead conversation's entry.
+    async def test_keyless_conversation_still_counts(self, tmp_path):
+        """Without a session key the window is a fresh list every turn.
 
-        Exercises the ``session_key=None`` fallback deliberately — ``_turns``
-        passes no key, so the counter is keyed on ``id(messages)`` and the
-        poked entry below is the one the hook will read.
-
-        A stale entry skips hydration, so the delta against a resumed
-        transcript would replay its whole history as fresh turns and arm
-        the nudge immediately — the very thing the clamp prevents.
+        Keyed by ``id(messages)``, every turn was a first sighting: hydrated
+        instead of counted, so the nudge never fired for a keyless caller.
+        Keyless turns now share one cadence.
         """
+        from nanobot.agent.hook import AgentHookContext  # noqa: PLC0415
+
+        hook = _make_hook(tmp_path, interval=3)
+        history: list[dict] = []
+        delivered = []
+        for turn in range(9):
+            history.append({"role": "user", "content": f"t {turn}"})
+            window = [dict(m) for m in history]  # a new list, like get_history
+            ctx = AgentHookContext(iteration=0, messages=window, session_key=None)
+            await hook.before_iteration(ctx)
+            delivered.append(
+                int(any("Memory check-in" in str(m.get("content")) for m in window))
+            )
+            await hook.after_iteration(ctx)
+            history.append({"role": "assistant", "content": "ack"})
+        assert delivered == [0, 0, 1] * 3
+
+    async def test_one_conversation_cannot_take_or_erase_anothers_nudge(
+        self, tmp_path
+    ):
+        """A shared counter let chat B's first turn reset chat A's count and
+        clear A's armed nudge — or, once B was known, deliver A's check-in into
+        B's conversation."""
+        hook = _make_hook(tmp_path, interval=3)
+        coord = hook._reflection_coord
+        for _ in range(3):
+            coord.note_user_turn("chan:a")
+        assert _count(coord, "chan:a") == [0, True]
+        coord.observe_user_turn("chan:b", window_user_turns=1)  # B's first turn
+        assert coord.take_save_nudge("chan:b") is None
+        assert coord.take_save_nudge("chan:a") is not None
+
+    async def test_memory_save_resets_only_the_calling_conversation(self, tmp_path):
+        """memory_patch learns its conversation from nanobot's per-turn
+        RequestContext contextvar, not from anything the hook shares."""
+        from nanobot.agent.tools.context import (  # noqa: PLC0415
+            RequestContext,
+            bind_request_context,
+            reset_request_context,
+        )
+
+        from nano_hermes.memory.tool import MemoryPatchTool  # noqa: PLC0415
+
         hook = _make_hook(tmp_path, interval=5)
-        history = []
-        for i in range(25):
-            history.append({"role": "user", "content": f"old {i}"})
-            history.append({"role": "assistant", "content": "ok"})
-        hook._user_msg_counts[id(history)] = 1  # simulate a recycled address
-        delivered = await self._turns(hook, 2, msgs=history)
-        assert delivered == [0, 0]
+        coord = hook._reflection_coord
+        for key in ("chan:a", "chan:b"):
+            coord.note_user_turn(key)
+            coord.note_user_turn(key)
+        token = bind_request_context(
+            RequestContext(channel="cli", chat_id="a", session_key="chan:a")
+        )
+        try:
+            out = await MemoryPatchTool(hook=hook).execute(
+                action="add", slot="memory", content="durable fact"
+            )
+        finally:
+            reset_request_context(token)
+        assert out.startswith("ok")
+        assert _count(coord, "chan:a")[0] == 0
+        assert _count(coord, "chan:b")[0] == 2

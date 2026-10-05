@@ -105,6 +105,7 @@ import numpy as np
 
 from ..embedding.chain import AllProvidersFailed, EmbeddingChain
 from ..embedding.contextual import add_context_preamble
+from ..lru import MAX_TRACKED_CONVERSATIONS, touch
 from ..redact import redact
 from .db import fts_guarded_write, run_vec_write
 
@@ -117,9 +118,9 @@ _ARCHIVABLE_ROLES = frozenset({"user", "assistant", "tool"})
 # ``loop._max_messages`` (120 by default) and nothing more.
 _MAX_FINGERPRINTS = 512
 
-# How many conversations to keep alignment state for. Matches the hook's and the
-# session coordinator's cap on the same kind of per-conversation state.
-_MAX_TRACKED_CONVERSATIONS = 32
+# How many conversations to keep alignment state for — the cap every
+# per-conversation dict shares (see ``nano_hermes.lru``).
+_MAX_TRACKED_CONVERSATIONS = MAX_TRACKED_CONVERSATIONS
 
 # Opening tag of the runtime-context block ``build_messages`` merges into the
 # window's last message (``context.py`` ``_RUNTIME_CONTEXT_TAG``). Matched on the
@@ -649,10 +650,7 @@ class SessionArchiver:
         session-id-keyed state goes with it, since that is the last reference to
         the id and nothing else would ever release it.
         """
-        self._fingerprints[key] = self._fingerprints.pop(key)
-        while len(self._fingerprints) > _MAX_TRACKED_CONVERSATIONS:
-            idle = next(iter(self._fingerprints))
-            self._fingerprints.pop(idle, None)
+        for idle in touch(self._fingerprints, key):
             self._pending.pop(idle, None)
             idle_sid = self._session_ids.pop(idle, None)
             if idle_sid is not None:
