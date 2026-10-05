@@ -616,9 +616,14 @@ class SessionArchiver:
                 if not mid_turn and not live:
                     new_confirmed.append(fp)
         except BaseException:
-            # All or nothing: rows from a half-done pass would sit in chunks
-            # while the alignment state says they were never archived, and the
-            # next pass would insert them a second time.
+            # All or nothing for chunks and alignment state: rows from a
+            # half-done pass would sit in chunks while the alignment state says
+            # they were never archived, and the next pass would insert them a
+            # second time. The sessions row is the deliberate exception —
+            # _start_session committed it already, so the mapping stays and the
+            # retry archives into it rather than leaving chunks pointing at a
+            # rolled-back row. _session_tasks may keep the failed pass's first
+            # user text; it is only embedding context for that same session.
             self._db.rollback()
             raise
         confirmed = self._fingerprints.setdefault(key, [])
