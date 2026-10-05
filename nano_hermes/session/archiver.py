@@ -551,9 +551,7 @@ class SessionArchiver:
         session_id = self._session_ids.get(key)
         if session_id is None:
             session_id = self._start_session(key, session_key)
-        turn = self._turn_counts.get(session_id)
-        if turn is None:
-            turn = self._session_turn_count(session_id)
+        turn = self._turn_counts.get(session_id, 0)
 
         new_ids: list[int] = []
         new_texts: list[str] = []
@@ -648,23 +646,6 @@ class SessionArchiver:
             if idle_sid is not None:
                 self._session_tasks.pop(idle_sid, None)
                 self._turn_counts.pop(idle_sid, None)
-
-    def _session_turn_count(self, session_id: int) -> int:
-        """Highest ``turn_index`` already stored for *session_id*.
-
-        Only read when the counter is cold (first pass of a process against a
-        session that already has rows), so the numbering stays monotonic across
-        a restart instead of colliding from 1 again.
-        """
-        try:
-            row = self._db.execute(
-                "SELECT COALESCE(MAX(turn_index), 0) FROM chunks WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()
-        except sqlite3.Error:
-            log.exception("failed to read turn_index for session %d", session_id)
-            return 0
-        return int(row[0]) if row else 0
 
     def _is_new_conversation(
         self, key: str | int, messages: list[dict[str, Any]]
