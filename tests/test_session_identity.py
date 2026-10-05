@@ -932,3 +932,25 @@ class TestAFailedPassChangesNothing:
         archiver.ensure_session(second, "chan:1")
         rows = [r[0] for r in db.execute("SELECT content FROM chunks ORDER BY id")]
         assert rows == ["u0", "a0", "u1", "a1", "u2"]
+
+
+class TestCurrentSessionIdAfterArchive:
+    def test_the_window_just_archived_skips_realignment(self, archiver_factory):
+        """The hook asks for the session id of the list it has just archived;
+        re-hashing and re-aligning that window was a quarter of the hook's
+        per-turn cost. Any other list, or the same list grown, takes the full
+        path."""
+        archiver, _db = archiver_factory()
+        calls = []
+        real = archiver._is_new_conversation
+        archiver._is_new_conversation = lambda *a: calls.append(a) or real(*a)
+        window = [{"role": "user", "content": "u0"}]
+        sid = archiver.ensure_session(window, "chan:1")
+        assert archiver.current_session_id(window, "chan:1") == sid
+        assert calls == []
+        # An equal but distinct list: identity, not contents or id(), decides.
+        assert archiver.current_session_id(list(window), "chan:1") == sid
+        assert len(calls) == 1
+        window.append({"role": "assistant", "content": "a0"})
+        assert archiver.current_session_id(window, "chan:1") == sid
+        assert len(calls) == 2

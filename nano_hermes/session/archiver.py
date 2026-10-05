@@ -238,10 +238,11 @@ def _archivable(
     message shifts neither.
 
     Runs over the whole window on every pass, and there is one pass per hook
-    call, so per-turn cost is O(iterations x window): a turn with eight tool
-    calls (nine iterations, 18 archived messages) measures 5.6 ms at the
-    120-message cap, ~145 ms on a Pi 3B+, and this function is 50% of it. If
-    that ever matters, a mid-turn pass only needs the tail past
+    call, so per-turn cost is O(iterations x window). Hook-only, on the
+    production window shape: 0.6 ms median for a plain turn and 2.6 ms with
+    eight tool calls (interleaved A/B, five runs, one shape per process) —
+    roughly 15 ms / 70 ms on a Pi 3B+ by a x26 extrapolation, not a
+    measurement. If that ever matters, a mid-turn pass only needs the tail past
     ``len(confirmed) + len(pending)`` -- the head cannot change.
     """
     out: list[tuple[dict[str, Any], str, str]] = []
@@ -402,6 +403,12 @@ class SessionArchiver:
         # (``session/browse.py``) and as a turn count (``status/tool.py``); the
         # window index it used to hold ran 1..cap then repeated.
         self._turn_counts: dict[int, int] = {}
+        # The window the last successful pass archived: (list, length, key).
+        # The hook asks current_session_id about that same list straight after
+        # archiving it, and re-deriving the verdict cost a full-window hash plus
+        # an alignment — about a quarter of the hook's per-turn time. Holding
+        # the list itself, not its id(), so a recycled address cannot hit.
+        self._last_pass: tuple[list, int, str | int] | None = None
         # session_id → first user message text (task context for embeddings).
         self._session_tasks: dict[int, str] = {}
         # Pending background embedding tasks — retained so asyncio
@@ -470,6 +477,10 @@ class SessionArchiver:
         ended and purged.
         """
         key = session_key or id(messages)
+        last = self._last_pass
+        if last is not None and last[0] is messages and last[1:] == (len(messages), key):
+            # Just archived: aligned by construction, so not a new conversation.
+            return self._session_ids.get(key)
         if self._is_new_conversation(key, messages):
             return None
         return self._session_ids.get(key)
@@ -631,6 +642,7 @@ class SessionArchiver:
         self._evict_idle_conversations(key)
         if new_ids:
             self._db.commit()
+        self._last_pass = (messages, len(messages), key)
         return new_ids, new_texts, session_id
 
     def _evict_idle_conversations(self, key: str | int) -> None:
