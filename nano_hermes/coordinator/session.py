@@ -25,15 +25,14 @@ def request_session_key() -> str | None:
 
     nanobot binds a per-turn ``RequestContext`` contextvar around the runner
     (0.2.2 and HEAD), so a tool reads its *own* conversation even while other
-    chats are mid-turn — unlike any "current conversation" scalar shared
-    across them.
+    chats are mid-turn. Upstream's accessor, guarded so an older nanobot
+    without it degrades to "no key" instead of failing the import.
     """
     try:
-        from nanobot.agent.tools.context import current_request_context
+        from nanobot.agent.tools.context import current_request_session_key
     except ImportError:
         return None
-    ctx = current_request_context()
-    return ctx.session_key if ctx is not None else None
+    return current_request_session_key()
 
 
 class SessionCoordinator:

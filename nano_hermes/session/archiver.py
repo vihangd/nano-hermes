@@ -113,9 +113,12 @@ log = logging.getLogger(__name__)
 
 _ARCHIVABLE_ROLES = frozenset({"user", "assistant", "tool"})
 
-# How many fingerprints to retain per conversation. Only an overlap with the
-# current window matters, so this needs to exceed the largest plausible
-# ``loop._max_messages`` (120 by default) and nothing more.
+# How many fingerprints to retain per conversation, at minimum. Only an overlap
+# with the current window matters; 512 covers ``max_messages`` at its default of
+# 120 several times over, and the trim below also keeps twice the current
+# window, because ``max_messages`` is user config with no upper bound — a list
+# shorter than the window would drop its head, find no overlap, and declare a
+# new conversation on every turn.
 _MAX_FINGERPRINTS = 512
 
 # How many conversations to keep alignment state for — the cap every
@@ -230,6 +233,7 @@ def _extract_text(msg: dict[str, Any]) -> str | None:
 
 def _archivable(
     messages: list[dict[str, Any]],
+    cache: dict[int, tuple] | None = None,
 ) -> list[tuple[dict[str, Any], str, str]]:
     """The subsequence of *messages* this archiver stores, with fingerprints.
 
@@ -237,23 +241,36 @@ def _archivable(
     are always comparable: a system prompt or a tool-calls-only assistant
     message shifts neither.
 
-    Runs over the whole window on every pass, and there is one pass per hook
-    call, so per-turn cost is O(iterations x window). Hook-only, on the
-    production window shape: 0.6 ms median for a plain turn and 2.6 ms with
-    eight tool calls (interleaved A/B, five runs, one shape per process) —
-    roughly 15 ms / 70 ms on a Pi 3B+ by a x26 extrapolation, not a
-    measurement. If that ever matters, a mid-turn pass only needs the tail past
-    ``len(confirmed) + len(pending)`` -- the head cannot change.
+    Runs over the whole window on every pass — the overlap search needs the
+    window's head — and there is one pass per hook call, so a turn with eight
+    tool calls hashes the window nine times. Within a turn the runner appends
+    to one list of the same message dicts, so *cache* (``id(msg)`` → the
+    message, its content object, and the result) answers the repeats. Each
+    entry holds the message itself, so an id cannot be recycled while cached,
+    and a replaced ``content`` misses. The caller replaces the cache with each
+    call's results, so it never outlives one window.
     """
     out: list[tuple[dict[str, Any], str, str]] = []
+    fresh: dict[int, tuple] = {}
     for msg in messages:
         role = msg.get("role")
         if role not in _ARCHIVABLE_ROLES:
             continue
-        text = _extract_text(msg)
+        content = msg.get("content")
+        hit = cache.get(id(msg)) if cache else None
+        if hit is not None and hit[0] is msg and hit[1] is content and hit[2] == role:
+            text, fp = hit[3], hit[4]
+        else:
+            text = _extract_text(msg)
+            fp = None if text is None else _fingerprint(str(role), text)
+        if cache is not None:
+            fresh[id(msg)] = (msg, content, role, text, fp)
         if text is None:
             continue
-        out.append((msg, text, _fingerprint(str(role), text)))
+        out.append((msg, text, fp))
+    if cache is not None:
+        cache.clear()
+        cache.update(fresh)
     return out
 
 
@@ -409,6 +426,8 @@ class SessionArchiver:
         # an alignment — about a quarter of the hook's per-turn time. Holding
         # the list itself, not its id(), so a recycled address cannot hit.
         self._last_pass: tuple[list, int, str | int] | None = None
+        # Per-message fingerprints of the last window seen, for _archivable.
+        self._entry_cache: dict[int, tuple] = {}
         # session_id → first user message text (task context for embeddings).
         self._session_tasks: dict[int, str] = {}
         # Pending background embedding tasks — retained so asyncio
@@ -526,7 +545,7 @@ class SessionArchiver:
         mid_turn: bool = False,
     ) -> tuple[list[int], list[str], int | None]:
         key = session_key or id(messages)
-        entries = _archivable(messages)
+        entries = _archivable(messages, self._entry_cache)
         if not entries:
             # A window with nothing archivable in it (system prompt only) says
             # nothing about conversation identity — in particular it must not
@@ -549,6 +568,7 @@ class SessionArchiver:
             if old_sid is not None:
                 self._session_tasks.pop(old_sid, None)
                 self._turn_counts.pop(old_sid, None)
+                self._end_session(old_sid)
             self._fingerprints.pop(key, None)
             self._pending.pop(key, None)
             start = 0
@@ -625,6 +645,16 @@ class SessionArchiver:
             # rolled-back row. _session_tasks may keep the failed pass's first
             # user text; it is only embedding context for that same session.
             self._db.rollback()
+            if new_ids:
+                # Rollback is not enough on its own: detaching a corrupt
+                # chunks_fts mid-pass commits (``db.detach_fts``), which makes
+                # the rows inserted before it durable. Remove them explicitly.
+                try:
+                    marks = ",".join("?" * len(new_ids))
+                    self._db.execute(f"DELETE FROM chunks WHERE id IN ({marks})", new_ids)
+                    self._db.commit()
+                except sqlite3.Error:
+                    log.exception("could not remove a failed archive pass's rows")
             raise
         confirmed = self._fingerprints.setdefault(key, [])
         confirmed.extend(new_confirmed)
@@ -643,7 +673,7 @@ class SessionArchiver:
             self._pending[key] = pending
         else:
             self._pending.pop(key, None)
-        del confirmed[:-_MAX_FINGERPRINTS]
+        del confirmed[: -max(_MAX_FINGERPRINTS, 2 * len(entries))]
         self._evict_idle_conversations(key)
         if new_ids:
             self._db.commit()
@@ -673,6 +703,25 @@ class SessionArchiver:
             if idle_sid is not None:
                 self._session_tasks.pop(idle_sid, None)
                 self._turn_counts.pop(idle_sid, None)
+                self._end_session(idle_sid)
+
+    def _end_session(self, session_id: int) -> None:
+        """Stamp ``ended_at`` on a session this archiver will never write again.
+
+        Dropping the mapping is what ends a session: the conversation's next
+        pass opens a new row. The coordinator's boundary also stamps it, but
+        only when it still remembers the conversation — past its own 32-key
+        cap it does not, and a session left with ``ended_at`` NULL is one
+        ``purge_older_than`` can never delete.
+        """
+        try:
+            self._db.execute(
+                "UPDATE sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL",
+                (time.time(), session_id),
+            )
+            self._db.commit()
+        except sqlite3.Error:
+            log.exception("failed to set ended_at for session %d", session_id)
 
     def _is_new_conversation(
         self, key: str | int, messages: list[dict[str, Any]]
@@ -682,7 +731,7 @@ class SessionArchiver:
         Read-only mirror of the branch in :meth:`_archive` — the same
         :func:`_align` call, so the two cannot drift apart.
         """
-        entries = _archivable(messages)
+        entries = _archivable(messages, self._entry_cache)
         if not entries:
             return False
         return _align(

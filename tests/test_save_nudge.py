@@ -371,3 +371,49 @@ class TestNudgeReachesTheHookPath:
         assert out.startswith("ok")
         assert _count(coord, "chan:a")[0] == 0
         assert _count(coord, "chan:b")[0] == 2
+
+
+class TestWhatCountsAsAUserTurn:
+    async def test_follow_ups_drained_mid_turn_count(self, tmp_path):
+        """nanobot drains user follow-ups into the running turn's list; counting
+        only at iteration 0 missed every one of them."""
+        from nanobot.agent.hook import AgentHookContext  # noqa: PLC0415
+
+        hook = _make_hook(tmp_path, interval=10)
+        coord = hook._reflection_coord
+        msgs = [{"role": "user", "content": "start"}]
+        await hook.before_iteration(
+            AgentHookContext(iteration=0, messages=msgs, session_key="chan:a")
+        )
+        assert _count(coord, "chan:a")[0] == 1
+        msgs.append({"role": "assistant", "content": "", "tool_calls": []})
+        msgs.append({"role": "user", "content": "also this"})
+        msgs.append({"role": "user", "content": "and this"})
+        await hook.before_iteration(
+            AgentHookContext(iteration=1, messages=msgs, session_key="chan:a")
+        )
+        assert _count(coord, "chan:a")[0] == 3
+        # Another iteration with nothing new adds nothing.
+        await hook.before_iteration(
+            AgentHookContext(iteration=2, messages=msgs, session_key="chan:a")
+        )
+        assert _count(coord, "chan:a")[0] == 3
+
+    async def test_a_subagent_result_turn_is_not_a_user_turn(self, tmp_path):
+        """A subagent result arrives as an ``assistant`` current message. The
+        window still holds older user messages, which used to be enough to
+        count the turn."""
+        from nanobot.agent.hook import AgentHookContext  # noqa: PLC0415
+
+        hook = _make_hook(tmp_path, interval=10)
+        coord = hook._reflection_coord
+        msgs = [{"role": "user", "content": "kick off a subagent"}]
+        await hook.before_iteration(
+            AgentHookContext(iteration=0, messages=msgs, session_key="chan:a")
+        )
+        msgs.append({"role": "assistant", "content": "started"})
+        msgs.append({"role": "assistant", "content": "[subagent result] done"})
+        await hook.before_iteration(
+            AgentHookContext(iteration=0, messages=list(msgs), session_key="chan:a")
+        )
+        assert _count(coord, "chan:a")[0] == 1

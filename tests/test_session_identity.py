@@ -232,6 +232,28 @@ class TestToolsAttachToTheCallingConversation:
         rows = hook.db.execute("SELECT session_id, content FROM reflections").fetchall()
         assert rows == [(alice_sid, "alice's lesson")]
 
+    async def test_an_unsynced_keyed_turn_does_not_borrow_another_session(
+        self, tmp_path
+    ):
+        """A keyed turn with no session of its own (its bootstrap failed) fell
+        back to the shared scalar and wrote into whichever chat synced last."""
+        from nanobot.agent.tools.context import (
+            RequestContext,
+            bind_request_context,
+            reset_request_context,
+        )
+
+        hook = _make_hook(tmp_path)
+        await _turn(hook, [], "b 0", "cli:bob")
+        assert hook.current_session_id is not None
+        token = bind_request_context(
+            RequestContext(channel="cli", chat_id="carol", session_key="cli:carol")
+        )
+        try:
+            assert hook.turn_session_id() is None
+        finally:
+            reset_request_context(token)
+
 
 class TestKeylessFallback:
     async def test_keyless_interleaving_still_over_counts(self, tmp_path):
@@ -422,6 +444,20 @@ class TestPerConversationStateIsBounded:
         live_sids = set(archiver._session_ids.values())
         assert set(archiver._session_tasks) <= live_sids
         assert set(archiver._turn_counts) <= live_sids
+
+    def test_an_evicted_conversations_session_is_ended(self, archiver_factory):
+        """Eviction is what ends that session — its next pass opens a new row —
+        and the coordinator's boundary may have forgotten it too. Left NULL,
+        ``ended_at`` keeps the session out of ``purge_older_than`` forever."""
+        from nano_hermes.session.archiver import _MAX_TRACKED_CONVERSATIONS
+
+        archiver, db = archiver_factory()
+        for i in range(_MAX_TRACKED_CONVERSATIONS + 1):
+            archiver.ensure_session([{"role": "user", "content": f"hi {i}"}], f"chan:{i}")
+        ended = db.execute(
+            "SELECT session_key FROM sessions WHERE ended_at IS NOT NULL"
+        ).fetchall()
+        assert ended == [("chan:0",)]
 
 
 def _history(session, cap: int, include_timestamps: bool) -> list[dict]:
@@ -968,6 +1004,42 @@ class TestAFailedPassChangesNothing:
         assert rows == ["u0", "a0", "u1", "a1", "u2"]
 
 
+    def test_rows_a_mid_pass_fts_detach_committed_are_removed_too(
+        self, archiver_factory, monkeypatch
+    ):
+        """Detaching a corrupt chunks_fts commits mid-pass, making the earlier
+        rows durable; a later failure's rollback cannot undo them."""
+        from nano_hermes.session import archiver as archiver_mod
+
+        archiver, db = archiver_factory()
+        real = archiver_mod.fts_guarded_write
+        calls = []
+
+        def flaky(conn, table, op):
+            calls.append(table)
+            result = real(conn, table, op)
+            if len(calls) == 2:
+                conn.commit()  # what detach_fts does after dropping triggers
+            if len(calls) == 3:
+                raise sqlite3.OperationalError("database is locked")
+            return result
+
+        monkeypatch.setattr(archiver_mod, "fts_guarded_write", flaky)
+        window = [
+            {"role": "user", "content": "u0"},
+            {"role": "assistant", "content": "a0"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+        ]
+        with pytest.raises(sqlite3.OperationalError):
+            archiver.ensure_session(window, "chan:1")
+        assert db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
+
+        monkeypatch.setattr(archiver_mod, "fts_guarded_write", real)
+        archiver.ensure_session(window, "chan:1")
+        rows = [r[0] for r in db.execute("SELECT content FROM chunks ORDER BY id")]
+        assert rows == ["u0", "a0", "u1", "a1"]
+
 class TestCurrentSessionIdAfterArchive:
     def test_the_window_just_archived_skips_realignment(self, archiver_factory):
         """The hook asks for the session id of the list it has just archived;
@@ -988,3 +1060,42 @@ class TestCurrentSessionIdAfterArchive:
         window.append({"role": "assistant", "content": "a0"})
         assert archiver.current_session_id(window, "chan:1") == sid
         assert len(calls) == 2
+
+
+class TestAWindowLargerThanTheFingerprintFloor:
+    def test_a_window_past_512_messages_still_aligns(self, archiver_factory):
+        """``max_messages`` is unbounded config. A hard 512-fingerprint cap
+        dropped the head of a larger window, so the next pass found no overlap
+        and opened a new session — every turn."""
+        archiver, db = archiver_factory()
+        msgs = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"}
+            for i in range(700)
+        ]
+        archiver.ensure_session(list(msgs), "chan:1")
+        for i in range(700, 704):
+            msgs.append({"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"})
+            msgs = msgs[1:]  # slide, like get_history at its cap
+            archiver.ensure_session(list(msgs), "chan:1")
+        assert db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 704
+
+
+class TestFingerprintCache:
+    def test_a_replaced_content_is_rehashed(self):
+        """The cache answers repeat passes over the runner's list within a turn;
+        a message whose content was replaced must not reuse its old print."""
+        from nano_hermes.session.archiver import _archivable
+
+        cache: dict = {}
+        msg = {"role": "tool", "tool_call_id": "c1", "content": "full output"}
+        window = [{"role": "user", "content": "u0"}, msg]
+        first = _archivable(window, cache)
+        assert _archivable(window, cache) == first  # served from the cache
+        msg["content"] = "truncated"
+        again = _archivable(window, cache)
+        assert again[1][1] == "truncated" and again[1][2] != first[1][2]
+        # And a different list of equal content still fingerprints identically.
+        assert [e[2] for e in _archivable([dict(m) for m in window], cache)] == [
+            e[2] for e in again
+        ]

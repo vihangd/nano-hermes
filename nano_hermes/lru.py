@@ -1,9 +1,11 @@
 """Bounded per-conversation state.
 
 One hook instance serves every chat the loop runs, so anything keyed by
-conversation must be capped or a long-lived gateway grows it forever. All the
-per-conversation dicts share one cap and one recency rule, so they cannot evict
-different conversations from one another.
+conversation must be capped or a long-lived gateway grows it forever. The
+per-conversation dicts share one cap and one recency rule, but each is touched
+by its own owner at its own moments, so they can still drop different
+conversations — whatever must survive an eviction (a session's ``ended_at``) is
+written at eviction time rather than left to another dict's memory.
 """
 from __future__ import annotations
 

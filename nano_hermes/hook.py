@@ -21,6 +21,7 @@ from .config import NanoHermesConfig
 from .coordinator.reflection import ReflectionCoordinator
 from .coordinator.session import SessionCoordinator, request_session_key
 from .coordinator.skills import SkillUsageTracker
+from .lru import touch
 from .embedding.chain import EmbeddingChain
 from .memory.budgets import BudgetedMemory
 from .reflect.salience import last_user_text
@@ -134,9 +135,9 @@ class NanoHermesHook(AgentHook):
         # Cache for last_user_text: (id(messages), len(messages), result).
         # Avoids a full reverse scan every after_iteration when nothing changed.
         self._last_user_text_cache: tuple[int, int, str | None] = (0, 0, None)
-        # Per-conversation count of user-role messages seen — drives the
-        # save-nudge cadence by detecting new turns via list growth (text
-        # equality misses repeated identical prompts like "go", "again").
+        # (id(messages), user-message count) at this conversation's previous
+        # iteration — see _count_user_turns.
+        self._turn_user_counts: dict[str, tuple[int, int]] = {}
 
     # ------------------------------------------------------------------
     # Public API surface (unchanged for external callers)
@@ -156,14 +157,17 @@ class NanoHermesHook(AgentHook):
         ``current_session_id`` is whichever conversation synced last, so under
         interleaving a ``reflect`` / ``rate_skill`` / ``nano_status`` call
         attached to another chat's session. The calling turn's key comes from
-        nanobot's per-turn request contextvar; the scalar is only the fallback
-        — for a caller outside a turn (direct API use, tests) and for a keyless
-        conversation, which has no per-key entry. That fallback is the old
-        behavior: exact for a single conversation, as imprecise as before for
-        interleaved keyless ones.
+        nanobot's per-turn request contextvar. The scalar is only the fallback
+        when there is no key — a caller outside a turn (direct API use, tests)
+        or a keyless conversation — where it is the old behavior: exact for a
+        single conversation, as imprecise as before for interleaved keyless
+        ones. A keyed turn whose session never synced (its bootstrap failed)
+        gets None rather than another chat's id.
         """
-        session_id = self._session_coord.session_for(request_session_key())
-        return session_id if session_id is not None else self.current_session_id
+        key = request_session_key()
+        if key:
+            return self._session_coord.session_for(key)
+        return self.current_session_id
 
     def embedder(self) -> EmbeddingChain:
         return EmbeddingChain(self.config.embedding)
@@ -389,20 +393,8 @@ class NanoHermesHook(AgentHook):
         if context.iteration == 0:
             for msg in self._reflection_coord.get_principle_injections(context.messages):
                 self._inject(context.messages, msg)
-            # Memory-save cadence: one fresh user turn per turn, counted here
-            # because iteration 0 fires exactly once per turn — not by a
-            # population delta over the window, which is a bounded sliding
-            # window whose user count saturates at the cap (the cadence froze
-            # there: five nudges in 24 turns, then never). The subagent path has
-            # no user message, so it doesn't count. Per conversation, inside the
-            # coordinator; the first sighting hydrates from the window instead.
-            if any(m.get("role") == "user" for m in context.messages):
-                self._reflection_coord.observe_user_turn(
-                    context.session_key,
-                    window_user_turns=sum(
-                        1 for m in context.messages if m.get("role") == "user"
-                    ),
-                )
+
+        self._count_user_turns(context)
 
         # Inject a matching past trajectory on iteration 0 (opt-in via config).
         if context.iteration == 0 and self.config.trajectory.inject_context:
@@ -548,6 +540,46 @@ class NanoHermesHook(AgentHook):
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _count_user_turns(self, context: AgentHookContext) -> None:
+        """Advance this conversation's memory-save cadence by its new user turns.
+
+        Iteration 0 counts the turn's trailing run of user messages — the
+        triggering one plus any follow-ups nanobot drained before the first
+        model call — and nothing for a subagent-result turn, whose current
+        message is ``assistant``. Later iterations count user follow-ups the
+        runner drains mid-turn (``_try_drain_injections``) into the same list,
+        by its growth within the turn: the list is only appended to until the
+        turn ends, unlike the window across turns, whose population saturates
+        at the cap (that froze the cadence at five nudges in 24 turns). The
+        first sighting of a conversation hydrates from the window instead.
+        Cron and heartbeat turns arrive as user messages and do count.
+        """
+        msgs = context.messages
+        users = sum(1 for m in msgs if m.get("role") == "user")
+        turn_key = context.session_key or ""
+        if context.iteration == 0:
+            fresh = 0
+            for m in reversed(msgs):
+                role = m.get("role")
+                if role == "system":
+                    continue  # this hook's own injections ride at the end
+                if role != "user":
+                    break
+                fresh += 1
+            if fresh:
+                self._reflection_coord.observe_user_turn(
+                    context.session_key, window_user_turns=users, turns=fresh
+                )
+        else:
+            seen = self._turn_user_counts.get(turn_key)
+            if seen is not None and seen[0] == id(msgs) and users > seen[1]:
+                for _ in range(users - seen[1]):
+                    self._reflection_coord.note_user_turn(context.session_key)
+        # id() is safe here: within a turn the runner holds the list alive, and
+        # iteration 0 of the next turn overwrites the entry before it is read.
+        self._turn_user_counts[turn_key] = (id(msgs), users)
+        touch(self._turn_user_counts, turn_key)
 
     def _maybe_schedule_evolution(self) -> None:
         """Schedule a GEPA+rewriter background task if the cadence config fires."""

@@ -284,8 +284,10 @@ class ReflectionCoordinator:
         touch(self._save_cadence, key, lambda: [0, False])
         return self._save_cadence[key]
 
-    def observe_user_turn(self, key: str | None, *, window_user_turns: int) -> None:
-        """Count one fresh user turn for *key*, hydrating on first sight.
+    def observe_user_turn(
+        self, key: str | None, *, window_user_turns: int, turns: int = 1
+    ) -> None:
+        """Count *turns* fresh user turns for *key*, hydrating on first sight.
 
         The first turn a process sees for a conversation restores the counter
         from the window instead of counting — Hermes-style, counters survive
@@ -294,7 +296,8 @@ class ReflectionCoordinator:
         touches that conversation alone.
         """
         if (key or _CADENCE_KEYLESS) in self._save_cadence:
-            self.note_user_turn(key)
+            for _ in range(turns):
+                self.note_user_turn(key)
         else:
             self.hydrate_save_counter_from_history(
                 recent_user_turns=window_user_turns, key=key
