@@ -157,7 +157,10 @@ class NanoHermesHook(AgentHook):
         interleaving a ``reflect`` / ``rate_skill`` / ``nano_status`` call
         attached to another chat's session. The calling turn's key comes from
         nanobot's per-turn request contextvar; the scalar is only the fallback
-        for a caller outside a turn (direct API use, tests).
+        — for a caller outside a turn (direct API use, tests) and for a keyless
+        conversation, which has no per-key entry. That fallback is the old
+        behavior: exact for a single conversation, as imprecise as before for
+        interleaved keyless ones.
         """
         session_id = self._session_coord.session_for(request_session_key())
         return session_id if session_id is not None else self.current_session_id
