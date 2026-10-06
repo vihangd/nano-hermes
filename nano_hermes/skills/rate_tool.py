@@ -96,7 +96,7 @@ class SkillRateTool(Tool):
 
         is_success = outcome == "success"
         now = time.time()
-        session_id = self._hook.current_session_id
+        session_id = self._hook.turn_session_id()
 
         try:
             with self._hook.db:

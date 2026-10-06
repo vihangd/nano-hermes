@@ -92,7 +92,7 @@ class ReflectTool(Tool):
             content = r.text
             redaction_note = format_redaction_note(r)
 
-        session_id = self._hook.current_session_id
+        session_id = self._hook.turn_session_id()
         if session_id is None:
             return (
                 "Error: no active session — reflections need an archived "

@@ -12,23 +12,9 @@ log = logging.getLogger(__name__)
 
 from nanobot.agent.tools.base import Tool, tool_parameters
 
+from ..coordinator.session import request_session_key
 from ..redact import format_redaction_note, redact
 
-
-
-def _conversation_key() -> str | None:
-    """Session key of the turn this tool call belongs to.
-
-    nanobot binds a per-turn ``RequestContext`` contextvar around the runner,
-    so this is the calling conversation even while other chats are mid-turn —
-    unlike any "current conversation" scalar the hook could keep.
-    """
-    try:
-        from nanobot.agent.tools.context import current_request_context
-    except ImportError:
-        return None
-    ctx = current_request_context()
-    return ctx.session_key if ctx is not None else None
 
 
 if TYPE_CHECKING:
@@ -127,7 +113,7 @@ class MemoryPatchTool(Tool):
                     return f"ok: entry already exists in {slot} (not re-added)"
                 # Reset the cadence counter so the nudge doesn't fire
                 # immediately after the agent already saved.
-                self._hook._reflection_coord.note_memory_save(_conversation_key())
+                self._hook._reflection_coord.note_memory_save(request_session_key())
                 return f"ok: added {len(content.strip())} chars to {slot}{redaction_note}"
             if action == "replace":
                 if needle is None or replacement is None:

@@ -20,6 +20,22 @@ log = logging.getLogger(__name__)
 
 
 
+def request_session_key() -> str | None:
+    """Session key of the turn the caller is running in, from nanobot.
+
+    nanobot binds a per-turn ``RequestContext`` contextvar around the runner
+    (0.2.2 and HEAD), so a tool reads its *own* conversation even while other
+    chats are mid-turn — unlike any "current conversation" scalar shared
+    across them.
+    """
+    try:
+        from nanobot.agent.tools.context import current_request_context
+    except ImportError:
+        return None
+    ctx = current_request_context()
+    return ctx.session_key if ctx is not None else None
+
+
 class SessionCoordinator:
     def __init__(
         self,
@@ -111,6 +127,12 @@ class SessionCoordinator:
             touch(self._sessions_by_key, session_key)
         self.current_session_id = existing
         return existing, completed_session_id
+
+    def session_for(self, session_key: str | None) -> int | None:
+        """Session id last synced for *session_key*, without the shared scalar."""
+        if not session_key:
+            return None
+        return self._sessions_by_key.get(session_key)
 
     def finalize(
         self,

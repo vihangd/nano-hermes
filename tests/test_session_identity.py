@@ -199,6 +199,40 @@ class TestFreshListObjectPerTurn:
         assert hook.db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
 
 
+class TestToolsAttachToTheCallingConversation:
+    async def test_reflect_lands_in_the_calling_chats_session(self, tmp_path):
+        """``current_session_id`` is whichever chat synced last. With two chats
+        mid-turn, a reflection made during alice's turn attached to bob's
+        session. Tools now resolve their session from nanobot's per-turn
+        request contextvar."""
+        from nanobot.agent.tools.context import (
+            RequestContext,
+            bind_request_context,
+            reset_request_context,
+        )
+
+        from nano_hermes.reflect.tool import ReflectTool
+
+        hook = _make_hook(tmp_path)
+        alice, bob = [], []
+        await _turn(hook, alice, "a 0", "cli:alice")
+        await _turn(hook, bob, "b 0", "cli:bob")  # bob synced last
+        alice_sid = hook._session_coord.session_for("cli:alice")
+        bob_sid = hook._session_coord.session_for("cli:bob")
+        assert hook.current_session_id == bob_sid != alice_sid
+
+        token = bind_request_context(
+            RequestContext(channel="cli", chat_id="alice", session_key="cli:alice")
+        )
+        try:
+            out = await ReflectTool(hook=hook).execute(content="alice's lesson")
+        finally:
+            reset_request_context(token)
+        assert out.startswith("ok"), out
+        rows = hook.db.execute("SELECT session_id, content FROM reflections").fetchall()
+        assert rows == [(alice_sid, "alice's lesson")]
+
+
 class TestKeylessFallback:
     async def test_keyless_interleaving_still_over_counts(self, tmp_path):
         """Documented limitation, not an aspiration.

@@ -49,7 +49,7 @@ class NanoStatusTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         hook = self._hook
-        session_id = hook.current_session_id
+        session_id = hook.turn_session_id()
 
         # Archived-message count for the current session. ``turn_index``
         # numbers messages, not turns (session/archiver.py), and starts at 1, so

@@ -19,7 +19,7 @@ from nanobot.agent.hook import AgentHook, AgentHookContext
 
 from .config import NanoHermesConfig
 from .coordinator.reflection import ReflectionCoordinator
-from .coordinator.session import SessionCoordinator
+from .coordinator.session import SessionCoordinator, request_session_key
 from .coordinator.skills import SkillUsageTracker
 from .embedding.chain import EmbeddingChain
 from .memory.budgets import BudgetedMemory
@@ -149,6 +149,18 @@ class NanoHermesHook(AgentHook):
     @current_session_id.setter
     def current_session_id(self, value: int | None) -> None:
         self._session_coord.current_session_id = value
+
+    def turn_session_id(self) -> int | None:
+        """Session of the turn a tool is being called from.
+
+        ``current_session_id`` is whichever conversation synced last, so under
+        interleaving a ``reflect`` / ``rate_skill`` / ``nano_status`` call
+        attached to another chat's session. The calling turn's key comes from
+        nanobot's per-turn request contextvar; the scalar is only the fallback
+        for a caller outside a turn (direct API use, tests).
+        """
+        session_id = self._session_coord.session_for(request_session_key())
+        return session_id if session_id is not None else self.current_session_id
 
     def embedder(self) -> EmbeddingChain:
         return EmbeddingChain(self.config.embedding)
@@ -365,8 +377,10 @@ class NanoHermesHook(AgentHook):
         except Exception:
             log.exception("nano-hermes archive failed")
 
-        # Keep current_session_id in sync with archiver (lazy-bootstrap on first call).
-        self._sync_session(context.messages, context.session_key)
+        # Keep current_session_id in sync with archiver (lazy-bootstrap on first
+        # call). Read below from this local, not the scalar: the awaits in this
+        # method let another chat's turn sync in between.
+        session_id = self._sync_session(context.messages, context.session_key)
 
         # Inject matching principles on iteration 0 (pure FTS5, always fast).
         if context.iteration == 0:
@@ -399,17 +413,15 @@ class NanoHermesHook(AgentHook):
         if (
             context.iteration == 0
             and self.config.reflection_scope == "global"
-            and self.current_session_id is not None
+            and session_id is not None
         ):
             for msg in await self._reflection_coord.get_global_injections(
-                context.messages, self.current_session_id
+                context.messages, session_id
             ):
                 self._inject(context.messages, msg)
 
         # Inject new session-scoped reflections written since last iteration.
-        for msg in self._reflection_coord.get_session_injections(
-            self.current_session_id
-        ):
+        for msg in self._reflection_coord.get_session_injections(session_id):
             self._inject(context.messages, msg)
 
         # Deliver Reflexion nudge if salience crossed threshold last iteration.
@@ -774,9 +786,11 @@ class NanoHermesHook(AgentHook):
         except Exception:
             log.exception("nano-hermes purge failed")
 
-    def _sync_session(self, messages: list, session_key: str | None = None) -> None:
-        """Sync session state and handle boundary crossings."""
-        _existing, completed_id = self._session_coord.sync(messages, session_key)
+    def _sync_session(
+        self, messages: list, session_key: str | None = None
+    ) -> int | None:
+        """Sync session state, handle boundary crossings; return this turn's id."""
+        existing, completed_id = self._session_coord.sync(messages, session_key)
 
         if completed_id is not None:
             # Session boundary: finalize trajectory, reset skill state, prune dicts.
@@ -809,3 +823,4 @@ class NanoHermesHook(AgentHook):
                 )
                 self._lesson_tasks.add(t)
                 t.add_done_callback(self._lesson_tasks.discard)
+        return existing
