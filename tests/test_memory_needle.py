@@ -36,7 +36,7 @@ async def test_an_ambiguous_needle_edits_nothing(loop: AgentLoop) -> None:
     out, mem = await _patch(
         loop, action="replace", needle="Prefers tea", replacement="Prefers coffee."
     )
-    assert out.startswith("Error") and "2 places" in out
+    assert out.startswith("Error") and "more than one place" in out
     assert mem == MEMORY
 
 
@@ -67,3 +67,13 @@ async def test_a_miss_names_the_closest_stored_line(loop: AgentLoop) -> None:
     assert out.startswith("Error") and "closest stored lines" in out
     assert "Biscuit" in out
     assert mem == MEMORY
+
+
+def test_a_self_overlapping_needle_is_ambiguous() -> None:
+    """``str.count`` counts non-overlapping hits, so it saw one match here."""
+    import pytest
+
+    from nano_hermes.memory.budgets import _locate
+
+    with pytest.raises(ValueError, match="more than one place"):
+        _locate("memory", "codes: ababab", "abab")

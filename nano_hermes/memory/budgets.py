@@ -120,6 +120,22 @@ def _closest_lines(text: str, needle: str, n: int = 2) -> list[str]:
     return [line for score, line in sorted(scored, key=lambda x: -x[0])[:n] if score]
 
 
+def _unique_find(slot: Slot, text: str, needle: str) -> int | None:
+    """Index of *needle*'s only occurrence, None if absent; raise if several.
+
+    Overlapping occurrences count: ``str.count`` would see ``"abab"`` once in
+    ``"ababab"``, where it names two places.
+    """
+    at = text.find(needle)
+    if at == -1:
+        return None
+    if text.find(needle, at + 1) != -1:
+        raise ValueError(
+            f"needle matches more than one place in {slot}; include more surrounding text"
+        )
+    return at
+
+
 def _locate(slot: Slot, text: str, needle: str) -> tuple[int, int]:
     """Span of the one place *needle* names in *text*.
 
@@ -134,24 +150,14 @@ def _locate(slot: Slot, text: str, needle: str) -> tuple[int, int]:
         raise ValueError(
             "needle must contain a letter or digit — quote part of the entry to change"
         )
-    count = text.count(needle)
-    if count == 1:
-        start = text.index(needle)
-        return start, start + len(needle)
-    if count > 1:
-        raise ValueError(
-            f"needle matches {count} places in {slot}; include more surrounding text"
-        )
+    at = _unique_find(slot, text, needle)
+    if at is not None:
+        return at, at + len(needle)
     folded_text, index = _folded(text)
     folded_needle = _folded(needle.strip())[0]
-    count = folded_text.count(folded_needle)
-    if count == 1:
-        at = folded_text.index(folded_needle)
+    at = _unique_find(slot, folded_text, folded_needle)
+    if at is not None:
         return index[at], index[at + len(folded_needle) - 1] + 1
-    if count > 1:
-        raise ValueError(
-            f"needle matches {count} places in {slot}; include more surrounding text"
-        )
     raise MemoryEntryNotFoundError(slot, needle, _closest_lines(text, needle))
 
 
