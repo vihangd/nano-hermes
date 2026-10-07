@@ -1099,3 +1099,24 @@ class TestFingerprintCache:
         assert [e[2] for e in _archivable([dict(m) for m in window], cache)] == [
             e[2] for e in again
         ]
+
+
+class TestMultimodalMessages:
+    def test_text_parts_are_archived_and_the_runtime_block_cut(self, archiver_factory):
+        """A multimodal message's text parts are joined with one newline, so
+        the runtime-context block follows a single newline there — the cut
+        must still find it, and image parts contribute no text."""
+        archiver, db = archiver_factory()
+        window = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
+                    {"type": "text", "text": "what is in this picture?"},
+                    {"type": "text", "text": "[Runtime Context]\nTime: t\n[/Runtime Context]"},
+                ],
+            }
+        ]
+        archiver.ensure_session(window, "chan:1")
+        rows = [r[0] for r in db.execute("SELECT content FROM chunks")]
+        assert rows == ["what is in this picture?"]

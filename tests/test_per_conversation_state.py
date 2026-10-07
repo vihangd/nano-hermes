@@ -128,3 +128,23 @@ async def test_a_tool_call_lands_in_its_own_conversation(tmp_path):
     assert hook._skill_tracker._state("chan:a").session_skills_used == {"rated-in-a"}
     assert hook._reflection_coord._conv("chan:a").salience_score == 1.0
     assert hook._skill_tracker._state("chan:b").session_skills_used == set()
+
+
+async def test_injected_lessons_are_recorded_under_the_injecting_chat(
+    tmp_path, monkeypatch
+):
+    """The cheatsheet path records what it injected so the boundary can move
+    those lessons' trust by the session outcome — for this chat only."""
+    import nano_hermes.memory.cheatsheet as cheatsheet
+
+    async def fake_retrieve(hook, task_text, top_k=3):
+        return [(7, f"lesson for {task_text}", 0.9)]
+
+    monkeypatch.setattr(cheatsheet, "retrieve_lessons", fake_retrieve)
+    hook = nano_hermes.install(
+        _make_loop(tmp_path), config={"skill_stats": {"cheatsheet_enabled": True}}
+    )
+    injected = await _turn(hook, [], _user("deploy the app"), "chan:a")
+    assert any("lesson for deploy the app" in s for s in injected), injected
+    assert hook._lessons("chan:a") == {7: 0.9}
+    assert hook._lessons("chan:b") == {}
