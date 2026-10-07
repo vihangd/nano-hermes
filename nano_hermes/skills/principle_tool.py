@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from nanobot.agent.tools.base import Tool, tool_parameters
 
 from ..redact import format_redaction_note, redact
+from ..coordinator.session import NOT_PERSISTED, request_persists
 from .principle_index import upsert_principle
 
 if TYPE_CHECKING:
@@ -89,6 +90,8 @@ class PrincipleTool(Tool):
         return (type(self).__doc__ or "").strip()
 
     async def execute(self, **kwargs: Any) -> str:
+        if not request_persists():
+            return NOT_PERSISTED
         condition: str = (kwargs.get("condition") or "").strip()
         action: str = (kwargs.get("action") or "").strip()
         expected_outcome: str = (kwargs.get("expected_outcome") or "").strip()

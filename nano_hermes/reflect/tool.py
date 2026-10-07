@@ -24,6 +24,7 @@ from nanobot.agent.tools.base import Tool, tool_parameters
 from ..embedding.chain import AllProvidersFailed
 from ..redact import format_redaction_note, redact
 from ..session.db import run_vec_write
+from ..coordinator.session import NOT_PERSISTED, request_persists
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -77,6 +78,8 @@ class ReflectTool(Tool):
         return (type(self).__doc__ or "").strip()
 
     async def execute(self, **kwargs: Any) -> str:
+        if not request_persists():
+            return NOT_PERSISTED
         content: str = kwargs["content"]
         stripped = content.strip()
         if not stripped:

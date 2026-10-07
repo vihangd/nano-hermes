@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 
 from nanobot.agent.tools.base import Tool, tool_parameters
 
-from ..coordinator.session import request_session_key
+from ..coordinator.session import NOT_PERSISTED, request_persists, request_session_key
 from ..redact import format_redaction_note, redact
 
 
@@ -87,6 +87,8 @@ class MemoryPatchTool(Tool):
         return (type(self).__doc__ or "").strip()
 
     async def execute(self, **kwargs: Any) -> str:
+        if not request_persists():
+            return NOT_PERSISTED
         slot: str = kwargs.get("slot", "memory")
         action: str = kwargs["action"]
         content = kwargs.get("content")

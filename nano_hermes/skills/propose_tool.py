@@ -16,6 +16,7 @@ from nanobot.agent.tools.base import Tool, tool_parameters
 from .._atomic import atomic_write_text
 from ..redact import RedactionResult, format_redaction_note, redact
 from ..utils.fuzzy_patch import apply_patch as fuzzy_apply_patch
+from ..coordinator.session import NOT_PERSISTED, request_persists
 from .guard import scan_skill_content, scan_skill_file
 
 if TYPE_CHECKING:
@@ -191,6 +192,8 @@ class ProposeSkillTool(Tool):
         return (type(self).__doc__ or "").strip()
 
     async def execute(self, **kwargs: Any) -> str:
+        if not request_persists():
+            return NOT_PERSISTED
         action: str = kwargs.get("action") or "create"
         skill_name: str = kwargs.get("name", "").strip()
 

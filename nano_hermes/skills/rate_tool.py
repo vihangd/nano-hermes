@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.tools.base import Tool, tool_parameters
 
+from ..coordinator.session import NOT_PERSISTED, request_persists
+
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
 
@@ -71,6 +73,8 @@ class SkillRateTool(Tool):
         return (type(self).__doc__ or "").strip()
 
     async def execute(self, **kwargs: Any) -> str:
+        if not request_persists():
+            return NOT_PERSISTED
         skill_name: str = kwargs.get("name", "")
         outcome: str = kwargs.get("outcome", "")
 

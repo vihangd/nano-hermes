@@ -35,6 +35,27 @@ def request_session_key() -> str | None:
     return current_request_session_key()
 
 
+def request_persists() -> bool:
+    """False when nanobot says this turn's session is not persisted.
+
+    nanobot HEAD sets ``RequestContext.persist_session`` false for ephemeral
+    turns and non-persistent session policies (SDK temporary chats). nanobot
+    skips extra hooks on ephemeral turns, but plugin tools stay registered and
+    an SDK caller can opt hooks back in, so without this a temporary chat was
+    archived and could write memory, reflections and principles. Older
+    nanobot (0.2.2) has no such field: everything persists, as before.
+    """
+    try:
+        from nanobot.agent.tools.context import current_request_context
+    except ImportError:
+        return True
+    ctx = current_request_context()
+    return ctx is None or bool(getattr(ctx, "persist_session", True))
+
+
+NOT_PERSISTED = "skipped: this chat is not persisted, so nothing was saved"
+
+
 class SessionCoordinator:
     def __init__(
         self,

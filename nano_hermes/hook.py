@@ -19,7 +19,11 @@ from nanobot.agent.hook import AgentHook, AgentHookContext
 
 from .config import NanoHermesConfig
 from .coordinator.reflection import ReflectionCoordinator
-from .coordinator.session import SessionCoordinator, request_session_key
+from .coordinator.session import (
+    SessionCoordinator,
+    request_persists,
+    request_session_key,
+)
 from .coordinator.skills import SkillUsageTracker
 from .lru import touch
 from .embedding.chain import EmbeddingChain
@@ -358,6 +362,8 @@ class NanoHermesHook(AgentHook):
     # ------------------------------------------------------------------
 
     async def before_iteration(self, context: AgentHookContext) -> None:
+        if not request_persists():
+            return  # a temporary chat leaves no trace (see request_persists)
         self._tool_calls = 0
         self._skill_tracker.reset_iteration()
         self._pending_injections = []  # clear stale entries from failed iteration
@@ -464,6 +470,8 @@ class NanoHermesHook(AgentHook):
                 log.debug("cheatsheet: retrieval injection failed", exc_info=True)
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
+        if not request_persists():
+            return  # a temporary chat leaves no trace (see request_persists)
         tool_count = len(context.tool_calls)
         self._tool_calls += tool_count
         # Accumulate tool-burst salience per-batch (preserves original semantics).
@@ -480,6 +488,8 @@ class NanoHermesHook(AgentHook):
                 self._skill_tracker.record_read(skill_name, i)
 
     async def after_iteration(self, context: AgentHookContext) -> None:
+        if not request_persists():
+            return  # a temporary chat leaves no trace (see request_persists)
         if context.error:
             self._skill_tracker.record_error()
 
