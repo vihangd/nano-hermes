@@ -290,16 +290,15 @@ def _overlap(confirmed: list[str], window: list[str]) -> int:
     the same as taking the first — ``best`` only makes that explicit. What the
     anchoring buys is that a run of identical replies resolves to the alignment
     which also matches the unique turns around it, instead of to the first
-    coincidence. Indexed by fingerprint rather than scanned, because a saturated
-    window against a full fingerprint list is the common case, not the rare one.
+    coincidence. Only the window's first fingerprint is ever looked up, so the
+    candidates come from one filtered scan; building a full fingerprint index
+    per call was a fifth of the hook's time on a saturated window.
     """
     if not confirmed or not window:
         return 0
-    positions: dict[str, list[int]] = {}
-    for idx, fp in enumerate(confirmed):
-        positions.setdefault(fp, []).append(idx)
+    first = window[0]
     best = 0
-    for i in positions.get(window[0], ()):
+    for i in [i for i, fp in enumerate(confirmed) if fp == first]:
         k = 0
         while i + k < len(confirmed) and k < len(window) and confirmed[i + k] == window[k]:
             k += 1
