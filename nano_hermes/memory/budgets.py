@@ -71,10 +71,88 @@ class MemoryOverBudgetError(Exception):
 
 
 class MemoryEntryNotFoundError(Exception):
-    def __init__(self, slot: Slot, needle: str) -> None:
-        super().__init__(f"no substring match in {slot} for: {needle[:80]!r}")
+    def __init__(self, slot: Slot, needle: str, closest: list[str] | None = None) -> None:
+        msg = f"no substring match in {slot} for: {needle[:80]!r}"
+        if closest:
+            # The model usually paraphrased or quoted a stale copy; naming the
+            # nearest stored lines lets it retry with the real text.
+            msg += "; closest stored lines: " + " | ".join(repr(c[:80]) for c in closest)
+        super().__init__(msg)
         self.slot = slot
         self.needle = needle
+
+
+# Typography a model re-emits differently from what it stored: curly vs
+# straight quotes, en/em dashes vs hyphens. Folded only for the fallback match.
+_FOLD = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'", "\u2032": "'",
+    "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"', "\u2033": '"',
+    "\u2013": "-", "\u2014": "-", "\u2012": "-", "\u2212": "-",
+})
+
+
+def _folded(text: str) -> tuple[str, list[int]]:
+    """*text* with typography folded and whitespace runs collapsed to one
+    space, plus each folded character's index in *text*."""
+    out: list[str] = []
+    index: list[int] = []
+    in_space = False
+    for i, ch in enumerate(text.translate(_FOLD)):
+        if ch.isspace():
+            if in_space:
+                continue
+            in_space = True
+            ch = " "
+        else:
+            in_space = False
+        out.append(ch)
+        index.append(i)
+    return "".join(out), index
+
+
+def _closest_lines(text: str, needle: str, n: int = 2) -> list[str]:
+    words = {w for w in needle.lower().split() if any(c.isalnum() for c in w)}
+    scored = [
+        (len(words & set(line.lower().split())), line.strip())
+        for line in text.splitlines()
+        if line.strip()
+    ]
+    return [line for score, line in sorted(scored, key=lambda x: -x[0])[:n] if score]
+
+
+def _locate(slot: Slot, text: str, needle: str) -> tuple[int, int]:
+    """Span of the one place *needle* names in *text*.
+
+    Mirrors hermes's memory-tool fixes: a needle with no letter or digit
+    (``"."``, ``"\u2014"``) used to select whatever punctuation came first in
+    the file; an ambiguous needle silently edited its first occurrence; and a
+    correct needle missed when quotes or line wrapping had changed since it
+    was stored. Exact matches win; the folded match is only a fallback, and
+    both must be unique.
+    """
+    if not any(c.isalnum() for c in needle):
+        raise ValueError(
+            "needle must contain a letter or digit — quote part of the entry to change"
+        )
+    count = text.count(needle)
+    if count == 1:
+        start = text.index(needle)
+        return start, start + len(needle)
+    if count > 1:
+        raise ValueError(
+            f"needle matches {count} places in {slot}; include more surrounding text"
+        )
+    folded_text, index = _folded(text)
+    folded_needle = _folded(needle.strip())[0]
+    count = folded_text.count(folded_needle)
+    if count == 1:
+        at = folded_text.index(folded_needle)
+        return index[at], index[at + len(folded_needle) - 1] + 1
+    if count > 1:
+        raise ValueError(
+            f"needle matches {count} places in {slot}; include more surrounding text"
+        )
+    raise MemoryEntryNotFoundError(slot, needle, _closest_lines(text, needle))
 
 
 class BudgetedMemory:
@@ -150,15 +228,13 @@ class BudgetedMemory:
         if err:
             raise ValueError(err)
         cur = self.read(slot)
-        if needle not in cur:
-            raise MemoryEntryNotFoundError(slot, needle)
-        self.write(slot, cur.replace(needle, replacement, 1))
+        start, end = _locate(slot, cur, needle)
+        self.write(slot, cur[:start] + replacement + cur[end:])
 
     def remove(self, slot: Slot, needle: str) -> None:
         cur = self.read(slot)
-        if needle not in cur:
-            raise MemoryEntryNotFoundError(slot, needle)
-        new = cur.replace(needle, "", 1)
+        start, end = _locate(slot, cur, needle)
+        new = cur[:start] + cur[end:]
         while "\n\n\n" in new:
             new = new.replace("\n\n\n", "\n\n")
         self.write(slot, new.strip())

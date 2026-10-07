@@ -48,7 +48,11 @@ _SCHEMA: dict[str, Any] = {
         },
         "needle": {
             "type": "string",
-            "description": "Substring locator (required for action=replace|remove).",
+            "description": (
+                "Text quoted from the one entry to change (required for "
+                "action=replace|remove). Must name a single place; quote style "
+                "and line wrapping may differ from what is stored."
+            ),
         },
         "replacement": {
             "type": "string",
