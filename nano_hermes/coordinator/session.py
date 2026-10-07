@@ -53,6 +53,18 @@ def request_persists() -> bool:
     return ctx is None or bool(getattr(ctx, "persist_session", True))
 
 
+def conversation_key(key: str | None = None) -> str:
+    """The key per-conversation state is stored under.
+
+    Hook call sites pass ``context.session_key or ""`` (keyless conversations
+    share ``""``); ``None`` means "the turn I'm running in" and resolves via
+    nanobot's request contextvar — how a tool finds its conversation.
+    """
+    if key is not None:
+        return key
+    return request_session_key() or ""
+
+
 NOT_PERSISTED = "skipped: this chat is not persisted, so nothing was saved"
 
 

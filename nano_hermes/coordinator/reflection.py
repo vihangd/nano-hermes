@@ -12,10 +12,12 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
 from ..decay import recency_decay
 from ..lru import touch
+from .session import conversation_key
 
 from ..reflect.salience import (
     correction_score,
@@ -47,6 +49,27 @@ _NUDGE_TEXT = (
 )
 
 
+@dataclass
+class _Conversation:
+    """Per-conversation state a session boundary scores or a nudge is built from.
+
+    Injected ids accumulate over a session and are drained by the boundary of
+    *this* conversation; salience and the queued nudges are delivered back to
+    it. ``injected_this_iteration`` is here too: another chat's iteration can
+    land between this one's injection and its citation recording, and a shared
+    list was reset under it.
+    """
+
+    salience_score: float = 0.0
+    nudge_pending: bool = False
+    skill_suggestions: list[str] = field(default_factory=list)
+    goal_completion_objective: str | None = None
+    last_injected_global_reflection_id: int = 0
+    injected_reflection_ids: set[int] = field(default_factory=set)
+    injected_principle_ids: set[int] = field(default_factory=set)
+    injected_this_iteration: list[tuple[int, str]] = field(default_factory=list)
+
+
 class ReflectionCoordinator:
     def __init__(
         self,
@@ -58,39 +81,20 @@ class ReflectionCoordinator:
         self._db = db
         self._config = config
         self._embedder_factory = embedder_factory
-        # Salience state
-        self._salience_score: float = 0.0
-        self._nudge_pending: bool = False
-        # Queued skill-specific reflection suggestions.
-        self._skill_suggestions: list[str] = []
         # Watermark: highest reflection id injected per session.
         # Bounded by on_new_session pruning completed sessions.
         self._last_injected_reflection_id: dict[int, int] = {}
-        # Watermark for global (cross-session) reflections.
-        self._last_injected_global_reflection_id: int = 0
-        # MemRL: set of reflection IDs injected during the current session.
-        # Populated by get_session_injections / get_global_injections.
-        # Back-propagated at session boundary via back_propagate_utility().
-        self._injected_reflection_ids: set[int] = set()
-        # ACE: principle ids injected this session, credited/penalised at the
-        # session boundary by attribute_principles(outcome).
-        self._injected_principle_ids: set[int] = set()
-        # RMM: list of (reflection_id, content) injected during the CURRENT
-        # iteration. Reset at iteration boundary. record_iteration_citations
-        # uses it to bump view_count / cite_count against the next response.
-        self._injected_this_iteration: list[tuple[int, str]] = []
-        # Memory-save nudge cadence counter. Incremented per user turn,
-        # reset when the cadence nudge fires or memory_patch(action=add)
-        # is invoked.
+        # Everything a session boundary scores or a nudge is built from, per
+        # conversation (see _Conversation). One coordinator serves every chat
+        # the loop runs; as process-wide fields, one chat's boundary credited
+        # or penalised the other's injections and its nudges went to whichever
+        # chat iterated next.
+        self._conversations: dict[str, _Conversation] = {}
         # Memory-save cadence, per conversation: [user turns since the last
         # save, nudge armed]. One coordinator serves every chat the loop runs;
         # shared scalars let one chat's first turn wipe another's count and
         # delivered chat A's armed nudge into chat B.
         self._save_cadence: dict[str, list] = {}
-        # Goal-completion drop-target. Populated when /goal transitions
-        # active → completed; delivered as a system message on the next
-        # iteration via take_goal_completion.
-        self._goal_completion_objective: str | None = None
         # Injection-query embedding cache. Both iteration-0 injection paths
         # embed the *first* user message of the conversation, so the text is
         # identical every turn and the embed is a wasted network round-trip.
@@ -98,6 +102,83 @@ class ReflectionCoordinator:
         # the old first message, and a session-keyed entry would then serve a
         # stale vector for a task that changed. Text-keyed just misses.
         self._query_vec_cache: tuple[str, "np.ndarray"] | None = None
+
+    def _conv(self, key: str | None = None) -> "_Conversation":
+        """*key*'s state, created and marked most recent.
+
+        Hook call sites pass ``context.session_key or ""``; ``None`` (a tool,
+        or a direct call) resolves the calling turn's conversation through
+        nanobot's request contextvar.
+        """
+        key = conversation_key(key)
+        touch(self._conversations, key, _Conversation)
+        return self._conversations[key]
+
+    # The calling conversation's fields under their old names, for tests and
+    # callers that predate per-conversation state.
+    @property
+    def _salience_score(self):
+        return self._conv().salience_score
+
+    @_salience_score.setter
+    def _salience_score(self, value) -> None:
+        self._conv().salience_score = value
+
+    @property
+    def _nudge_pending(self):
+        return self._conv().nudge_pending
+
+    @_nudge_pending.setter
+    def _nudge_pending(self, value) -> None:
+        self._conv().nudge_pending = value
+
+    @property
+    def _skill_suggestions(self):
+        return self._conv().skill_suggestions
+
+    @_skill_suggestions.setter
+    def _skill_suggestions(self, value) -> None:
+        self._conv().skill_suggestions = value
+
+    @property
+    def _goal_completion_objective(self):
+        return self._conv().goal_completion_objective
+
+    @_goal_completion_objective.setter
+    def _goal_completion_objective(self, value) -> None:
+        self._conv().goal_completion_objective = value
+
+    @property
+    def _last_injected_global_reflection_id(self):
+        return self._conv().last_injected_global_reflection_id
+
+    @_last_injected_global_reflection_id.setter
+    def _last_injected_global_reflection_id(self, value) -> None:
+        self._conv().last_injected_global_reflection_id = value
+
+    @property
+    def _injected_reflection_ids(self):
+        return self._conv().injected_reflection_ids
+
+    @_injected_reflection_ids.setter
+    def _injected_reflection_ids(self, value) -> None:
+        self._conv().injected_reflection_ids = value
+
+    @property
+    def _injected_principle_ids(self):
+        return self._conv().injected_principle_ids
+
+    @_injected_principle_ids.setter
+    def _injected_principle_ids(self, value) -> None:
+        self._conv().injected_principle_ids = value
+
+    @property
+    def _injected_this_iteration(self):
+        return self._conv().injected_this_iteration
+
+    @_injected_this_iteration.setter
+    def _injected_this_iteration(self, value) -> None:
+        self._conv().injected_this_iteration = value
 
     async def _embed_query(self, task_text: str) -> "np.ndarray":
         """Embed *task_text*, reusing the last result when the text repeats."""
@@ -113,15 +194,16 @@ class ReflectionCoordinator:
     # Salience
     # ------------------------------------------------------------------
 
-    def record_tool_burst(self, tool_count: int) -> None:
+    def record_tool_burst(self, tool_count: int, key: str | None = None) -> None:
         """Accumulate tool-burst salience score per before_execute_tools call.
 
         Called once per batch (not once per iteration) to preserve the
         original per-batch accumulation semantics of the hook.
         """
-        self._salience_score += tool_burst_score(tool_count)
+        st = self._conv(key)
+        st.salience_score += tool_burst_score(tool_count)
 
-    def add_salience(self, amount: float) -> None:
+    def add_salience(self, amount: float, key: str | None = None) -> None:
         """Add an arbitrary salience contribution.
 
         Used by ad-hoc producers (e.g. high-importance distillation) that
@@ -129,10 +211,12 @@ class ReflectionCoordinator:
         threshold themselves. Threshold-crossing is still checked at the
         normal score_iteration call.
         """
-        self._salience_score += max(0.0, float(amount))
+        st = self._conv(key)
+        st.salience_score += max(0.0, float(amount))
 
     def score_iteration(
-        self, had_error: bool, user_text: str | None
+        self, had_error: bool, user_text: str | None,
+        key: str | None = None,
     ) -> None:
         """Accumulate error and correction salience for an iteration.
 
@@ -140,29 +224,32 @@ class ReflectionCoordinator:
         accumulated separately via record_tool_burst in before_execute_tools.
         Sets _nudge_pending when the threshold is crossed and resets score.
         """
-        self._salience_score += error_score(had_error)
-        self._salience_score += correction_score(user_text)
+        st = self._conv(key)
+        st.salience_score += error_score(had_error)
+        st.salience_score += correction_score(user_text)
 
-        if self._salience_score >= self._config.reflection.threshold:
-            self._nudge_pending = True
-            self._salience_score = 0.0
+        if st.salience_score >= self._config.reflection.threshold:
+            st.nudge_pending = True
+            st.salience_score = 0.0
 
     # ------------------------------------------------------------------
     # Nudge delivery
     # ------------------------------------------------------------------
 
-    def take_nudge(self) -> dict | None:
+    def take_nudge(self, key: str | None = None) -> dict | None:
         """Return a nudge message dict and clear the flag, or return None."""
-        if not self._nudge_pending:
+        st = self._conv(key)
+        if not st.nudge_pending:
             return None
-        self._nudge_pending = False
+        st.nudge_pending = False
         return {"role": "system", "content": _NUDGE_TEXT}
 
-    def queue_skill_suggestions(self, suggestions: list[str]) -> None:
+    def queue_skill_suggestions(self, suggestions: list[str], key: str | None = None) -> None:
         """Queue skill-quality reflection suggestions for next injection."""
-        self._skill_suggestions.extend(suggestions)
+        st = self._conv(key)
+        st.skill_suggestions.extend(suggestions)
 
-    def queue_goal_completion(self, objective: str) -> None:
+    def queue_goal_completion(self, objective: str, key: str | None = None) -> None:
         """Stash the just-completed goal so the next iteration can prompt
         a memory write while the context is still fresh.
 
@@ -170,14 +257,16 @@ class ReflectionCoordinator:
         so the next-iteration system message can frame it as a goal
         boundary, not a degraded skill.
         """
-        self._goal_completion_objective = objective
+        st = self._conv(key)
+        st.goal_completion_objective = objective
 
-    def take_goal_completion(self) -> dict | None:
+    def take_goal_completion(self, key: str | None = None) -> dict | None:
         """Return a goal-completion nudge message and clear it, or None."""
-        objective = getattr(self, "_goal_completion_objective", None)
+        st = self._conv(key)
+        objective = st.goal_completion_objective
         if not objective:
             return None
-        self._goal_completion_objective = None
+        st.goal_completion_objective = None
         return {
             "role": "system",
             "content": (
@@ -189,12 +278,13 @@ class ReflectionCoordinator:
             ),
         }
 
-    def take_skill_suggestions(self) -> dict | None:
+    def take_skill_suggestions(self, key: str | None = None) -> dict | None:
         """Return queued skill suggestions as a system message, or None."""
-        if not self._skill_suggestions:
+        st = self._conv(key)
+        if not st.skill_suggestions:
             return None
-        bullets = "\n".join(f"- {s}" for s in self._skill_suggestions)
-        self._skill_suggestions = []
+        bullets = "\n".join(f"- {s}" for s in st.skill_suggestions)
+        st.skill_suggestions = []
         return {
             "role": "system",
             "content": (
@@ -209,11 +299,12 @@ class ReflectionCoordinator:
     # Session-scoped reflections
     # ------------------------------------------------------------------
 
-    def get_session_injections(self, session_id: int | None) -> list[dict]:
+    def get_session_injections(self, session_id: int | None, key: str | None = None) -> list[dict]:
         """Return new reflection messages for this session since last watermark.
 
         Updates the watermark internally. Returns a list (may be empty).
         """
+        st = self._conv(key)
         if session_id is None:
             return []
         last_seen = self._last_injected_reflection_id.get(session_id, 0)
@@ -230,8 +321,8 @@ class ReflectionCoordinator:
         rows = [(int(r[0]), r[1]) for r in rows]
         self._last_injected_reflection_id[session_id] = max(r[0] for r in rows)
         for rid, content in rows:
-            self._injected_reflection_ids.add(rid)
-            self._injected_this_iteration.append((rid, content))
+            st.injected_reflection_ids.add(rid)
+            st.injected_this_iteration.append((rid, content))
         contents = [r[1] for r in rows]
         return [
             {
@@ -244,17 +335,18 @@ class ReflectionCoordinator:
     # Session boundary
     # ------------------------------------------------------------------
 
-    def on_new_session(self, completed_session_id: int) -> None:
+    def on_new_session(self, completed_session_id: int, key: str | None = None) -> None:
         """Handle a completed session: prune watermark dict and reset global watermark.
 
         Prunes _last_injected_reflection_id to bound its growth — once a
         session is done, its watermark entry is no longer needed.
         """
+        st = self._conv(key)
         self._last_injected_reflection_id.pop(completed_session_id, None)
-        self._last_injected_global_reflection_id = 0
-        self._injected_reflection_ids.clear()
+        st.last_injected_global_reflection_id = 0
+        st.injected_reflection_ids.clear()
 
-    def attribute_principles(self, outcome: str) -> None:
+    def attribute_principles(self, outcome: str, key: str | None = None) -> None:
         """Credit (ok) or penalise (fail) the principles injected this session.
 
         ACE's label-free feedback: a principle that rode along in a successful
@@ -262,8 +354,9 @@ class ReflectionCoordinator:
         gains a ``harmful_count``. 'partial' outcomes are neutral. Always clears
         the per-session injected set.
         """
-        ids = self._injected_principle_ids
-        self._injected_principle_ids = set()
+        st = self._conv(key)
+        ids = st.injected_principle_ids
+        st.injected_principle_ids = set()
         if not ids or outcome not in ("ok", "fail"):
             return
         col = "success_count" if outcome == "ok" else "harmful_count"
@@ -362,16 +455,17 @@ class ReflectionCoordinator:
         state[0] = min(max(0, recent_user_turns), interval - 1)
         state[1] = False
 
-    def reset_iteration_citations(self) -> None:
+    def reset_iteration_citations(self, key: str | None = None) -> None:
         """Drop any per-iteration retrieval log without recording it.
 
         Hook calls this at iteration start so a previous iteration that
         crashed before record_iteration_citations ran doesn't bleed its
         injections into the next iteration's counters.
         """
-        self._injected_this_iteration = []
+        st = self._conv(key)
+        st.injected_this_iteration = []
 
-    def record_iteration_citations(self, response_text: str) -> None:
+    def record_iteration_citations(self, response_text: str, key: str | None = None) -> None:
         """RMM: bump view_count for each reflection injected this iteration,
         and cite_count for those whose content shows token overlap with the
         next assistant response. Clears the per-iteration list so subsequent
@@ -380,10 +474,11 @@ class ReflectionCoordinator:
         Best-effort: any DB or import failure is logged at debug and silently
         swallowed; never raises out of the hook.
         """
-        if not self._injected_this_iteration:
+        st = self._conv(key)
+        if not st.injected_this_iteration:
             return
-        injected = self._injected_this_iteration
-        self._injected_this_iteration = []
+        injected = st.injected_this_iteration
+        st.injected_this_iteration = []
         try:
             from .citation import is_cited  # noqa: PLC0415
 
@@ -416,7 +511,7 @@ class ReflectionCoordinator:
         except Exception:
             log.debug("RMM citation recording failed", exc_info=True)
 
-    def back_propagate_utility(self, had_errors: bool) -> None:
+    def back_propagate_utility(self, had_errors: bool, key: str | None = None) -> None:
         """MemRL: update utility scores for reflections injected this session.
 
         Called at session boundary with the session's outcome. Applies a
@@ -428,15 +523,16 @@ class ReflectionCoordinator:
         Also records co-activation edges between every pair of reflections
         injected together in this session (associative graph, item 10).
         """
-        if not self._injected_reflection_ids:
+        st = self._conv(key)
+        if not st.injected_reflection_ids:
             return
         alpha = 0.1
         reward = 0.0 if had_errors else 1.0
-        placeholders = ",".join("?" * len(self._injected_reflection_ids))
+        placeholders = ",".join("?" * len(st.injected_reflection_ids))
         try:
             rows = self._db.execute(
                 f"SELECT id, utility FROM reflections WHERE id IN ({placeholders})",
-                list(self._injected_reflection_ids),
+                list(st.injected_reflection_ids),
             ).fetchall()
             updates = [
                 (current_utility + alpha * (reward - current_utility), rid)
@@ -455,19 +551,20 @@ class ReflectionCoordinator:
         except Exception:
             log.debug("utility back-propagation failed", exc_info=True)
 
-        self._record_coactivations()
+        self._record_coactivations(key)
 
     _MAX_COACTIVATION_IDS = 20  # cap to keep O(N²) bounded per session
 
-    def _record_coactivations(self) -> None:
+    def _record_coactivations(self, key: str | None = None) -> None:
         """Record pairwise co-activation edges for all injected reflection IDs.
 
         Single upsert per pair via ON CONFLICT DO UPDATE — avoids the
         two-statement INSERT OR IGNORE + UPDATE pattern.  Pairs stored with
         smaller ID first so each undirected edge is stored once.
         """
+        st = self._conv(key)
         # Cap to prevent O(N²) blow-up on very long sessions.
-        ids = sorted(self._injected_reflection_ids)[-self._MAX_COACTIVATION_IDS:]
+        ids = sorted(st.injected_reflection_ids)[-self._MAX_COACTIVATION_IDS:]
         if len(ids) < 2:
             return
         import itertools
@@ -492,13 +589,15 @@ class ReflectionCoordinator:
     # ------------------------------------------------------------------
 
     async def get_global_injections(
-        self, messages: list[dict], session_id: int | None
+        self, messages: list[dict], session_id: int | None,
+        key: str | None = None,
     ) -> list[dict]:
         """Embed first user message and find relevant cross-session reflections.
 
         Only called on iteration 0 of a new session when reflection_scope='global'.
         Returns a list of system message dicts (may be empty).
         """
+        st = self._conv(key)
         from ..session.archiver import _extract_text
 
         task_text = next(
@@ -520,15 +619,15 @@ class ReflectionCoordinator:
                 (rid, content)
                 for rid, content, sid in rows
                 if sid != session_id
-                and rid > self._last_injected_global_reflection_id
+                and rid > st.last_injected_global_reflection_id
             ]
             if not fresh:
                 return []
             context_contents = [content for _, content in fresh]
-            self._last_injected_global_reflection_id = max(rid for rid, _ in fresh)
+            st.last_injected_global_reflection_id = max(rid for rid, _ in fresh)
             for rid, content in fresh:
-                self._injected_reflection_ids.add(rid)
-                self._injected_this_iteration.append((rid, content))
+                st.injected_reflection_ids.add(rid)
+                st.injected_this_iteration.append((rid, content))
             log.debug("global reflections injected: %d entries", len(fresh))
             return [
                 {
@@ -748,13 +847,14 @@ class ReflectionCoordinator:
     # Principle injection (EvolveR)
     # ------------------------------------------------------------------
 
-    def get_principle_injections(self, messages: list[dict], limit: int = 3) -> list[dict]:
+    def get_principle_injections(self, messages: list[dict], limit: int = 3, key: str | None = None) -> list[dict]:
         """Return stored principles whose condition FTS5-matches the current task.
 
         Called on iteration 0 of each session. Uses keyword search (no embedding)
         so it never blocks on provider availability.  Returns a list of system
         message dicts (may be empty).
         """
+        st = self._conv(key)
         import re as _re  # noqa: PLC0415
         from ..session.archiver import _extract_text  # noqa: PLC0415
 
@@ -825,7 +925,7 @@ class ReflectionCoordinator:
         # session outcome can credit/penalise them (helpful/harmful attribution).
         ids = [r[0] for r in rows]
         if pcfg.enabled:
-            self._injected_principle_ids.update(ids)
+            st.injected_principle_ids.update(ids)
         try:
             ph = ",".join("?" * len(ids))
             self._db.execute(

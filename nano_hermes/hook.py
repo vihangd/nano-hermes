@@ -18,9 +18,11 @@ from typing import TYPE_CHECKING
 from nanobot.agent.hook import AgentHook, AgentHookContext
 
 from .config import NanoHermesConfig
+from .coordinator.goal import GoalTracker
 from .coordinator.reflection import ReflectionCoordinator
 from .coordinator.session import (
     SessionCoordinator,
+    conversation_key,
     request_persists,
     request_session_key,
 )
@@ -103,8 +105,12 @@ class NanoHermesHook(AgentHook):
         # Tracks nanobot /goal transitions; emits "started" / "completed"
         # events from observable runtime-context markers (no SessionManager
         # internals — survives nanobot version drift).
-        from .coordinator.goal import GoalTracker  # noqa: PLC0415
-        self._goal_tracker = GoalTracker()
+        # One GoalTracker per conversation: a shared one read chat B's window
+        # as chat A's goal "completed" on every switch and queued a bogus
+        # goal-completion nudge. A conversation evicted from the LRU comes back
+        # inactive — its still-present goal reads as a fresh "started" (no
+        # nudge), and a completion that happened while evicted is not nudged.
+        self._goal_trackers: dict[str, GoalTracker] = {}
 
         # Per-iteration tool call counter (accumulated across before_execute_tools).
         self._tool_calls = 0
@@ -132,9 +138,10 @@ class NanoHermesHook(AgentHook):
         self._reflection_embed_tasks: set[asyncio.Task] = set()
         # Pending cheatsheet/expel background tasks (same GC guard pattern).
         self._lesson_tasks: set[asyncio.Task] = set()
-        # Fact ids of lessons injected this session — trust is adjusted by the
-        # session outcome at the boundary, then this is cleared.
-        self._injected_lesson_ids: dict[int, float] = {}
+        # Fact ids (-> relevance) of lessons injected this session, per
+        # conversation — trust is adjusted by *that* conversation's session
+        # outcome at its boundary, then cleared.
+        self._lessons_by_key: dict[str, dict[int, float]] = {}
 
         # Cache for last_user_text: (id(messages), len(messages), result).
         # Avoids a full reverse scan every after_iteration when nothing changed.
@@ -212,6 +219,10 @@ class NanoHermesHook(AgentHook):
     @property
     def _session_skills_used(self) -> set:
         return self._skill_tracker._session_skills_used
+
+    def _goal_tracker(self, key: str) -> GoalTracker:
+        touch(self._goal_trackers, key, GoalTracker)
+        return self._goal_trackers[key]
 
     def _extract_skill_name_from_path(self, path: str) -> str | None:
         return SkillUsageTracker.extract_skill_name_from_path(path)
@@ -320,10 +331,23 @@ class NanoHermesHook(AgentHook):
         self._pending_injections = []
         return pending
 
-    def _apply_lesson_trust(self, outcome: str) -> None:
+    def _lessons(self, key: str | None = None) -> dict[int, float]:
+        key = conversation_key(key)
+        touch(self._lessons_by_key, key, dict)
+        return self._lessons_by_key[key]
+
+    @property
+    def _injected_lesson_ids(self) -> dict[int, float]:
+        return self._lessons()
+
+    @_injected_lesson_ids.setter
+    def _injected_lesson_ids(self, value: dict[int, float]) -> None:
+        self._lessons_by_key[conversation_key()] = value
+
+    def _apply_lesson_trust(self, outcome: str, key: str | None = None) -> None:
         """Move trust of this session's injected lessons by the outcome, then clear."""
-        ids = self._injected_lesson_ids
-        self._injected_lesson_ids = {}
+        ids = self._lessons(key)
+        self._lessons_by_key[conversation_key(key)] = {}
         if not ids:
             return
         cfg = self.config.decay
@@ -364,10 +388,12 @@ class NanoHermesHook(AgentHook):
     async def before_iteration(self, context: AgentHookContext) -> None:
         if not request_persists():
             return  # a temporary chat leaves no trace (see request_persists)
+        # Per-conversation state is keyed on this; keyless chats share "".
+        key = context.session_key or ""
         self._tool_calls = 0
-        self._skill_tracker.reset_iteration()
+        self._skill_tracker.reset_iteration(key)
         self._pending_injections = []  # clear stale entries from failed iteration
-        self._reflection_coord.reset_iteration_citations()
+        self._reflection_coord.reset_iteration_citations(key)
 
         # Schedule retention purge as a non-blocking background task on first iteration.
         if context.iteration == 0:
@@ -397,7 +423,9 @@ class NanoHermesHook(AgentHook):
 
         # Inject matching principles on iteration 0 (pure FTS5, always fast).
         if context.iteration == 0:
-            for msg in self._reflection_coord.get_principle_injections(context.messages):
+            for msg in self._reflection_coord.get_principle_injections(
+                context.messages, key=key
+            ):
                 self._inject(context.messages, msg)
 
         self._count_user_turns(context)
@@ -417,16 +445,16 @@ class NanoHermesHook(AgentHook):
             and session_id is not None
         ):
             for msg in await self._reflection_coord.get_global_injections(
-                context.messages, session_id
+                context.messages, session_id, key=key
             ):
                 self._inject(context.messages, msg)
 
         # Inject new session-scoped reflections written since last iteration.
-        for msg in self._reflection_coord.get_session_injections(session_id):
+        for msg in self._reflection_coord.get_session_injections(session_id, key):
             self._inject(context.messages, msg)
 
         # Deliver Reflexion nudge if salience crossed threshold last iteration.
-        nudge = self._reflection_coord.take_nudge()
+        nudge = self._reflection_coord.take_nudge(key)
         if nudge:
             self._inject(context.messages, nudge)
 
@@ -436,12 +464,12 @@ class NanoHermesHook(AgentHook):
             self._inject(context.messages, save_nudge)
 
         # Deliver goal-completion nudge if a /goal wrapped up last iteration.
-        goal_nudge = self._reflection_coord.take_goal_completion()
+        goal_nudge = self._reflection_coord.take_goal_completion(key)
         if goal_nudge:
             self._inject(context.messages, goal_nudge)
 
         # Deliver queued skill-quality reflection suggestions.
-        skill_suggestions = self._reflection_coord.take_skill_suggestions()
+        skill_suggestions = self._reflection_coord.take_skill_suggestions(key)
         if skill_suggestions:
             self._inject(context.messages, skill_suggestions)
 
@@ -460,7 +488,7 @@ class NanoHermesHook(AgentHook):
                     top_k = getattr(self.config.skill_stats, "cheatsheet_top_k", 3)
                     lessons = await retrieve_lessons(self, task_text, top_k=top_k)
                     if lessons:
-                        self._injected_lesson_ids.update(
+                        self._lessons(key).update(
                             {fid: rel for fid, _, rel in lessons}
                         )
                     msg = build_injection_message([text for _, text, _ in lessons])
@@ -472,10 +500,12 @@ class NanoHermesHook(AgentHook):
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         if not request_persists():
             return  # a temporary chat leaves no trace (see request_persists)
+        # Per-conversation state is keyed on this; keyless chats share "".
+        key = context.session_key or ""
         tool_count = len(context.tool_calls)
         self._tool_calls += tool_count
         # Accumulate tool-burst salience per-batch (preserves original semantics).
-        self._reflection_coord.record_tool_burst(tool_count)
+        self._reflection_coord.record_tool_burst(tool_count, key)
 
         # Detect which skills the agent actually loads via read_file on SKILL.md.
         for i, tc in enumerate(context.tool_calls):
@@ -485,13 +515,15 @@ class NanoHermesHook(AgentHook):
             path = args.get("path", "")
             skill_name = SkillUsageTracker.extract_skill_name_from_path(path)
             if skill_name:
-                self._skill_tracker.record_read(skill_name, i)
+                self._skill_tracker.record_read(skill_name, i, key)
 
     async def after_iteration(self, context: AgentHookContext) -> None:
         if not request_persists():
             return  # a temporary chat leaves no trace (see request_persists)
+        # Per-conversation state is keyed on this; keyless chats share "".
+        key = context.session_key or ""
         if context.error:
-            self._skill_tracker.record_error()
+            self._skill_tracker.record_error(key)
 
         try:
             # mid_turn: the reply was appended after get_history ran, so its
@@ -506,7 +538,7 @@ class NanoHermesHook(AgentHook):
         self._sync_session(context.messages, context.session_key)
 
         # Accumulate skill observations into session-level state.
-        self._skill_tracker.update_accumulators()
+        self._skill_tracker.update_accumulators(key)
 
         # Score error and correction salience (tool-burst already accumulated
         # in before_execute_tools via record_tool_burst).
@@ -518,27 +550,28 @@ class NanoHermesHook(AgentHook):
         self._reflection_coord.score_iteration(
             had_error=context.error is not None,
             user_text=current_user_text,
+            key=key,
         )
 
         # RMM: bump view/cite counters for reflections injected this iteration
         # against the assistant response text.
         response_text = context.final_content or ""
-        self._reflection_coord.record_iteration_citations(response_text)
+        self._reflection_coord.record_iteration_citations(response_text, key)
 
         # /goal transitions: when a sustained goal completes, the runtime
         # context drops the "Goal (active):" marker. Promote that into a
         # reflection nudge so the agent distils what was learned while
         # the objective is still fresh in the conversation.
-        transition = self._goal_tracker.update(context.messages)
+        transition = self._goal_tracker(key).update(context.messages)
         if transition == "completed":
-            objective = self._goal_tracker.last_objective or "(objective text unavailable)"
+            objective = self._goal_tracker(key).last_objective or "(objective text unavailable)"
             log.info("nano-hermes: /goal completed — queuing goal-completion nudge")
             # Push enough salience to arm the Reflexion nudge on the next
             # iteration's score_iteration call even on an otherwise quiet turn.
             self._reflection_coord.add_salience(
-                self.config.reflection.threshold + 1.0
+                self.config.reflection.threshold + 1.0, key
             )
-            self._reflection_coord.queue_goal_completion(objective)
+            self._reflection_coord.queue_goal_completion(objective, key)
 
         log.debug(
             "after_iteration: iter=%d tool_calls=%d session=%s",
@@ -835,26 +868,29 @@ class NanoHermesHook(AgentHook):
         self, messages: list, session_key: str | None = None
     ) -> int | None:
         """Sync session state, handle boundary crossings; return this turn's id."""
+        key = session_key or ""
         existing, completed_id = self._session_coord.sync(messages, session_key)
 
         if completed_id is not None:
             # Session boundary: finalize trajectory, reset skill state, prune dicts.
-            skills_used, skills_loaded, had_errors = self._skill_tracker.reset_session()
+            skills_used, skills_loaded, had_errors = self._skill_tracker.reset_session(key)
             self._mark_skills_viewed(skills_loaded)
             if len(skills_loaded) >= 2:
                 from .skills.composition import record_composition  # noqa: PLC0415
                 record_composition(self.db, skills_loaded)
-            self._reflection_coord.back_propagate_utility(had_errors)
-            self._reflection_coord.attribute_principles("fail" if had_errors else "ok")
+            self._reflection_coord.back_propagate_utility(had_errors, key)
+            self._reflection_coord.attribute_principles(
+                "fail" if had_errors else "ok", key
+            )
             self._session_coord.finalize(completed_id, skills_used, had_errors)
-            self._reflection_coord.on_new_session(completed_id)
+            self._reflection_coord.on_new_session(completed_id, key)
             self.archiver.prune_session_by_id(completed_id)
             self._completed_session_count += 1
             self._maybe_schedule_evolution()
             self._maybe_schedule_principle_curation()
             import asyncio  # noqa: PLC0415
             outcome = "fail" if had_errors else "success"
-            self._apply_lesson_trust(outcome)
+            self._apply_lesson_trust(outcome, key)
             msgs_snapshot = list(messages)
             # Dynamic Cheatsheet: schedule lesson extraction for the completed session.
             if getattr(self.config.skill_stats, "cheatsheet_enabled", False):

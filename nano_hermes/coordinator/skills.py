@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,7 +16,31 @@ if TYPE_CHECKING:
     import numpy as np
     from ..config import SkillStatsConfig
 
+from ..lru import touch
+from .session import conversation_key
+
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class _SkillState:
+    """One conversation's skill observations.
+
+    Per conversation because the session boundary that drains them is: with
+    shared fields, one chat's /new reset another's tracking and wrote that
+    chat's skills into its own trajectory and composition record.
+    """
+
+    # Per-iteration (reset each iteration)
+    candidate_skills: list[str] = field(default_factory=list)
+    loaded_skills: dict[str, int] = field(default_factory=dict)
+    # Per-session accumulators (reset at the session boundary)
+    session_skills_used: set[str] = field(default_factory=set)
+    # Narrow signal: only skills the agent actually loaded (read_file on
+    # SKILL.md) or explicitly rated. Used for composition tracking — search
+    # hits are excluded to avoid false co-occurrence pairs.
+    session_skills_loaded: set[str] = field(default_factory=set)
+    session_had_errors: bool = False
 
 
 class SkillUsageTracker:
@@ -27,88 +52,128 @@ class SkillUsageTracker:
     ) -> None:
         self._db = db
         self._config = config
-        # Per-iteration state (reset each iteration)
-        self._candidate_skills: list[str] = []
-        self._loaded_skills: dict[str, int] = {}
-        # Per-session accumulators (reset at session boundary)
-        self._session_skills_used: set[str] = set()
-        # Narrow signal: only skills the agent actually loaded (read_file on SKILL.md)
-        # or explicitly rated. Used for composition tracking — candidates (search hits)
-        # are excluded to avoid false co-occurrence pairs.
-        self._session_skills_loaded: set[str] = set()
-        self._session_had_errors: bool = False
+        self._states: dict[str, _SkillState] = {}
+
+    def _state(self, key: str | None = None) -> _SkillState:
+        """*key*'s state; ``None`` resolves the calling turn's conversation
+        (a tool) via nanobot's request contextvar."""
+        key = conversation_key(key)
+        touch(self._states, key, _SkillState)
+        return self._states[key]
 
     # ------------------------------------------------------------------
     # Per-iteration resets
     # ------------------------------------------------------------------
 
-    def reset_iteration(self) -> None:
+    def reset_iteration(self, key: str | None = None) -> None:
         """Clear per-iteration state. Call at the top of before_iteration."""
-        self._candidate_skills = []
-        self._loaded_skills = {}
+        st = self._state(key)
+        st.candidate_skills = []
+        st.loaded_skills = {}
 
     # ------------------------------------------------------------------
     # Recording (called from hook lifecycle methods)
     # ------------------------------------------------------------------
 
-    def record_candidates(self, names: list[str]) -> None:
+    def record_candidates(self, names: list[str], key: str | None = None) -> None:
         """Extend candidate skill list (called by SkillSearchTool)."""
-        self._candidate_skills.extend(names)
+        self._state(key).candidate_skills.extend(names)
 
-    def record_read(self, skill_name: str, tool_index: int) -> None:
+    def record_read(self, skill_name: str, tool_index: int, key: str | None = None) -> None:
         """Record a directly-observed read_file on a SKILL.md path."""
-        self._loaded_skills[skill_name] = tool_index
+        self._state(key).loaded_skills[skill_name] = tool_index
 
-    def record_rating(self, name: str) -> None:
+    def record_rating(self, name: str, key: str | None = None) -> None:
         """Register an explicitly-rated skill for trajectory tracking."""
-        self._session_skills_used.add(name)
-        self._session_skills_loaded.add(name)
+        st = self._state(key)
+        st.session_skills_used.add(name)
+        st.session_skills_loaded.add(name)
 
-    def record_error(self) -> None:
+    def record_error(self, key: str | None = None) -> None:
         """Signal that an error occurred this iteration."""
-        self._session_had_errors = True
+        self._state(key).session_had_errors = True
 
     # ------------------------------------------------------------------
     # Accumulation
     # ------------------------------------------------------------------
 
-    def update_accumulators(self) -> None:
+    def update_accumulators(self, key: str | None = None) -> None:
         """Merge iteration-level observations into session-level accumulators.
 
         Trajectory tracking only — no DB writes. Stat crediting
         (use_count, success_count) is exclusively handled by SkillRateTool.
         """
-        self._session_skills_used.update(self._candidate_skills)
-        self._session_skills_used.update(self._loaded_skills.keys())
-        self._session_skills_loaded.update(self._loaded_skills.keys())
+        st = self._state(key)
+        st.session_skills_used.update(st.candidate_skills)
+        st.session_skills_used.update(st.loaded_skills.keys())
+        st.session_skills_loaded.update(st.loaded_skills.keys())
 
-    def reset_session(self) -> tuple[set[str], set[str], bool]:
-        """Return accumulated session data and reset state.
+    def reset_session(self, key: str | None = None) -> tuple[set[str], set[str], bool]:
+        """Return *key*'s accumulated session data and reset it.
 
         Returns (skills_used_broad, skills_loaded_narrow, had_errors).
         skills_loaded_narrow contains only skills the agent actually read
         or explicitly rated — suitable for composition co-occurrence tracking.
         skills_used_broad includes search candidates — suitable for trajectory.
         """
-        skills = self._session_skills_used
-        loaded = self._session_skills_loaded
-        errors = self._session_had_errors
-        self._session_skills_used = set()
-        self._session_skills_loaded = set()
-        self._session_had_errors = False
-        return skills, loaded, errors
+        st = self._state(key)
+        out = (st.session_skills_used, st.session_skills_loaded, st.session_had_errors)
+        st.session_skills_used = set()
+        st.session_skills_loaded = set()
+        st.session_had_errors = False
+        return out
 
     # ------------------------------------------------------------------
-    # Properties for read-only access
+    # The calling conversation's fields under their old names
     # ------------------------------------------------------------------
 
     @property
     def session_skills_used(self) -> set[str]:
-        return self._session_skills_used
+        return self._state().session_skills_used
 
     @property
     def session_had_errors(self) -> bool:
-        return self._session_had_errors
+        return self._state().session_had_errors
+
+    @property
+    def _candidate_skills(self):
+        return self._state().candidate_skills
+
+    @_candidate_skills.setter
+    def _candidate_skills(self, value) -> None:
+        self._state().candidate_skills = value
+
+    @property
+    def _loaded_skills(self):
+        return self._state().loaded_skills
+
+    @_loaded_skills.setter
+    def _loaded_skills(self, value) -> None:
+        self._state().loaded_skills = value
+
+    @property
+    def _session_skills_used(self):
+        return self._state().session_skills_used
+
+    @_session_skills_used.setter
+    def _session_skills_used(self, value) -> None:
+        self._state().session_skills_used = value
+
+    @property
+    def _session_skills_loaded(self):
+        return self._state().session_skills_loaded
+
+    @_session_skills_loaded.setter
+    def _session_skills_loaded(self, value) -> None:
+        self._state().session_skills_loaded = value
+
+    @property
+    def _session_had_errors(self):
+        return self._state().session_had_errors
+
+    @_session_had_errors.setter
+    def _session_had_errors(self, value) -> None:
+        self._state().session_had_errors = value
 
     # ------------------------------------------------------------------
     # Path helper

@@ -180,14 +180,14 @@ class TestHookIntegration:
         ctx0 = AgentHookContext(iteration=0, messages=msgs_active)
         await hook.before_iteration(ctx0)
         await hook.after_iteration(ctx0)
-        assert hook._goal_tracker.active is True
+        assert hook._goal_tracker("").active is True
 
         # Iteration 1 — goal completes (fresh turn, no goal in runtime block).
         msgs_done = [_plain_user("start the goal"), _user_no_goal("any followup")]
         ctx1 = AgentHookContext(iteration=1, messages=msgs_done)
         await hook.before_iteration(ctx1)
         await hook.after_iteration(ctx1)
-        assert hook._goal_tracker.active is False
+        assert hook._goal_tracker("").active is False
         assert hook._reflection_coord._goal_completion_objective == "finish the migration"
         assert hook._reflection_coord._skill_suggestions == []
         assert hook._reflection_coord._salience_score >= hook.config.reflection.threshold
@@ -213,7 +213,7 @@ class TestHookIntegration:
         ctx = AgentHookContext(iteration=0, messages=[_plain_user("hi")])
         await hook.before_iteration(ctx)
         await hook.after_iteration(ctx)
-        assert hook._goal_tracker.active is False
-        assert hook._goal_tracker.last_objective is None
+        assert hook._goal_tracker("").active is False
+        assert hook._goal_tracker("").last_objective is None
         assert hook._reflection_coord._goal_completion_objective is None
         assert hook._reflection_coord._skill_suggestions == []
