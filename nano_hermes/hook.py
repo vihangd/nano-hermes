@@ -144,9 +144,6 @@ class NanoHermesHook(AgentHook):
         # outcome at its boundary, then cleared.
         self._lessons_by_key: dict[str, dict[int, float]] = {}
 
-        # Cache for last_user_text: (id(messages), len(messages), result).
-        # Avoids a full reverse scan every after_iteration when nothing changed.
-        self._last_user_text_cache: tuple[int, int, str | None] = (0, 0, None)
         # (id(messages), user-message count) at this conversation's previous
         # iteration — see _count_user_turns.
         self._turn_user_counts: dict[str, tuple[int, int]] = {}
@@ -183,43 +180,6 @@ class NanoHermesHook(AgentHook):
 
     def embedder(self) -> EmbeddingChain:
         return EmbeddingChain(self.config.embedding)
-
-    # ------------------------------------------------------------------
-    # Backward-compat proxy properties (tools and tests access these
-    # directly; they delegate to the coordinator that owns the state)
-    # ------------------------------------------------------------------
-
-    @property
-    def _nudge_pending(self) -> bool:
-        return self._reflection_coord._nudge_pending
-
-    @_nudge_pending.setter
-    def _nudge_pending(self, value: bool) -> None:
-        self._reflection_coord._nudge_pending = value
-
-    @property
-    def _salience_score(self) -> float:
-        return self._reflection_coord._salience_score
-
-    @property
-    def _loaded_skills(self) -> dict:
-        return self._skill_tracker._loaded_skills
-
-    @_loaded_skills.setter
-    def _loaded_skills(self, value: dict) -> None:
-        self._skill_tracker._loaded_skills = value
-
-    @property
-    def _candidate_skills(self) -> list:
-        return self._skill_tracker._candidate_skills
-
-    @_candidate_skills.setter
-    def _candidate_skills(self, value: list) -> None:
-        self._skill_tracker._candidate_skills = value
-
-    @property
-    def _session_skills_used(self) -> set:
-        return self._skill_tracker._session_skills_used
 
     def _goal_tracker(self, key: str) -> GoalTracker:
         touch(self._goal_trackers, key, GoalTracker)
@@ -337,14 +297,6 @@ class NanoHermesHook(AgentHook):
         touch(self._lessons_by_key, key, dict)
         return self._lessons_by_key[key]
 
-    @property
-    def _injected_lesson_ids(self) -> dict[int, float]:
-        return self._lessons()
-
-    @_injected_lesson_ids.setter
-    def _injected_lesson_ids(self, value: dict[int, float]) -> None:
-        self._lessons_by_key[conversation_key()] = value
-
     def _apply_lesson_trust(self, outcome: str, key: str | None = None) -> None:
         """Move trust of this session's injected lessons by the outcome, then clear."""
         ids = self._lessons(key)
@@ -461,7 +413,7 @@ class NanoHermesHook(AgentHook):
             self._inject(context.messages, nudge)
 
         # Deliver this conversation's memory-save cadence nudge if armed.
-        save_nudge = self._reflection_coord.take_save_nudge(context.session_key)
+        save_nudge = self._reflection_coord.take_save_nudge(key)
         if save_nudge:
             self._inject(context.messages, save_nudge)
 
@@ -546,11 +498,10 @@ class NanoHermesHook(AgentHook):
 
         # Score error and correction salience (tool-burst already accumulated
         # in before_execute_tools via record_tool_burst).
-        msgs = context.messages
-        cache_key = (id(msgs), len(msgs))
-        if (self._last_user_text_cache[0], self._last_user_text_cache[1]) != cache_key:
-            self._last_user_text_cache = (*cache_key, last_user_text(msgs))
-        current_user_text = self._last_user_text_cache[2]
+        # Not cached on (id(messages), len): a recycled list address of the
+        # same length served another chat's text to correction scoring, and
+        # the reverse scan costs well under a millisecond per turn.
+        current_user_text = last_user_text(context.messages)
         self._reflection_coord.score_iteration(
             had_error=context.error is not None,
             user_text=current_user_text,
@@ -616,13 +567,13 @@ class NanoHermesHook(AgentHook):
                 fresh += 1
             if fresh:
                 self._reflection_coord.observe_user_turn(
-                    context.session_key, window_user_turns=users, turns=fresh
+                    turn_key, window_user_turns=users, turns=fresh
                 )
         else:
             seen = self._turn_user_counts.get(turn_key)
             if seen is not None and seen[0] == id(msgs) and users > seen[1]:
                 for _ in range(users - seen[1]):
-                    self._reflection_coord.note_user_turn(context.session_key)
+                    self._reflection_coord.note_user_turn(turn_key)
         # id() is safe here: within a turn the runner holds the list alive, and
         # iteration 0 of the next turn overwrites the entry before it is read.
         self._turn_user_counts[turn_key] = (id(msgs), users)

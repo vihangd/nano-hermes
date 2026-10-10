@@ -124,56 +124,21 @@ class SkillUsageTracker:
         return out
 
     # ------------------------------------------------------------------
-    # The calling conversation's fields under their old names
+    # Read-only views of the calling conversation (never create an entry)
     # ------------------------------------------------------------------
+
+    def peek(self, key: str | None = None) -> _SkillState | None:
+        return self._states.get(conversation_key(key))
 
     @property
     def session_skills_used(self) -> set[str]:
-        return self._state().session_skills_used
+        st = self.peek()
+        return st.session_skills_used if st else set()
 
     @property
     def session_had_errors(self) -> bool:
-        return self._state().session_had_errors
-
-    @property
-    def _candidate_skills(self):
-        return self._state().candidate_skills
-
-    @_candidate_skills.setter
-    def _candidate_skills(self, value) -> None:
-        self._state().candidate_skills = value
-
-    @property
-    def _loaded_skills(self):
-        return self._state().loaded_skills
-
-    @_loaded_skills.setter
-    def _loaded_skills(self, value) -> None:
-        self._state().loaded_skills = value
-
-    @property
-    def _session_skills_used(self):
-        return self._state().session_skills_used
-
-    @_session_skills_used.setter
-    def _session_skills_used(self, value) -> None:
-        self._state().session_skills_used = value
-
-    @property
-    def _session_skills_loaded(self):
-        return self._state().session_skills_loaded
-
-    @_session_skills_loaded.setter
-    def _session_skills_loaded(self, value) -> None:
-        self._state().session_skills_loaded = value
-
-    @property
-    def _session_had_errors(self):
-        return self._state().session_had_errors
-
-    @_session_had_errors.setter
-    def _session_had_errors(self, value) -> None:
-        self._state().session_had_errors = value
+        st = self.peek()
+        return st.session_had_errors if st else False
 
     # ------------------------------------------------------------------
     # Path helper

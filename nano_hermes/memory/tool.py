@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 
 from nanobot.agent.tools.base import Tool, tool_parameters
 
-from ..coordinator.session import NOT_PERSISTED, request_persists, request_session_key
+from ..coordinator.session import NOT_PERSISTED, request_persists
 from ..redact import format_redaction_note, redact
 
 
@@ -119,7 +119,7 @@ class MemoryPatchTool(Tool):
                     return f"ok: entry already exists in {slot} (not re-added)"
                 # Reset the cadence counter so the nudge doesn't fire
                 # immediately after the agent already saved.
-                self._hook._reflection_coord.note_memory_save(request_session_key())
+                self._hook._reflection_coord.note_memory_save()
                 return f"ok: added {len(content.strip())} chars to {slot}{redaction_note}"
             if action == "replace":
                 if needle is None or replacement is None:

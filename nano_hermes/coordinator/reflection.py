@@ -33,10 +33,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Conversations with no session key share one cadence. Their window is a fresh
-# list every turn, so keying them by ``id(messages)`` made every turn look like
-# a first sighting: hydrated, never counted, and the nudge never fired.
-_CADENCE_KEYLESS = "__keyless__"
 
 
 
@@ -68,6 +64,11 @@ class _Conversation:
     injected_reflection_ids: set[int] = field(default_factory=set)
     injected_principle_ids: set[int] = field(default_factory=set)
     injected_this_iteration: list[tuple[int, str]] = field(default_factory=list)
+    # Memory-save cadence: user turns since the last save, nudge armed, and
+    # whether the counter has been hydrated from history this process.
+    turns_since_save: int = 0
+    save_nudge_pending: bool = False
+    cadence_hydrated: bool = False
 
 
 class ReflectionCoordinator:
@@ -90,11 +91,6 @@ class ReflectionCoordinator:
         # or penalised the other's injections and its nudges went to whichever
         # chat iterated next.
         self._conversations: dict[str, _Conversation] = {}
-        # Memory-save cadence, per conversation: [user turns since the last
-        # save, nudge armed]. One coordinator serves every chat the loop runs;
-        # shared scalars let one chat's first turn wipe another's count and
-        # delivered chat A's armed nudge into chat B.
-        self._save_cadence: dict[str, list] = {}
         # Injection-query embedding cache. Both iteration-0 injection paths
         # embed the *first* user message of the conversation, so the text is
         # identical every turn and the embed is a wasted network round-trip.
@@ -114,71 +110,10 @@ class ReflectionCoordinator:
         touch(self._conversations, key, _Conversation)
         return self._conversations[key]
 
-    # The calling conversation's fields under their old names, for tests and
-    # callers that predate per-conversation state.
-    @property
-    def _salience_score(self):
-        return self._conv().salience_score
-
-    @_salience_score.setter
-    def _salience_score(self, value) -> None:
-        self._conv().salience_score = value
-
-    @property
-    def _nudge_pending(self):
-        return self._conv().nudge_pending
-
-    @_nudge_pending.setter
-    def _nudge_pending(self, value) -> None:
-        self._conv().nudge_pending = value
-
-    @property
-    def _skill_suggestions(self):
-        return self._conv().skill_suggestions
-
-    @_skill_suggestions.setter
-    def _skill_suggestions(self, value) -> None:
-        self._conv().skill_suggestions = value
-
-    @property
-    def _goal_completion_objective(self):
-        return self._conv().goal_completion_objective
-
-    @_goal_completion_objective.setter
-    def _goal_completion_objective(self, value) -> None:
-        self._conv().goal_completion_objective = value
-
-    @property
-    def _last_injected_global_reflection_id(self):
-        return self._conv().last_injected_global_reflection_id
-
-    @_last_injected_global_reflection_id.setter
-    def _last_injected_global_reflection_id(self, value) -> None:
-        self._conv().last_injected_global_reflection_id = value
-
-    @property
-    def _injected_reflection_ids(self):
-        return self._conv().injected_reflection_ids
-
-    @_injected_reflection_ids.setter
-    def _injected_reflection_ids(self, value) -> None:
-        self._conv().injected_reflection_ids = value
-
-    @property
-    def _injected_principle_ids(self):
-        return self._conv().injected_principle_ids
-
-    @_injected_principle_ids.setter
-    def _injected_principle_ids(self, value) -> None:
-        self._conv().injected_principle_ids = value
-
-    @property
-    def _injected_this_iteration(self):
-        return self._conv().injected_this_iteration
-
-    @_injected_this_iteration.setter
-    def _injected_this_iteration(self, value) -> None:
-        self._conv().injected_this_iteration = value
+    def peek(self, key: str | None = None) -> "_Conversation | None":
+        """*key*'s state if it exists — for read-only callers, which must not
+        create an entry and push a live conversation out of the LRU."""
+        return self._conversations.get(conversation_key(key))
 
     async def _embed_query(self, task_text: str) -> "np.ndarray":
         """Embed *task_text*, reusing the last result when the text repeats."""
@@ -371,12 +306,6 @@ class ReflectionCoordinator:
     # Memory-save nudge cadence
     # ------------------------------------------------------------------
 
-    def _cadence(self, key: str | None) -> list:
-        """*key*'s [count, armed] state, created and marked most recent."""
-        key = key or _CADENCE_KEYLESS
-        touch(self._save_cadence, key, lambda: [0, False])
-        return self._save_cadence[key]
-
     def observe_user_turn(
         self, key: str | None, *, window_user_turns: int, turns: int = 1
     ) -> None:
@@ -388,7 +317,7 @@ class ReflectionCoordinator:
         happens if the conversation was evicted from the LRU, and then it
         touches that conversation alone.
         """
-        if (key or _CADENCE_KEYLESS) in self._save_cadence:
+        if self._conv(key).cadence_hydrated:
             for _ in range(turns):
                 self.note_user_turn(key)
         else:
@@ -401,32 +330,32 @@ class ReflectionCoordinator:
         interval = getattr(self._config.reflection, "memory_save_nudge_interval", 0)
         if interval <= 0:
             return
-        state = self._cadence(key)
-        state[0] += 1
-        if state[0] >= interval:
-            state[1] = True
-            state[0] = 0
+        st = self._conv(key)
+        st.turns_since_save += 1
+        if st.turns_since_save >= interval:
+            st.save_nudge_pending = True
+            st.turns_since_save = 0
 
     def note_memory_save(self, key: str | None = None) -> None:
         """Reset *key*'s counter after the agent saves to memory.
 
         Prevents the cadence prompt from firing immediately after the agent
-        already wrote something — call from memory_patch on add. A key this
-        coordinator has never counted (a tool call with no request context, or
-        one whose key the hook saw as keyless) resets the keyless conversation.
+        already wrote something — call from memory_patch on add. A save is a
+        fresh start, so it also counts as hydrated: a conversation evicted from
+        the LRU would otherwise re-hydrate on its next turn to interval-1 and
+        nudge right after saving.
         """
-        if key not in self._save_cadence:
-            key = None
-        state = self._cadence(key)
-        state[0] = 0
-        state[1] = False
+        st = self._conv(key)
+        st.turns_since_save = 0
+        st.save_nudge_pending = False
+        st.cadence_hydrated = True
 
     def take_save_nudge(self, key: str | None = None) -> dict | None:
         """Return *key*'s memory-save nudge and clear it, or None."""
-        state = self._save_cadence.get(key or _CADENCE_KEYLESS)
-        if not state or not state[1]:
+        st = self.peek(key)
+        if st is None or not st.save_nudge_pending:
             return None
-        state[1] = False
+        st.save_nudge_pending = False
         return {
             "role": "system",
             "content": (
@@ -451,9 +380,10 @@ class ReflectionCoordinator:
         interval = getattr(self._config.reflection, "memory_save_nudge_interval", 0)
         if interval <= 0:
             return
-        state = self._cadence(key)
-        state[0] = min(max(0, recent_user_turns), interval - 1)
-        state[1] = False
+        st = self._conv(key)
+        st.turns_since_save = min(max(0, recent_user_turns), interval - 1)
+        st.save_nudge_pending = False
+        st.cadence_hydrated = True
 
     def reset_iteration_citations(self, key: str | None = None) -> None:
         """Drop any per-iteration retrieval log without recording it.

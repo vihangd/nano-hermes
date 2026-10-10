@@ -188,9 +188,9 @@ class TestHookIntegration:
         await hook.before_iteration(ctx1)
         await hook.after_iteration(ctx1)
         assert hook._goal_tracker("").active is False
-        assert hook._reflection_coord._goal_completion_objective == "finish the migration"
-        assert hook._reflection_coord._skill_suggestions == []
-        assert hook._reflection_coord._salience_score >= hook.config.reflection.threshold
+        assert hook._reflection_coord._conv("").goal_completion_objective == "finish the migration"
+        assert hook._reflection_coord._conv("").skill_suggestions == []
+        assert hook._reflection_coord._conv("").salience_score >= hook.config.reflection.threshold
 
         # Iteration 2 — before_iteration drains the goal-completion nudge under
         # its own "## Goal completed" header, not the skill-quality one.
@@ -205,7 +205,7 @@ class TestHookIntegration:
         assert len(injected) == 1
         assert "finish the migration" in injected[0]["content"]
         assert "Skill quality signals" not in injected[0]["content"]
-        assert hook._reflection_coord._goal_completion_objective is None
+        assert hook._reflection_coord._conv("").goal_completion_objective is None
 
     async def test_no_transition_no_side_effect(self, tmp_path):
         loop = _make_loop(tmp_path)
@@ -215,5 +215,5 @@ class TestHookIntegration:
         await hook.after_iteration(ctx)
         assert hook._goal_tracker("").active is False
         assert hook._goal_tracker("").last_objective is None
-        assert hook._reflection_coord._goal_completion_objective is None
-        assert hook._reflection_coord._skill_suggestions == []
+        assert hook._reflection_coord._conv("").goal_completion_objective is None
+        assert hook._reflection_coord._conv("").skill_suggestions == []

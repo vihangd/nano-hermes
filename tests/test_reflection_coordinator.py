@@ -27,17 +27,17 @@ class TestScoreIteration:
     ) -> None:
         # error_score = 3.0 per call; default threshold = 5.0
         coord.score_iteration(had_error=True, user_text=None)
-        assert not coord._nudge_pending  # 3.0 < 5.0
+        assert not coord._conv("").nudge_pending  # 3.0 < 5.0
         coord.score_iteration(had_error=True, user_text=None)
-        assert coord._nudge_pending  # 6.0 >= 5.0
+        assert coord._conv("").nudge_pending  # 6.0 >= 5.0
 
     def test_score_resets_after_nudge_triggered(
         self, coord: ReflectionCoordinator
     ) -> None:
-        coord._salience_score = 4.9
+        coord._conv("").salience_score = 4.9
         coord.score_iteration(had_error=True, user_text=None)
-        assert coord._nudge_pending
-        assert coord._salience_score == 0.0
+        assert coord._conv("").nudge_pending
+        assert coord._conv("").salience_score == 0.0
 
     def test_tool_burst_separate_from_score_iteration(
         self, coord: ReflectionCoordinator
@@ -45,27 +45,27 @@ class TestScoreIteration:
         # record_tool_burst is separate from score_iteration
         coord.record_tool_burst(5)  # >= _TOOL_BURST_MIN, adds 2.0
         coord.record_tool_burst(5)  # adds another 2.0 → total 4.0
-        assert coord._salience_score == pytest.approx(4.0)
-        assert not coord._nudge_pending
+        assert coord._conv("").salience_score == pytest.approx(4.0)
+        assert not coord._conv("").nudge_pending
         coord.score_iteration(had_error=True, user_text=None)  # adds 3.0 → 7.0 >= 5.0
-        assert coord._nudge_pending
+        assert coord._conv("").nudge_pending
 
 
 class TestTakeNudge:
     def test_returns_message_and_clears_flag(
         self, coord: ReflectionCoordinator
     ) -> None:
-        coord._nudge_pending = True
+        coord._conv("").nudge_pending = True
         msg = coord.take_nudge()
         assert msg is not None
         assert msg["role"] == "system"
         assert "reflect" in msg["content"].lower()
-        assert not coord._nudge_pending
+        assert not coord._conv("").nudge_pending
 
     def test_returns_none_when_no_nudge(
         self, coord: ReflectionCoordinator
     ) -> None:
-        coord._nudge_pending = False
+        coord._conv("").nudge_pending = False
         assert coord.take_nudge() is None
 
 
@@ -135,16 +135,16 @@ class TestOnNewSession:
     def test_resets_global_watermark(
         self, coord: ReflectionCoordinator
     ) -> None:
-        coord._last_injected_global_reflection_id = 999
+        coord._conv("").last_injected_global_reflection_id = 999
         coord.on_new_session(1)
-        assert coord._last_injected_global_reflection_id == 0
+        assert coord._conv("").last_injected_global_reflection_id == 0
 
     def test_clears_injected_ids_accumulator(
         self, coord: ReflectionCoordinator
     ) -> None:
-        coord._injected_reflection_ids = {1, 2, 3}
+        coord._conv("").injected_reflection_ids = {1, 2, 3}
         coord.on_new_session(5)
-        assert coord._injected_reflection_ids == set()
+        assert coord._conv("").injected_reflection_ids == set()
 
 
 class TestBackPropagateUtility:
@@ -164,7 +164,7 @@ class TestBackPropagateUtility:
 
     def test_success_increases_utility(self, hook, coord):
         rid = self._seed_reflection(hook, "good reflection", utility=0.5)
-        coord._injected_reflection_ids = {rid}
+        coord._conv("").injected_reflection_ids = {rid}
         coord.back_propagate_utility(had_errors=False)
 
         row = hook.db.execute("SELECT utility FROM reflections WHERE id = ?", (rid,)).fetchone()
@@ -172,21 +172,21 @@ class TestBackPropagateUtility:
 
     def test_failure_decreases_utility(self, hook, coord):
         rid = self._seed_reflection(hook, "bad reflection", utility=0.5)
-        coord._injected_reflection_ids = {rid}
+        coord._conv("").injected_reflection_ids = {rid}
         coord.back_propagate_utility(had_errors=True)
 
         row = hook.db.execute("SELECT utility FROM reflections WHERE id = ?", (rid,)).fetchone()
         assert row[0] < 0.5  # utility moves toward 0.0
 
     def test_no_ids_is_noop(self, hook, coord):
-        coord._injected_reflection_ids = set()
+        coord._conv("").injected_reflection_ids = set()
         # Must not raise
         coord.back_propagate_utility(had_errors=False)
 
     def test_non_injected_reflections_unchanged(self, hook, coord):
         rid_injected = self._seed_reflection(hook, "injected", utility=0.5)
         rid_other = self._seed_reflection(hook, "not injected", utility=0.5)
-        coord._injected_reflection_ids = {rid_injected}
+        coord._conv("").injected_reflection_ids = {rid_injected}
         coord.back_propagate_utility(had_errors=False)
 
         row = hook.db.execute("SELECT utility FROM reflections WHERE id = ?", (rid_other,)).fetchone()
@@ -205,9 +205,9 @@ class TestBackPropagateUtility:
         rid = int(cur.lastrowid)
         hook.db.commit()
 
-        assert rid not in coord._injected_reflection_ids
+        assert rid not in coord._conv("").injected_reflection_ids
         coord.get_session_injections(sid)
-        assert rid in coord._injected_reflection_ids
+        assert rid in coord._conv("").injected_reflection_ids
 
 
 class TestCoActivation:
@@ -229,7 +229,7 @@ class TestCoActivation:
     def test_first_coactivation_count_is_one(self, hook, coord):
         rid_a = self._seed_reflection(hook, "reflection A")
         rid_b = self._seed_reflection(hook, "reflection B")
-        coord._injected_reflection_ids = {rid_a, rid_b}
+        coord._conv("").injected_reflection_ids = {rid_a, rid_b}
         coord.back_propagate_utility(had_errors=False)
 
         a, b = min(rid_a, rid_b), max(rid_a, rid_b)
@@ -247,7 +247,7 @@ class TestCoActivation:
         a, b = min(rid_a, rid_b), max(rid_a, rid_b)
 
         for _ in range(3):
-            coord._injected_reflection_ids = {rid_a, rid_b}
+            coord._conv("").injected_reflection_ids = {rid_a, rid_b}
             coord.back_propagate_utility(had_errors=False)
 
         row = hook.db.execute(
@@ -262,7 +262,7 @@ class TestCoActivation:
         rid_a = self._seed_reflection(hook, "first reflection")
         rid_b = self._seed_reflection(hook, "second reflection")
         # rid_b > rid_a since AUTOINCREMENT; verify smaller is always column a
-        coord._injected_reflection_ids = {rid_a, rid_b}
+        coord._conv("").injected_reflection_ids = {rid_a, rid_b}
         coord.back_propagate_utility(had_errors=False)
 
         row = hook.db.execute(
@@ -273,7 +273,7 @@ class TestCoActivation:
 
     def test_single_injection_produces_no_edges(self, hook, coord):
         rid = self._seed_reflection(hook, "lone reflection")
-        coord._injected_reflection_ids = {rid}
+        coord._conv("").injected_reflection_ids = {rid}
         coord.back_propagate_utility(had_errors=False)
 
         rows = hook.db.execute("SELECT * FROM reflection_coactivations").fetchall()
@@ -283,7 +283,7 @@ class TestCoActivation:
         rid_a = self._seed_reflection(hook, "refl A")
         rid_b = self._seed_reflection(hook, "refl B")
         rid_c = self._seed_reflection(hook, "refl C")
-        coord._injected_reflection_ids = {rid_a, rid_b, rid_c}
+        coord._conv("").injected_reflection_ids = {rid_a, rid_b, rid_c}
         coord.back_propagate_utility(had_errors=False)
 
         rows = hook.db.execute("SELECT * FROM reflection_coactivations").fetchall()

@@ -321,7 +321,7 @@ class TestSkillUsageTracking:
 
         # Simulate observed-use detection (SKILL.md was read, candidates recorded)
         hook.record_skill_candidates(["duckduckgo-search"])
-        hook._loaded_skills = {"duckduckgo-search": 0}
+        hook._skill_tracker._state("").loaded_skills = {"duckduckgo-search": 0}
 
         # No skill_rate call — after_iteration only updates trajectory tracking
         await hook.after_iteration(AgentHookContext(iteration=0, messages=messages))
@@ -425,7 +425,7 @@ class TestSkillSearchIntegration:
         # skill_search populates _candidate_skills for trajectory
         skill_tool = loop.tools.get("skill_search")
         await skill_tool.execute(query="I want to search via duckduckgo")
-        assert "duckduckgo-search" in hook._candidate_skills
+        assert "duckduckgo-search" in hook._skill_tracker._state("").candidate_skills
 
         # skill_search alone does NOT write stats — agent calls skill_rate
         rate_tool = loop.tools.get("skill_rate")
@@ -450,12 +450,12 @@ class TestSkillSearchIntegration:
         messages: list[dict] = [{"role": "user", "content": "iter 0"}]
         await hook.before_iteration(AgentHockContext := AgentHookContext(iteration=0, messages=messages))  # noqa: F841
         hook.record_skill_candidates(["duckduckgo-search"])
-        assert hook._candidate_skills == ["duckduckgo-search"]
+        assert hook._skill_tracker._state("").candidate_skills == ["duckduckgo-search"]
 
         # before_iteration for iter 1 should clear candidates
         messages.append({"role": "assistant", "content": "reply"})
         await hook.before_iteration(AgentHookContext(iteration=1, messages=messages))
-        assert hook._candidate_skills == []
+        assert hook._skill_tracker._state("").candidate_skills == []
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +600,7 @@ class TestBeforeExecuteTools:
         await hook.before_execute_tools(burst_ctx)
 
         await hook.after_iteration(AgentHookContext(iteration=0, messages=messages))
-        assert hook._nudge_pending is True
+        assert hook._reflection_coord._conv("").nudge_pending is True
 
 
 # ---------------------------------------------------------------------------
@@ -1161,9 +1161,9 @@ class TestCandidateAccumulation:
         hook = nano_hermes.install(loop)
         hook.record_skill_candidates(["skill-a"])
         hook.record_skill_candidates(["skill-b", "skill-a"])
-        assert "skill-a" in hook._candidate_skills
-        assert "skill-b" in hook._candidate_skills
-        assert len(hook._candidate_skills) == 3  # extend, not replace
+        assert "skill-a" in hook._skill_tracker._state("").candidate_skills
+        assert "skill-b" in hook._skill_tracker._state("").candidate_skills
+        assert len(hook._skill_tracker._state("").candidate_skills) == 3  # extend, not replace
 
     async def test_each_skill_rated_independently(
         self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
@@ -1234,11 +1234,11 @@ class TestObservedUseCrediting:
     ) -> None:
         _unset_embedding_keys(monkeypatch)
         hook = nano_hermes.install(loop)
-        hook._loaded_skills = {"leftover": 0}
+        hook._skill_tracker._state("").loaded_skills = {"leftover": 0}
 
         msgs: list[dict] = [{"role": "user", "content": "new iteration"}]
         await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
-        assert hook._loaded_skills == {}, "_loaded_skills should be empty after before_iteration"
+        assert hook._skill_tracker._state("").loaded_skills == {}, "_loaded_skills should be empty after before_iteration"
 
     async def test_before_execute_tools_detects_read_file(
         self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
@@ -1260,9 +1260,9 @@ class TestObservedUseCrediting:
         )
         await hook.before_execute_tools(ctx)
 
-        assert "my-skill" in hook._loaded_skills
-        assert hook._loaded_skills["my-skill"] == 1  # index of tc_read in tool_calls
-        assert "bash" not in hook._loaded_skills
+        assert "my-skill" in hook._skill_tracker._state("").loaded_skills
+        assert hook._skill_tracker._state("").loaded_skills["my-skill"] == 1  # index of tc_read in tool_calls
+        assert "bash" not in hook._skill_tracker._state("").loaded_skills
 
     async def test_observed_use_feeds_trajectory_not_stats(
         self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
@@ -1289,7 +1289,7 @@ class TestObservedUseCrediting:
         await hook.after_iteration(AgentHookContext(iteration=0, messages=msgs))
 
         # Trajectory tracking: skill appears in _session_skills_used
-        assert "my-skill" in hook._session_skills_used
+        assert "my-skill" in hook._skill_tracker._state("").session_skills_used
 
         # Stats: use_count stays 0 — no skill_rate was called
         row = hook.db.execute(
@@ -1311,7 +1311,7 @@ class TestObservedUseCrediting:
 
         msgs: list[dict] = [{"role": "user", "content": "test"}]
         await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
-        hook._loaded_skills = {"my-skill": 0}
+        hook._skill_tracker._state("").loaded_skills = {"my-skill": 0}
         await hook.after_iteration(AgentHookContext(iteration=0, messages=msgs))
 
         row = hook.db.execute(
@@ -1488,7 +1488,7 @@ class TestSkillRateTool:
         tool = loop.tools.get("skill_rate")
         await tool.execute(name="traj-skill", outcome="success")
 
-        assert "traj-skill" in hook._session_skills_used
+        assert "traj-skill" in hook._skill_tracker._state("").session_skills_used
 
     async def test_tracks_provenance(
         self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch

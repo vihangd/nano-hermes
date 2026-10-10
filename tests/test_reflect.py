@@ -194,13 +194,13 @@ class TestSalienceNudge:
         ctx0 = AgentHookContext(iteration=0, messages=messages, error="boom")
         await hook.before_iteration(ctx0)
         await hook.after_iteration(ctx0)
-        assert hook._nudge_pending is True
+        assert hook._reflection_coord._conv("").nudge_pending is True
 
         # Iteration 1 — nudge should be injected and cleared
         ctx1 = AgentHookContext(iteration=1, messages=messages)
         before_len = len(messages)
         await hook.before_iteration(ctx1)
-        assert hook._nudge_pending is False
+        assert hook._reflection_coord._conv("").nudge_pending is False
         assert len(messages) == before_len + 1
         nudge = messages[-1]
         assert nudge["role"] == "system"
@@ -218,7 +218,7 @@ class TestSalienceNudge:
         ctx = AgentHookContext(iteration=0, messages=messages)
         await hook.before_iteration(ctx)
         await hook.after_iteration(ctx)
-        assert hook._nudge_pending is False
+        assert hook._reflection_coord._conv("").nudge_pending is False
 
 
 # ---------------------------------------------------------------------------

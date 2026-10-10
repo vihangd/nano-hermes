@@ -92,7 +92,7 @@ class TestRecordIterationCitations:
         r1 = _insert_reflection(hook.db, sid, "alpha bravo charlie delta")
         r2 = _insert_reflection(hook.db, sid, "echo foxtrot golf hotel")
         coord = hook._reflection_coord
-        coord._injected_this_iteration = [(r1, "alpha bravo charlie delta"), (r2, "echo foxtrot golf hotel")]
+        coord._conv("").injected_this_iteration = [(r1, "alpha bravo charlie delta"), (r2, "echo foxtrot golf hotel")]
         coord.record_iteration_citations("totally unrelated response text")
         rows = {r[0]: (r[1], r[2]) for r in hook.db.execute("SELECT id, view_count, cite_count FROM reflections").fetchall()}
         assert rows[r1] == (1, 0)  # (view, cite) — no overlap
@@ -105,7 +105,7 @@ class TestRecordIterationCitations:
         r1 = _insert_reflection(hook.db, sid, "alpha bravo charlie delta")
         r2 = _insert_reflection(hook.db, sid, "echo foxtrot golf hotel")
         coord = hook._reflection_coord
-        coord._injected_this_iteration = [(r1, "alpha bravo charlie delta"), (r2, "echo foxtrot golf hotel")]
+        coord._conv("").injected_this_iteration = [(r1, "alpha bravo charlie delta"), (r2, "echo foxtrot golf hotel")]
         # Response uses tokens only from r1.
         coord.record_iteration_citations("answer involves alpha and bravo and charlie analysis")
         rows = {r[0]: (r[1], r[2]) for r in hook.db.execute("SELECT id, view_count, cite_count FROM reflections").fetchall()}
@@ -118,9 +118,9 @@ class TestRecordIterationCitations:
         sid = _seed_session(hook.db)
         r1 = _insert_reflection(hook.db, sid, "alpha bravo charlie delta")
         coord = hook._reflection_coord
-        coord._injected_this_iteration = [(r1, "alpha bravo charlie delta")]
+        coord._conv("").injected_this_iteration = [(r1, "alpha bravo charlie delta")]
         coord.record_iteration_citations("alpha bravo response")
-        assert coord._injected_this_iteration == []
+        assert coord._conv("").injected_this_iteration == []
         # Running again with empty list is a no-op.
         coord.record_iteration_citations("alpha bravo again")
         row = hook.db.execute(
@@ -137,8 +137,8 @@ class TestInjectionTracksPerIteration:
         r1 = _insert_reflection(hook.db, sid, "first reflection")
         r2 = _insert_reflection(hook.db, sid, "second reflection")
         coord = hook._reflection_coord
-        assert coord._injected_this_iteration == []
+        assert coord._conv("").injected_this_iteration == []
         msgs = coord.get_session_injections(sid)
         assert msgs  # something was injected
-        injected_ids = {rid for rid, _ in coord._injected_this_iteration}
+        injected_ids = {rid for rid, _ in coord._conv("").injected_this_iteration}
         assert injected_ids == {r1, r2}

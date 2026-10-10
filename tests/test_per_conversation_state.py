@@ -172,3 +172,36 @@ async def test_boundary_lessons_come_from_the_session_that_ended(tmp_path):
     assert len(seen) == 1
     text = " ".join(str(m["content"]) for m in seen[0])
     assert "migrate the database" in text and "haiku" not in text
+
+
+async def test_a_save_after_eviction_does_not_bring_an_early_nudge(tmp_path):
+    """An evicted conversation that saves to memory used to reset the keyless
+    chat instead, then re-hydrate on its next turn to interval-1 and nudge
+    right after saving. A save is a fresh start for the saving chat."""
+    hook = nano_hermes.install(
+        _make_loop(tmp_path), config={"reflection": {"memory_save_nudge_interval": 3}}
+    )
+    coord = hook._reflection_coord
+    coord.observe_user_turn("chan:a", window_user_turns=1)
+    for i in range(40):  # push chat A out of the 32-conversation LRU
+        coord.observe_user_turn(f"chan:idle{i}", window_user_turns=1)
+    assert "chan:a" not in coord._conversations
+    coord.note_memory_save("chan:a")
+    coord.observe_user_turn("chan:a", window_user_turns=10)  # long window
+    assert coord._conv("chan:a").turns_since_save == 1
+    assert coord.take_save_nudge("chan:a") is None
+    assert coord.peek("") is None  # the keyless chat was not touched
+
+
+async def test_reading_status_creates_no_conversation_state(tmp_path):
+    """Read-only access must not insert an entry: in a full LRU that evicts a
+    live conversation's injected ids before its boundary can score them."""
+    loop = _make_loop(tmp_path)
+    hook = nano_hermes.install(loop, config={})
+    coord = hook._reflection_coord
+    for i in range(32):
+        coord._conv(f"chan:{i}").injected_principle_ids.add(i)
+    before = dict(coord._conversations)
+    out = await loop.tools.get("nano_status").execute()
+    assert "salience: 0.0" in out
+    assert coord._conversations == before

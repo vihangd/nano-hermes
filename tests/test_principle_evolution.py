@@ -104,12 +104,12 @@ class TestAttribution:
         rc = hook._reflection_coord
         pid = _add_principle(hook.db, "when deploying", "check the config")
 
-        rc._injected_principle_ids = {pid}
+        rc._conv("").injected_principle_ids = {pid}
         rc.attribute_principles("ok")
         assert _counts(hook.db, pid) == (1, 0)
-        assert rc._injected_principle_ids == set()  # cleared
+        assert rc._conv("").injected_principle_ids == set()  # cleared
 
-        rc._injected_principle_ids = {pid}
+        rc._conv("").injected_principle_ids = {pid}
         rc.attribute_principles("fail")
         assert _counts(hook.db, pid) == (1, 1)
 
@@ -117,10 +117,10 @@ class TestAttribution:
         hook = nano_hermes.install(loop)
         rc = hook._reflection_coord
         pid = _add_principle(hook.db, "when deploying", "check the config")
-        rc._injected_principle_ids = {pid}
+        rc._conv("").injected_principle_ids = {pid}
         rc.attribute_principles("partial")
         assert _counts(hook.db, pid) == (0, 0)
-        assert rc._injected_principle_ids == set()
+        assert rc._conv("").injected_principle_ids == set()
 
 
 class TestInjectionRanking:
@@ -139,7 +139,7 @@ class TestInjectionRanking:
         assert "rollback first" in out[0]["content"]
         assert "skip the smoke test" not in out[0]["content"]
         # The injected principle is tracked for attribution.
-        assert len(rc._injected_principle_ids) == 1
+        assert len(rc._conv("").injected_principle_ids) == 1
 
 
 # --- P3: curator delta loop -------------------------------------------------

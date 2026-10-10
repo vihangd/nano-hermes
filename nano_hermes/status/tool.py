@@ -90,7 +90,10 @@ class NanoStatusTool(Tool):
         except OSError:
             db_size = "unknown"
 
-        nudge = "yes" if hook._nudge_pending else "no"
+        # This turn's conversation, read without creating state for it.
+        conv = hook._reflection_coord.peek()
+        nudge = "yes" if conv is not None and conv.nudge_pending else "no"
+        salience = conv.salience_score if conv is not None else 0.0
         session_label = str(session_id) if session_id is not None else "none"
 
         # A stale FTS index silently drops the lexical half of hybrid search,
@@ -108,7 +111,7 @@ class NanoStatusTool(Tool):
         return (
             f"session: {session_label}\n"
             f"messages: {archived}\n"
-            f"salience: {hook._salience_score:.1f} (nudge pending: {nudge})\n"
+            f"salience: {salience:.1f} (nudge pending: {nudge})\n"
             f"reflections: {ref_count}\n"
             f"skills: {skill_counts['draft']} draft, "
             f"{skill_counts['active']} active, "

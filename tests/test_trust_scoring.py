@@ -37,15 +37,15 @@ class TestApplyLessonTrust:
     def test_success_raises_trust(self, tmp_path):
         hook = _hook(tmp_path)
         fid = _store_lesson(hook.db, "A useful lesson here.", "t")
-        hook._injected_lesson_ids = {fid: 1.0}
+        hook._lessons_by_key[""] = {fid: 1.0}
         hook._apply_lesson_trust("success")
         assert _trust(hook, fid) == pytest.approx(1.05)
-        assert hook._injected_lesson_ids == {}  # cleared
+        assert hook._lessons("") == {}  # cleared
 
     def test_fail_lowers_trust(self, tmp_path):
         hook = _hook(tmp_path)
         fid = _store_lesson(hook.db, "A misleading lesson here.", "t")
-        hook._injected_lesson_ids = {fid: 1.0}
+        hook._lessons_by_key[""] = {fid: 1.0}
         hook._apply_lesson_trust("fail")
         assert _trust(hook, fid) == pytest.approx(0.90)
 
@@ -53,7 +53,7 @@ class TestApplyLessonTrust:
         hook = _hook(tmp_path)
         fid = _store_lesson(hook.db, "Repeatedly bad lesson.", "t")
         _set_trust(hook, fid, 0.05)
-        hook._injected_lesson_ids = {fid: 1.0}
+        hook._lessons_by_key[""] = {fid: 1.0}
         hook._apply_lesson_trust("fail")  # 0.05 - 0.10 floored at 0.0
         assert _trust(hook, fid) == 0.0
 
@@ -61,13 +61,13 @@ class TestApplyLessonTrust:
         hook = _hook(tmp_path)
         fid = _store_lesson(hook.db, "Repeatedly great lesson.", "t")
         _set_trust(hook, fid, 1.98)
-        hook._injected_lesson_ids = {fid: 1.0}
+        hook._lessons_by_key[""] = {fid: 1.0}
         hook._apply_lesson_trust("success")  # 1.98 + 0.05 capped at 2.0
         assert _trust(hook, fid) == 2.0
 
     def test_empty_set_noop(self, tmp_path):
         hook = _hook(tmp_path)
-        hook._injected_lesson_ids = {}
+        hook._lessons_by_key[""] = {}
         hook._apply_lesson_trust("success")  # must not raise
 
     def test_delta_scaled_by_relevance(self, tmp_path):
@@ -76,7 +76,7 @@ class TestApplyLessonTrust:
         hook = _hook(tmp_path)
         near = _store_lesson(hook.db, "Highly relevant lesson text.", "t")
         far = _store_lesson(hook.db, "Barely relevant lesson text.", "t")
-        hook._injected_lesson_ids = {near: 1.0, far: 0.2}
+        hook._lessons_by_key[""] = {near: 1.0, far: 0.2}
         hook._apply_lesson_trust("fail")
         assert _trust(hook, near) == pytest.approx(1.0 - 0.10)
         assert _trust(hook, far) == pytest.approx(1.0 - 0.02)
@@ -85,7 +85,7 @@ class TestApplyLessonTrust:
         # Mutation guard: rel=1.0 collapses to the old uniform delta.
         hook = _hook(tmp_path)
         fid = _store_lesson(hook.db, "A lesson at full relevance.", "t")
-        hook._injected_lesson_ids = {fid: 1.0}
+        hook._lessons_by_key[""] = {fid: 1.0}
         hook._apply_lesson_trust("success")
         assert _trust(hook, fid) == pytest.approx(1.05)
 

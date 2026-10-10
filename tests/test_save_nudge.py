@@ -8,10 +8,9 @@ from conftest import _make_loop
 
 
 def _count(coord, key=None):
-    """The [count, armed] cadence state for *key* (keyless when None)."""
-    from nano_hermes.coordinator.reflection import _CADENCE_KEYLESS  # noqa: PLC0415
-
-    return coord._save_cadence.get(key or _CADENCE_KEYLESS, [0, False])
+    """[turns since save, nudge armed] for *key* (keyless when None)."""
+    st = coord._conversations.get(key or "")
+    return [st.turns_since_save, st.save_nudge_pending] if st else [0, False]
 
 
 def _make_hook(tmp_path, interval: int = 4):
@@ -94,7 +93,7 @@ class TestHydrationFromHistory:
         hook = _make_hook(tmp_path, interval=0)
         coord = hook._reflection_coord
         coord.hydrate_save_counter_from_history(recent_user_turns=100)
-        assert coord._save_cadence == {}  # untouched
+        assert _count(coord) == [0, False]  # untouched
 
 
 class TestHookIntegration:

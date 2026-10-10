@@ -27,26 +27,26 @@ def tracker(hook, cfg) -> SkillUsageTracker:
 
 class TestResetIteration:
     def test_clears_candidates_and_loaded(self, tracker: SkillUsageTracker) -> None:
-        tracker._candidate_skills = ["foo", "bar"]
-        tracker._loaded_skills = {"baz": 0}
+        tracker._state("").candidate_skills = ["foo", "bar"]
+        tracker._state("").loaded_skills = {"baz": 0}
         tracker.reset_iteration()
-        assert tracker._candidate_skills == []
-        assert tracker._loaded_skills == {}
+        assert tracker._state("").candidate_skills == []
+        assert tracker._state("").loaded_skills == {}
 
 
 class TestRecordCandidates:
     def test_extends_candidate_list(self, tracker: SkillUsageTracker) -> None:
         tracker.record_candidates(["a", "b"])
         tracker.record_candidates(["c"])
-        assert tracker._candidate_skills == ["a", "b", "c"]
+        assert tracker._state("").candidate_skills == ["a", "b", "c"]
 
 
 class TestUpdateAccumulators:
     def test_merges_candidates_and_reads_into_session(
         self, tracker: SkillUsageTracker
     ) -> None:
-        tracker._candidate_skills = ["skill-a"]
-        tracker._loaded_skills = {"skill-b": 0}
+        tracker._state("").candidate_skills = ["skill-a"]
+        tracker._state("").loaded_skills = {"skill-b": 0}
         tracker.update_accumulators()
         assert "skill-a" in tracker.session_skills_used
         assert "skill-b" in tracker.session_skills_used
@@ -65,15 +65,15 @@ class TestResetSession:
     def test_returns_accumulated_data_and_clears(
         self, tracker: SkillUsageTracker
     ) -> None:
-        tracker._session_skills_used = {"x", "y"}
-        tracker._session_had_errors = True
+        tracker._state("").session_skills_used = {"x", "y"}
+        tracker._state("").session_had_errors = True
         skills, loaded, errors = tracker.reset_session()
         assert skills == {"x", "y"}
         assert isinstance(loaded, set)
         assert errors is True
-        assert tracker._session_skills_used == set()
-        assert tracker._session_skills_loaded == set()
-        assert tracker._session_had_errors is False
+        assert tracker._state("").session_skills_used == set()
+        assert tracker._state("").session_skills_loaded == set()
+        assert tracker._state("").session_had_errors is False
 
 
 class TestExtractSkillNameFromPath:
