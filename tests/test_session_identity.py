@@ -1135,3 +1135,53 @@ class TestMergeDedupIsExact:
         assert _clean_live_tail(merged, merged=True) == merged
         retried = "[Message Time: t]\nshould I say yes\n\nshould I say yes"
         assert _clean_live_tail(retried, merged=True) == "[Message Time: t]\nshould I say yes"
+
+
+class TestRestartEndsTheOldRow:
+    def test_a_new_process_ends_the_open_row_it_cannot_resume(self, tmp_path):
+        """After a restart the conversation opens a new sessions row; the old
+        one was never ended, so purge_older_than could never delete it."""
+        from unittest.mock import MagicMock
+
+        db = open_db(tmp_path, target_dims=4)
+        window = [{"role": "user", "content": "hi"}]
+        first = SessionArchiver(db=db, embedder_factory=MagicMock(), target_dims=4)
+        old_sid = first.ensure_session(window, "chan:1")
+        restarted = SessionArchiver(db=db, embedder_factory=MagicMock(), target_dims=4)
+        new_sid = restarted.ensure_session(window, "chan:1")
+        assert new_sid != old_sid
+        rows = dict(db.execute("SELECT id, ended_at IS NOT NULL FROM sessions"))
+        assert rows == {old_sid: 1, new_sid: 0}
+
+
+class TestTheWindowIsReleasedWhenTheTurnEnds:
+    async def test_on_finally_drops_the_archived_window(self, tmp_path):
+        """The archiver held the last window and every message dict in it for
+        the life of the process; a turn's end now lets it go — but only for
+        the conversation whose turn ended."""
+        from nanobot.agent.hook import AgentRunHookContext
+        from nanobot.agent.tools.context import (
+            RequestContext,
+            bind_request_context,
+            reset_request_context,
+        )
+
+        hook = _make_hook(tmp_path)
+        await _turn(hook, [], "hello", "cli:a")
+        assert hook.archiver._last_pass is not None
+        assert hook.archiver._entry_cache
+
+        async def finish(key):
+            token = bind_request_context(
+                RequestContext(channel="cli", chat_id="x", session_key=key)
+            )
+            try:
+                await hook.on_finally(AgentRunHookContext(messages=[]))
+            finally:
+                reset_request_context(token)
+
+        await finish("cli:b")  # another chat's turn ending
+        assert hook.archiver._last_pass is not None
+        await finish("cli:a")
+        assert hook.archiver._last_pass is None
+        assert hook.archiver._entry_cache == {}

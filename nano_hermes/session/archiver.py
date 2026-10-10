@@ -682,6 +682,23 @@ class SessionArchiver:
         self._last_pass = (messages, len(messages), key)
         return new_ids, new_texts, session_id
 
+    def release_window(self, key: str | int | None) -> None:
+        """Drop the references to *key*'s last window once its turn is over.
+
+        ``_last_pass`` and ``_entry_cache`` hold that window's list and every
+        message dict in it — large tool outputs, base64 image parts — and would
+        otherwise keep them alive until some later pass replaced them. Another
+        conversation's window is left alone: its turn may still be running.
+        """
+        last = self._last_pass
+        if last is None:
+            return
+        # A keyless window is keyed by its list's id(); its turn has no session
+        # key to match on, so any keyless turn's end releases it.
+        if last[2] == key or (key is None and isinstance(last[2], int)):
+            self._last_pass = None
+            self._entry_cache.clear()
+
     def _evict_idle_conversations(self, key: str | int) -> None:
         """Bound per-conversation state to the busiest _MAX_TRACKED_CONVERSATIONS.
 
@@ -744,6 +761,15 @@ class SessionArchiver:
 
     def _start_session(self, key: str | int, session_key: str | None = None) -> int:
         cur = self._db.cursor()
+        if session_key:
+            # A row for this conversation still open here was left by a previous
+            # process (in this one, dropping the mapping already ended it):
+            # nothing will ever write to it again, and ``purge_older_than`` only
+            # deletes ended sessions.
+            cur.execute(
+                "UPDATE sessions SET ended_at = ? WHERE session_key = ? AND ended_at IS NULL",
+                (time.time(), session_key),
+            )
         cur.execute(
             "INSERT INTO sessions (session_key, started_at) VALUES (?, ?)",
             (session_key or f"loop:{int(time.time() * 1000)}", time.time()),

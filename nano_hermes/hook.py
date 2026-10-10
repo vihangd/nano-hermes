@@ -15,7 +15,7 @@ import logging
 import sqlite3
 from typing import TYPE_CHECKING
 
-from nanobot.agent.hook import AgentHook, AgentHookContext
+from nanobot.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext
 
 from .config import NanoHermesConfig
 from .coordinator.goal import GoalTracker
@@ -471,6 +471,14 @@ class NanoHermesHook(AgentHook):
             skill_name = SkillUsageTracker.extract_skill_name_from_path(path)
             if skill_name:
                 self._skill_tracker.record_read(skill_name, i, key)
+
+    async def on_finally(self, context: AgentRunHookContext) -> None:
+        """End of a run: release the archiver's hold on this turn's window.
+
+        Run-level context carries no session key, so the turn's conversation
+        comes from nanobot's request contextvar (still bound here).
+        """
+        self.archiver.release_window(request_session_key())
 
     async def after_iteration(self, context: AgentHookContext) -> None:
         mark_request_hooked()
