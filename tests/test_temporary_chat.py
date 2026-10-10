@@ -60,3 +60,42 @@ async def test_a_persisted_turn_is_unaffected(tmp_path, monkeypatch):
         AgentHookContext(iteration=0, messages=msgs, session_key="cli:1")
     )
     assert hook.db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 1
+
+
+async def test_a_turn_the_hook_never_saw_is_not_persisted(tmp_path):
+    """nanobot 0.2.2 has no persist_session field, but an ephemeral turn there
+    skips extra hooks while plugin tools stay registered. A tool running in a
+    turn whose request context the hook never saw must not write."""
+    from nanobot.agent.tools.context import (
+        RequestContext,
+        bind_request_context,
+        reset_request_context,
+    )
+
+    loop = _make_loop(tmp_path)
+    hook = nano_hermes.install(loop, config={})
+    before = loop.context.memory.read_memory()
+    token = bind_request_context(
+        RequestContext(channel="cli", chat_id="1", session_key="cli:1")
+    )
+    try:
+        # Ephemeral: the hook never ran for this turn.
+        out = await loop.tools.get("memory_patch").execute(
+            slot="memory", action="add", content="durable fact"
+        )
+        assert out.startswith("skipped")
+        assert loop.context.memory.read_memory() == before
+        # A normal turn: the hook ran first, so the same call writes.
+        await hook.before_iteration(
+            AgentHookContext(
+                iteration=0,
+                messages=[{"role": "user", "content": "hi"}],
+                session_key="cli:1",
+            )
+        )
+        out = await loop.tools.get("memory_patch").execute(
+            slot="memory", action="add", content="durable fact"
+        )
+        assert out.startswith("ok"), out
+    finally:
+        reset_request_context(token)

@@ -352,6 +352,8 @@ class TestNudgeReachesTheHookPath:
             reset_request_context,
         )
 
+        from nano_hermes.coordinator.session import mark_request_hooked
+
         from nano_hermes.memory.tool import MemoryPatchTool  # noqa: PLC0415
 
         hook = _make_hook(tmp_path, interval=5)
@@ -362,6 +364,7 @@ class TestNudgeReachesTheHookPath:
         token = bind_request_context(
             RequestContext(channel="cli", chat_id="a", session_key="chan:a")
         )
+        mark_request_hooked()  # the hook runs first in every real turn
         try:
             out = await MemoryPatchTool(hook=hook).execute(
                 action="add", slot="memory", content="durable fact"

@@ -6,6 +6,7 @@ trajectory finalization at session boundaries.
 from __future__ import annotations
 
 import logging
+from contextvars import ContextVar
 import sqlite3
 import time
 from typing import TYPE_CHECKING
@@ -35,22 +36,52 @@ def request_session_key() -> str | None:
     return current_request_session_key()
 
 
-def request_persists() -> bool:
-    """False when nanobot says this turn's session is not persisted.
+# The RequestContext of the turn this hook last ran in, per task. See
+# request_persists for why that matters.
+_HOOKED_REQUEST: ContextVar[object | None] = ContextVar(
+    "nano_hermes_hooked_request", default=None
+)
 
-    nanobot HEAD sets ``RequestContext.persist_session`` false for ephemeral
-    turns and non-persistent session policies (SDK temporary chats). nanobot
-    skips extra hooks on ephemeral turns, but plugin tools stay registered and
-    an SDK caller can opt hooks back in, so without this a temporary chat was
-    archived and could write memory, reflections and principles. Older
-    nanobot (0.2.2) has no such field: everything persists, as before.
-    """
+
+def _current_request() -> object | None:
     try:
         from nanobot.agent.tools.context import current_request_context
     except ImportError:
+        return None
+    return current_request_context()
+
+
+def mark_request_hooked() -> None:
+    """Record that this hook ran for the calling turn. Call on hook entry.
+
+    Turns run in their own asyncio task and tools are awaited from it (or
+    from child tasks that copy its context), so a tool sees the mark of its
+    own turn and never another chat's.
+    """
+    ctx = _current_request()
+    if ctx is not None:
+        _HOOKED_REQUEST.set(ctx)
+
+
+def request_persists() -> bool:
+    """False when nanobot will not keep this turn's session.
+
+    nanobot HEAD says so directly: ``RequestContext.persist_session`` is false
+    for ephemeral turns and non-persistent session policies (SDK temporary
+    chats). nanobot 0.2.2 has no such field, but its only turns that skip
+    extra hooks are ephemeral ones (``loop.py`` ``_run_agent_loop``) — and
+    plugin tools stay registered on them. So a tool running inside a turn
+    whose request context this hook never saw is in a turn nanobot is not
+    keeping. Subagents build their own tool registry, so they never reach
+    nano-hermes tools. Outside any turn (direct API use, tests) everything
+    persists.
+    """
+    ctx = _current_request()
+    if ctx is None:
         return True
-    ctx = current_request_context()
-    return ctx is None or bool(getattr(ctx, "persist_session", True))
+    if not getattr(ctx, "persist_session", True):
+        return False
+    return _HOOKED_REQUEST.get() is ctx
 
 
 def conversation_key(key: str | None = None) -> str:

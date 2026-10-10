@@ -211,6 +211,8 @@ class TestToolsAttachToTheCallingConversation:
             reset_request_context,
         )
 
+        from nano_hermes.coordinator.session import mark_request_hooked
+
         from nano_hermes.reflect.tool import ReflectTool
 
         hook = _make_hook(tmp_path)
@@ -224,6 +226,7 @@ class TestToolsAttachToTheCallingConversation:
         token = bind_request_context(
             RequestContext(channel="cli", chat_id="alice", session_key="cli:alice")
         )
+        mark_request_hooked()  # the hook runs first in every real turn
         try:
             out = await ReflectTool(hook=hook).execute(content="alice's lesson")
         finally:

@@ -23,6 +23,7 @@ from .coordinator.reflection import ReflectionCoordinator
 from .coordinator.session import (
     SessionCoordinator,
     conversation_key,
+    mark_request_hooked,
     request_persists,
     request_session_key,
 )
@@ -386,6 +387,7 @@ class NanoHermesHook(AgentHook):
     # ------------------------------------------------------------------
 
     async def before_iteration(self, context: AgentHookContext) -> None:
+        mark_request_hooked()
         if not request_persists():
             return  # a temporary chat leaves no trace (see request_persists)
         # Per-conversation state is keyed on this; keyless chats share "".
@@ -498,6 +500,7 @@ class NanoHermesHook(AgentHook):
                 log.debug("cheatsheet: retrieval injection failed", exc_info=True)
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
+        mark_request_hooked()
         if not request_persists():
             return  # a temporary chat leaves no trace (see request_persists)
         # Per-conversation state is keyed on this; keyless chats share "".
@@ -518,6 +521,7 @@ class NanoHermesHook(AgentHook):
                 self._skill_tracker.record_read(skill_name, i, key)
 
     async def after_iteration(self, context: AgentHookContext) -> None:
+        mark_request_hooked()
         if not request_persists():
             return  # a temporary chat leaves no trace (see request_persists)
         # Per-conversation state is keyed on this; keyless chats share "".
