@@ -1120,3 +1120,15 @@ class TestMultimodalMessages:
         archiver.ensure_session(window, "chan:1")
         rows = [r[0] for r in db.execute("SELECT content FROM chunks")]
         assert rows == ["what is in this picture?"]
+
+
+class TestMergeDedupIsExact:
+    def test_a_reply_that_ends_the_interrupted_message_survives(self):
+        """Merged retry dedup compared by suffix, so "yes" after an interrupted
+        "should I say yes" was taken for a duplicate and never archived."""
+        from nano_hermes.session.archiver import _clean_live_tail
+
+        merged = "[Message Time: t]\nshould I say yes\n\nyes"
+        assert _clean_live_tail(merged, merged=True) == merged
+        retried = "[Message Time: t]\nshould I say yes\n\nshould I say yes"
+        assert _clean_live_tail(retried, merged=True) == "[Message Time: t]\nshould I say yes"

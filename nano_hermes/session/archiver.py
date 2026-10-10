@@ -185,10 +185,13 @@ def _clean_live_tail(text: str, *, role: str = "user", merged: bool = False) -> 
     # split wins, so a prompt that itself contains a blank line is de-duplicated
     # whole rather than one paragraph at a time. A post-compaction merge
     # (``"<summary>\n\n<current>"``) matches nothing here and is kept whole.
+    # The history half must *equal* the current message once its stamp line is
+    # set aside — a suffix test dropped a genuine reply ("yes") whenever the
+    # interrupted message happened to end with it ("should I say yes").
     at = text.find("\n\n")
     while at != -1:
         head, tail = text[:at], text[at + 2:]
-        if tail and head.endswith(tail):
+        if tail and head.partition("\n")[2] == tail:
             return head
         at = text.find("\n\n", at + 1)
     return text
