@@ -166,6 +166,14 @@ class SessionCoordinator:
             return None
         return self._sessions_by_key.get(session_key)
 
+    def transcript(self, session_id: int) -> list[dict]:
+        """The archived messages of *session_id*, in order."""
+        rows = self._db.execute(
+            "SELECT role, content FROM chunks WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+        return [{"role": r, "content": c} for r, c in rows]
+
     def finalize(
         self,
         session_id: int,
@@ -191,11 +199,7 @@ class SessionCoordinator:
                     (session_id,),
                 ).fetchall()
             ]
-            chunks = self._db.execute(
-                "SELECT role, content FROM chunks WHERE session_id = ? ORDER BY id",
-                (session_id,),
-            ).fetchall()
-            messages = [{"role": r, "content": c} for r, c in chunks]
+            messages = self.transcript(session_id)
             self._trajectory_writer.write(
                 session_id=session_id,
                 messages=messages,

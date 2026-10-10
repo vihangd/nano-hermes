@@ -148,3 +148,27 @@ async def test_injected_lessons_are_recorded_under_the_injecting_chat(
     assert any("lesson for deploy the app" in s for s in injected), injected
     assert hook._lessons("chan:a") == {7: 0.9}
     assert hook._lessons("chan:b") == {}
+
+
+async def test_boundary_lessons_come_from_the_session_that_ended(tmp_path):
+    """The boundary fires on the window that crossed it — after /new, the next
+    task's first prompt. Lesson extraction must read the ended session's own
+    transcript, not that window."""
+    import asyncio
+
+    hook = nano_hermes.install(
+        _make_loop(tmp_path), config={"skill_stats": {"cheatsheet_enabled": True}}
+    )
+    seen: list[list[dict]] = []
+
+    async def capture(messages, outcome):
+        seen.append(messages)
+
+    hook._extract_cheatsheet_lesson = capture
+    a = []
+    await _turn(hook, a, _user("migrate the database"), "chan:a")
+    await _turn(hook, [], _user("write a haiku"), "chan:a")  # /new
+    await asyncio.gather(*hook._lesson_tasks)
+    assert len(seen) == 1
+    text = " ".join(str(m["content"]) for m in seen[0])
+    assert "migrate the database" in text and "haiku" not in text

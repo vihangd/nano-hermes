@@ -891,7 +891,11 @@ class NanoHermesHook(AgentHook):
             import asyncio  # noqa: PLC0415
             outcome = "fail" if had_errors else "success"
             self._apply_lesson_trust(outcome, key)
-            msgs_snapshot = list(messages)
+            # The completed session's own transcript. ``messages`` is the window
+            # that *crossed* the boundary — after /new it is the next task's
+            # first prompt — so extracting from it recorded a lesson about the
+            # wrong task under the old one's outcome.
+            msgs_snapshot = self._session_coord.transcript(completed_id)
             # Dynamic Cheatsheet: schedule lesson extraction for the completed session.
             if getattr(self.config.skill_stats, "cheatsheet_enabled", False):
                 t = asyncio.create_task(self._extract_cheatsheet_lesson(msgs_snapshot, outcome))
