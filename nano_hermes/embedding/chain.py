@@ -15,6 +15,7 @@ import logging
 import asyncio
 import os
 import time
+import weakref
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Sequence
 
@@ -60,8 +61,19 @@ _SKIP_LOG_THROTTLE = 60.0    # 1 min between skip-log lines per provider
 # httpx, not aiohttp: nanobot already loads httpx, while aiohttp cost this
 # plugin +10 MB RSS and ~56 ms of import (about 1.5 s on a Pi 3B+) for the
 # same job. Per loop because a client's connections belong to the loop that
-# opened them.
-_shared_client: tuple[asyncio.AbstractEventLoop, httpx.AsyncClient] | None = None
+# opened them; the loop is held weakly so a finished one can be collected.
+#
+# Settings that keep aiohttp's behaviour where httpx's defaults differ:
+# - keepalive_expiry: httpx drops idle connections after 5 s, which at one
+#   embed per turn means a fresh TLS handshake nearly every call. 30 s stays
+#   under common server idle timeouts (nginx 75 s, most LBs 60 s).
+# - follow_redirects: a custom base_url behind a 307/308 kept working.
+# - trust_env=False: embedding traffic did not go through HTTP(S)_PROXY /
+#   ALL_PROXY, and a SOCKS proxy without socksio would fail client creation.
+_LIMITS = httpx.Limits(
+    max_connections=4, max_keepalive_connections=4, keepalive_expiry=30.0
+)
+_shared_client: tuple["weakref.ref[asyncio.AbstractEventLoop]", httpx.AsyncClient] | None = None
 
 
 def _get_client() -> httpx.AsyncClient:
@@ -69,14 +81,14 @@ def _get_client() -> httpx.AsyncClient:
     loop = asyncio.get_running_loop()
     if (
         _shared_client is None
-        or _shared_client[0] is not loop
+        or _shared_client[0]() is not loop
         or _shared_client[1].is_closed
     ):
+        # A client left from a finished loop can't be awaited closed from here;
+        # its sockets go with it when it is collected.
         _shared_client = (
-            loop,
-            httpx.AsyncClient(
-                limits=httpx.Limits(max_connections=4, max_keepalive_connections=4),
-            ),
+            weakref.ref(loop),
+            httpx.AsyncClient(limits=_LIMITS, follow_redirects=True, trust_env=False),
         )
     return _shared_client[1]
 
@@ -148,8 +160,16 @@ class EmbeddingChain:
             "Content-Type": "application/json",
         }
         payload = {"model": self.config.model, "input": texts}
-        r = await self._session.post(
-            url, headers=headers, json=payload, timeout=self.config.timeout_seconds
+        # A bare httpx timeout bounds each phase (connect, each read, pool
+        # wait) separately, so a slow-dripping provider could hold a call for
+        # several times timeout_seconds; aiohttp's was a total. wait_for
+        # restores the cap — this call can sit on the turn path (cheatsheet,
+        # trajectory and global-reflection injection, session_search).
+        r = await asyncio.wait_for(
+            self._session.post(
+                url, headers=headers, json=payload, timeout=self.config.timeout_seconds
+            ),
+            timeout=self.config.timeout_seconds,
         )
         r.raise_for_status()
         return _embeddings_in_index_order(r.json())

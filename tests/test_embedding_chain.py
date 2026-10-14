@@ -192,6 +192,7 @@ class TestTheHttpPath:
     async def test_request_shape_order_and_failover(self, monkeypatch):
         import asyncio
         import json
+        import weakref
 
         import httpx
 
@@ -219,7 +220,9 @@ class TestTheHttpPath:
         monkeypatch.setattr(chain_mod, "_unhealthy_until", {})
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         monkeypatch.setattr(
-            chain_mod, "_shared_client", (asyncio.get_running_loop(), client)
+            chain_mod,
+            "_shared_client",
+            (weakref.ref(asyncio.get_running_loop()), client),
         )
         async with EmbeddingChain(config=_config("deepinfra", "together")) as chain:
             first, second = await chain.embed(["a", "b"])
@@ -231,3 +234,52 @@ class TestTheHttpPath:
         assert seen[1][2] == "Bearer k2"
         assert ("deepinfra", "fake-model") in chain_mod._unhealthy_until
         await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_timeout_caps_the_whole_call_and_fails_over(self, monkeypatch):
+        """httpx's timeout bounds each phase; a provider that keeps a request
+        alive past timeout_seconds must still be abandoned at the cap."""
+        import asyncio
+        import weakref
+
+        import httpx
+
+        import nano_hermes.embedding.chain as chain_mod
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if "deepinfra" in str(request.url):
+                await asyncio.sleep(5)  # longer than timeout_seconds=1.0
+            return httpx.Response(
+                200, json={"data": [{"index": 0, "embedding": [1.0] + [0.0] * 7}]},
+                request=request,
+            )
+
+        monkeypatch.setenv("FAKE_DEEPINFRA_KEY", "k1")
+        monkeypatch.setenv("FAKE_TOGETHER_KEY", "k2")
+        monkeypatch.setattr(chain_mod, "_unhealthy_until", {})
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr(
+            chain_mod, "_shared_client",
+            (weakref.ref(asyncio.get_running_loop()), client),
+        )
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        async with EmbeddingChain(config=_config("deepinfra", "together")) as chain:
+            [vec] = await chain.embed(["a"])
+        assert vec[0] == 1.0
+        assert loop.time() - started < 2.5
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_client_follows_redirects_and_ignores_proxy_env(self, monkeypatch):
+        """Kept from aiohttp: a base_url behind a 307/308 works, and embedding
+        traffic does not pick up HTTP(S)_PROXY / ALL_PROXY."""
+        import nano_hermes.embedding.chain as chain_mod
+
+        monkeypatch.setattr(chain_mod, "_shared_client", None)
+        monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1")
+        client = chain_mod._get_client()
+        assert client.follow_redirects is True
+        assert client.trust_env is False
+        await client.aclose()
+
