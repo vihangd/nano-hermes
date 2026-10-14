@@ -268,6 +268,12 @@ class TestTheHttpPath:
             [vec] = await chain.embed(["a"])
         assert vec[0] == 1.0
         assert loop.time() - started < 2.5
+        # A hung provider is marked unhealthy so later turns skip it at once.
+        assert ("deepinfra", "fake-model") in chain_mod._unhealthy_until
+        started = loop.time()
+        async with EmbeddingChain(config=_config("deepinfra", "together")) as chain:
+            await chain.embed(["b"])
+        assert loop.time() - started < 0.5
         await client.aclose()
 
     @pytest.mark.asyncio
@@ -281,5 +287,7 @@ class TestTheHttpPath:
         client = chain_mod._get_client()
         assert client.follow_redirects is True
         assert client.trust_env is False
+        # System trust store, not certifi-only (trust_env=False alone gives that).
+        assert client._transport._pool._ssl_context is chain_mod._SSL
         await client.aclose()
 

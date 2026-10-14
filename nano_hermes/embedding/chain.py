@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import asyncio
 import os
+import ssl
 import time
 import weakref
 from dataclasses import dataclass, field
@@ -59,7 +60,7 @@ _SKIP_LOG_THROTTLE = 60.0    # 1 min between skip-log lines per provider
 # One pooled client per event loop — keeps connections alive across embed
 # calls so we don't pay a TLS handshake (50-300 ms on ARM) on every request.
 # httpx, not aiohttp: nanobot already loads httpx, while aiohttp cost this
-# plugin +10 MB RSS and ~56 ms of import (about 1.5 s on a Pi 3B+) for the
+# plugin +12 MB RSS and ~56 ms of import (about 1.5 s on a Pi 3B+) for the
 # same job. Per loop because a client's connections belong to the loop that
 # opened them; the loop is held weakly so a finished one can be collected.
 #
@@ -70,9 +71,16 @@ _SKIP_LOG_THROTTLE = 60.0    # 1 min between skip-log lines per provider
 # - follow_redirects: a custom base_url behind a 307/308 kept working.
 # - trust_env=False: embedding traffic did not go through HTTP(S)_PROXY /
 #   ALL_PROXY, and a SOCKS proxy without socksio would fail client creation.
+# - _SSL: the system trust store (honours SSL_CERT_FILE / SSL_CERT_DIR);
+#   httpx with trust_env=False would trust only certifi's bundle. Built at
+#   import, like aiohttp did, so the first embed doesn't load CA certs on the
+#   event loop mid-turn.
+# ponytail: no DNS cache (aiohttp had a 300 s one); a turn more than 30 s
+# after the last pays a lookup. Add a resolver cache if a Pi measures it.
 _LIMITS = httpx.Limits(
     max_connections=4, max_keepalive_connections=4, keepalive_expiry=30.0
 )
+_SSL = ssl.create_default_context()
 _shared_client: tuple["weakref.ref[asyncio.AbstractEventLoop]", httpx.AsyncClient] | None = None
 
 
@@ -88,7 +96,9 @@ def _get_client() -> httpx.AsyncClient:
         # its sockets go with it when it is collected.
         _shared_client = (
             weakref.ref(loop),
-            httpx.AsyncClient(limits=_LIMITS, follow_redirects=True, trust_env=False),
+            httpx.AsyncClient(
+                limits=_LIMITS, verify=_SSL, follow_redirects=True, trust_env=False
+            ),
         )
     return _shared_client[1]
 
@@ -142,9 +152,18 @@ class EmbeddingChain:
                 else:
                     log.warning("embedding provider %s failed: %s", p.provider, e)
                 errors.append(f"{p.provider}: HTTP {status}")
+            except (asyncio.TimeoutError, httpx.TimeoutException) as e:
+                # A hung provider would otherwise cost every turn the full
+                # timeout before failover.
+                _unhealthy_until[key] = now + ttl
+                log.warning(
+                    "embedding provider %s timed out — marked unhealthy for %.0fs",
+                    p.provider, ttl,
+                )
+                errors.append(f"{p.provider}: timeout ({type(e).__name__})")
             except Exception as e:
-                errors.append(f"{p.provider}: {e}")
-                log.warning("embedding provider %s failed: %s", p.provider, e)
+                errors.append(f"{p.provider}: {e!r}")
+                log.warning("embedding provider %s failed: %r", p.provider, e)
         raise AllProvidersFailed("; ".join(errors))
 
     async def _call(  # noqa: D401
