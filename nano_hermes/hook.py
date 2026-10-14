@@ -178,6 +178,12 @@ class NanoHermesHook(AgentHook):
             return self._session_coord.session_for(key)
         return self.current_session_id
 
+    @property
+    def background_model(self) -> str | None:
+        """Model for background learning calls: ``config.background_model`` if
+        set, else the loop's own model. Never used on the foreground turn."""
+        return self.config.background_model or getattr(self._loop, "model", None)
+
     def embedder(self) -> EmbeddingChain:
         return EmbeddingChain(self.config.embedding)
 

@@ -433,13 +433,3 @@ class NanoHermesConfig(BaseModel):
     # a sync, or a DB restore reintroduces an entry that bypassed the
     # write-time guard. The on-disk file is never modified.
     memory_loadtime_scan: bool = True
-
-
-def background_model(hook: object) -> str | None:
-    """The model background learning calls use: ``background_model`` if set,
-    else the loop's own model."""
-    override = getattr(getattr(hook, "config", None), "background_model", None)
-    if isinstance(override, str) and override:
-        return override
-    return getattr(getattr(hook, "_loop", None), "model", None)
-

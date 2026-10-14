@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any
 
 from ..utils.error_classifier import classify_llm_response
 from .cheatsheet import _embed_lesson as _embed_fact, _parse_marked
-from ..config import background_model
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -218,7 +217,7 @@ async def extract_contrastive_insight(
     try:
         resp = await hook._loop.provider.chat_with_retry(
             messages=[{"role": "user", "content": prompt}],
-            model=background_model(hook),
+            model=hook.background_model,
             max_tokens=150,
         )
     except Exception:

@@ -10,7 +10,6 @@ from types import SimpleNamespace
 
 import nano_hermes
 from conftest import _make_loop
-from nano_hermes.config import background_model
 from nano_hermes.memory.cheatsheet import extract_cheatsheet_lesson
 
 
@@ -23,10 +22,10 @@ class _RecordingProvider:
         return SimpleNamespace(content="SKIP")
 
 
-def test_falls_back_to_the_loop_model():
-    hook = SimpleNamespace(config=SimpleNamespace(background_model=None),
-                           _loop=SimpleNamespace(model="small"))
-    assert background_model(hook) == "small"
+def test_falls_back_to_the_loop_model(tmp_path):
+    loop = _make_loop(tmp_path)
+    hook = nano_hermes.install(loop, config={})
+    assert hook.background_model == loop.model
 
 
 async def test_extraction_uses_the_background_model(tmp_path):

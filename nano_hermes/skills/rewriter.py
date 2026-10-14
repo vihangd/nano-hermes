@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING
 
 from ..utils.error_classifier import EvolutionAbortError, classify_llm_response
 from .guard import scan_skill_content
-from ..config import background_model
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -195,7 +194,7 @@ async def _run_critic(
                     {"role": "system", "content": _CRITIC_SYSTEM},
                     {"role": "user", "content": prompt},
                 ],
-                model=background_model(hook),
+                model=hook.background_model,
                 max_tokens=20,
             )
             err = classify_llm_response(resp)
@@ -286,7 +285,7 @@ async def rewrite_skill(
     try:
         response = await hook._loop.provider.chat_with_retry(
             messages=[{"role": "user", "content": prompt}],
-            model=background_model(hook),
+            model=hook.background_model,
             max_tokens=2048,
         )
         err = classify_llm_response(response)
