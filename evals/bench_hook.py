@@ -12,8 +12,11 @@ and RSS on top of an already-imported nanobot.
 Run **one shape per process** and repeat it: running several shapes in one
 process measured nothing reproducible in earlier audits. Numbers from a Pi
 3B+ replace the x26 desktop extrapolation the audits have had to use.
-Embedding providers are not called (no keys needed): their failures happen
-off the turn path, as they would on the device.
+Embedding providers are not called (no keys needed), so with the default
+config — where embeddings run in background tasks — the hook time is what the
+turn pays. Settings that embed on iteration 0 (``skill_stats.cheatsheet_enabled``,
+``trajectory.inject_context``, ``reflection_scope="global"``) add one embedding
+round trip per turn on top of these numbers.
 """
 from __future__ import annotations
 
@@ -52,7 +55,13 @@ def main() -> None:
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
     from conftest import _make_loop  # minimal real AgentLoop
-    from nanobot.agent.hook import AgentHookContext
+    from nanobot.agent.hook import AgentHookContext, AgentRunHookContext
+    from nanobot.agent.tools.context import (
+        RequestContext,
+        bind_request_context,
+        reset_request_context,
+    )
+    from nanobot.providers.base import ToolCallRequest
     from nanobot.session.manager import Session
 
     loop = _make_loop(Path(tempfile.mkdtemp()))
@@ -74,6 +83,11 @@ def main() -> None:
         return time.perf_counter() - start
 
     async def drive() -> None:
+        # The hook sequence nanobot's runner really issues, inside the per-turn
+        # request context its loop binds: per tool iteration before_iteration
+        # -> (assistant message) -> before_execute_tools -> (tool results) ->
+        # after_iteration, one context object each; then a final iteration;
+        # then on_finally.
         for t in range(args.turns):
             session = sessions[t % args.chats]
             key = session.key
@@ -81,21 +95,38 @@ def main() -> None:
             text = f"user turn {t} " + "x" * 200
             msgs = build(history=hist, current_message=text, channel="cli", chat_id="1")
             session.add_message("user", text)
-            spent = await timed(hook.before_iteration, AgentHookContext(
-                messages=msgs, iteration=0, session_key=key))
-            for i in range(args.tool_calls):
-                call = [{"id": f"c{t}_{i}", "type": "function",
-                         "function": {"name": "nano_status", "arguments": "{}"}}]
-                msgs.append({"role": "assistant", "content": f"calling {i}", "tool_calls": call})
-                msgs.append({"role": "tool", "tool_call_id": f"c{t}_{i}", "content": "ok " * 40})
-                spent += await timed(hook.before_iteration, AgentHookContext(
-                    messages=msgs, iteration=i + 1, session_key=key))
-                session.add_message("assistant", f"calling {i}", tool_calls=call)
-                session.add_message("tool", "ok " * 40, tool_call_id=f"c{t}_{i}")
-            msgs.append({"role": "assistant", "content": f"reply {t} " + "y" * 200})
-            spent += await timed(hook.after_iteration, AgentHookContext(
-                messages=msgs, iteration=args.tool_calls, session_key=key))
-            session.add_message("assistant", f"reply {t} " + "y" * 200)
+            token = bind_request_context(
+                RequestContext(channel="cli", chat_id="1", session_key=key)
+            )
+            try:
+                spent = 0.0
+                for i in range(args.tool_calls):
+                    ctx = AgentHookContext(messages=msgs, iteration=i, session_key=key)
+                    spent += await timed(hook.before_iteration, ctx)
+                    call = {"id": f"c{t}_{i}", "type": "function",
+                            "function": {"name": "nano_status", "arguments": "{}"}}
+                    msgs.append({"role": "assistant", "content": f"calling {i}",
+                                 "tool_calls": [call]})
+                    ctx.tool_calls = [ToolCallRequest(
+                        id=call["id"], name="nano_status", arguments={})]
+                    spent += await timed(hook.before_execute_tools, ctx)
+                    msgs.append({"role": "tool", "tool_call_id": call["id"],
+                                 "content": "ok " * 40})
+                    spent += await timed(hook.after_iteration, ctx)
+                    session.add_message("assistant", f"calling {i}", tool_calls=[call])
+                    session.add_message("tool", "ok " * 40, tool_call_id=call["id"])
+                ctx = AgentHookContext(
+                    messages=msgs, iteration=args.tool_calls, session_key=key)
+                spent += await timed(hook.before_iteration, ctx)
+                reply = f"reply {t} " + "y" * 200
+                msgs.append({"role": "assistant", "content": reply})
+                ctx.final_content = reply
+                spent += await timed(hook.after_iteration, ctx)
+                spent += await timed(
+                    hook.on_finally, AgentRunHookContext(messages=list(msgs)))
+            finally:
+                reset_request_context(token)
+            session.add_message("assistant", reply)
             per_turn.append(spent * 1000)
         await hook.archiver.drain()
 
