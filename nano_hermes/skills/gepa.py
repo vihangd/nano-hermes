@@ -32,6 +32,7 @@ from ..memory.budgets import _count_tokens
 from ..utils.error_classifier import EvolutionAbortError, classify_llm_response
 from .guard import scan_skill_content
 from .rewriter import gather_failure_context, get_rewrite_candidates, save_skill_version
+from ..config import background_model
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -258,7 +259,7 @@ async def evolve_skill(
         try:
             resp = await hook._loop.provider.chat_with_retry(
                 messages=[{"role": "user", "content": mutation_prompt}],
-                model=getattr(hook._loop, "model", None),
+                model=background_model(hook),
                 max_tokens=2048,
             )
             err = classify_llm_response(resp)
@@ -294,7 +295,7 @@ async def evolve_skill(
         try:
             eval_resp = await hook._loop.provider.chat_with_retry(
                 messages=[{"role": "user", "content": eval_prompt}],
-                model=getattr(hook._loop, "model", None),
+                model=background_model(hook),
                 max_tokens=len(failure_contexts) * 4 + 20,
             )
             eval_err = classify_llm_response(eval_resp)

@@ -24,6 +24,7 @@ import json as _json
 import logging
 import time
 from typing import TYPE_CHECKING
+from ..config import background_model
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -217,7 +218,7 @@ async def _ask_superseded(
     Returns the list of fact ids (not display numbers). Empty on any failure.
     """
     provider = getattr(hook._loop, "provider", None)  # noqa: SLF001
-    model = getattr(hook._loop, "model", None)  # noqa: SLF001
+    model = background_model(hook)
     if provider is None or model is None:
         return []
 

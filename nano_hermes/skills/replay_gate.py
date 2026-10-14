@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from typing import TYPE_CHECKING
+from ..config import background_model
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -137,7 +138,7 @@ async def replay_passes_gate(
     provider = getattr(hook._loop, "provider", None)
     if provider is None:
         return True
-    model = getattr(hook._loop, "model", None)
+    model = background_model(hook)
     if model is None:
         return True
     try:

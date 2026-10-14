@@ -22,6 +22,7 @@ import logging
 import sqlite3
 import time
 from typing import TYPE_CHECKING
+from ..config import background_model
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -217,7 +218,7 @@ async def run_opro(hook: "NanoHermesHook") -> bool:
         try:
             resp = await hook._loop.provider.chat_with_retry(
                 messages=[{"role": "user", "content": meta_prompt}],
-                model=getattr(hook._loop, "model", None),
+                model=background_model(hook),
                 max_tokens=1024,
             )
             err = classify_llm_response(resp)

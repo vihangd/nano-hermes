@@ -15,6 +15,7 @@ import sqlite3
 from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
+from ..config import background_model
 
 if TYPE_CHECKING:
     from ..embedding.chain import EmbeddingChain
@@ -187,7 +188,7 @@ async def distill_hub_to_fact(hook: Any, hub: dict) -> dict | None:
     provider = getattr(hook._loop, "provider", None)
     if provider is None:
         return None
-    model = getattr(hook._loop, "model", None)
+    model = background_model(hook)
     if model is None:
         log.warning("distill_hub_to_fact: no model configured on hook._loop — skipping hub")
         return None

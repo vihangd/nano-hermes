@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
+from ..config import background_model
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -60,7 +61,7 @@ async def localize_failure_step(
     provider = getattr(hook._loop, "provider", None)
     if provider is None:
         return None
-    model = getattr(hook._loop, "model", None)
+    model = background_model(hook)
     if model is None:
         return None
     prompt = _LOCALIZE_PROMPT.format(

@@ -21,6 +21,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from ..utils.error_classifier import classify_llm_response
+from ..config import background_model
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -129,7 +130,7 @@ async def extract_cheatsheet_lesson(
     try:
         resp = await hook._loop.provider.chat_with_retry(
             messages=[{"role": "user", "content": prompt}],
-            model=getattr(hook._loop, "model", None),
+            model=background_model(hook),
             max_tokens=150,
         )
     except Exception:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
+from ..config import background_model
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -71,7 +72,7 @@ async def check_reconstruction(
                     {"role": "system", "content": _AUDIT_SYSTEM},
                     {"role": "user", "content": prompt},
                 ],
-                model=getattr(hook._loop, "model", None),
+                model=background_model(hook),
                 max_tokens=5,
             )
             answer = (resp.content or "").strip().upper()

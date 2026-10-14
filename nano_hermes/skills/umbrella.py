@@ -23,6 +23,7 @@ import numpy as np
 from .._atomic import atomic_write_text
 from .curator import transition_skill
 from .propose_tool import _NAME_RE
+from ..config import background_model
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -120,7 +121,7 @@ async def _ask_merge(hook: "NanoHermesHook", bodies: dict[str, str]) -> dict | N
     try:
         resp = await hook._loop.provider.chat_with_retry(
             messages=[{"role": "user", "content": prompt}],
-            model=getattr(hook._loop, "model", None),
+            model=background_model(hook),
             max_tokens=2048,
         )
     except Exception:

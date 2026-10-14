@@ -417,6 +417,13 @@ class NanoHermesConfig(BaseModel):
     # a background VACUUM/purge lock instead of dropping the turn's archive.
     sqlite_busy_timeout_ms: int = 10000
     reflection_scope: Literal["session", "global"] = "session"
+    # Model for background learning work (lesson/insight extraction,
+    # consolidation, curation, skill rewriting) — never the foreground turn.
+    # None uses the loop's own model. Set it to a stronger model on the same
+    # provider to let a small, fast foreground model on a Pi read memories a
+    # better model wrote (context-space distillation, DuoMem arXiv:2606.29961);
+    # set it to a cheaper one to save cost.
+    background_model: str | None = None
     # Apply regex-based secret redaction to user-supplied content before it
     # lands on disk (skill bodies, companion files, memory entries,
     # reflections). Default on — opt out only for debugging.
@@ -426,3 +433,13 @@ class NanoHermesConfig(BaseModel):
     # a sync, or a DB restore reintroduces an entry that bypassed the
     # write-time guard. The on-disk file is never modified.
     memory_loadtime_scan: bool = True
+
+
+def background_model(hook: object) -> str | None:
+    """The model background learning calls use: ``background_model`` if set,
+    else the loop's own model."""
+    override = getattr(getattr(hook, "config", None), "background_model", None)
+    if isinstance(override, str) and override:
+        return override
+    return getattr(getattr(hook, "_loop", None), "model", None)
+
