@@ -103,3 +103,20 @@ scored as a miss).
 * Distilled-artifact arms — reflections / principles / cheatsheet lessons
   ablated independently, not just retrieval.
 * Paired bootstrap CIs and McNemar for the `fts_only` vs `rrf` head-to-head.
+
+## Hook and startup cost on the device
+
+`bench_hook.py` measures what nano-hermes adds to a nanobot turn — time inside
+its hook calls on the window shape nanobot really builds — plus its import time
+and RSS on top of nanobot. Run it on the Pi itself, one shape per process,
+several times:
+
+```bash
+uv run python -m evals.bench_hook --tool-calls 0
+uv run python -m evals.bench_hook --tool-calls 8
+uv run python -m evals.bench_hook --tool-calls 1 --chats 2
+```
+
+Desktop reference (M-series, 2026-10-14): hook 0.5 / 2.0 / 0.66 ms median,
+import 40 ms, +9.3 MB RSS. Audits have extrapolated to a Pi 3B+ at x26; a run on
+the board replaces that guess.
