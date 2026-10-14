@@ -12,12 +12,13 @@ a Pi at ~7k chunks is ~14 MB — fits SD cards comfortably.
 from __future__ import annotations
 
 import logging
+import asyncio
 import os
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Sequence
 
-import aiohttp
+import httpx
 
 from ..config import EmbeddingConfig, EmbeddingProvider
 
@@ -54,20 +55,30 @@ _last_skip_logged: dict[tuple[str, str], float] = {}
 _UNHEALTHY_TTL = 600.0       # 10 min default; configurable in EmbeddingConfig
 _SKIP_LOG_THROTTLE = 60.0    # 1 min between skip-log lines per provider
 
-# Shared TCP connector — keeps connections alive across embed calls so we don't
-# pay TLS handshake overhead (50-300ms on ARM) on every request.
-_shared_connector: aiohttp.TCPConnector | None = None
+# One pooled client per event loop — keeps connections alive across embed
+# calls so we don't pay a TLS handshake (50-300 ms on ARM) on every request.
+# httpx, not aiohttp: nanobot already loads httpx, while aiohttp cost this
+# plugin +10 MB RSS and ~56 ms of import (about 1.5 s on a Pi 3B+) for the
+# same job. Per loop because a client's connections belong to the loop that
+# opened them.
+_shared_client: tuple[asyncio.AbstractEventLoop, httpx.AsyncClient] | None = None
 
 
-def _get_connector() -> aiohttp.TCPConnector:
-    global _shared_connector
-    if _shared_connector is None or _shared_connector.closed:
-        _shared_connector = aiohttp.TCPConnector(
-            limit=4,
-            ttl_dns_cache=300,
-            enable_cleanup_closed=True,
+def _get_client() -> httpx.AsyncClient:
+    global _shared_client
+    loop = asyncio.get_running_loop()
+    if (
+        _shared_client is None
+        or _shared_client[0] is not loop
+        or _shared_client[1].is_closed
+    ):
+        _shared_client = (
+            loop,
+            httpx.AsyncClient(
+                limits=httpx.Limits(max_connections=4, max_keepalive_connections=4),
+            ),
         )
-    return _shared_connector
+    return _shared_client[1]
 
 
 class AllProvidersFailed(RuntimeError):
@@ -77,20 +88,15 @@ class AllProvidersFailed(RuntimeError):
 @dataclass
 class EmbeddingChain:
     config: EmbeddingConfig
-    _session: aiohttp.ClientSession | None = field(default=None, init=False, repr=False)
+    _session: httpx.AsyncClient | None = field(default=None, init=False, repr=False)
 
     async def __aenter__(self) -> "EmbeddingChain":
-        self._session = aiohttp.ClientSession(
-            connector=_get_connector(),
-            connector_owner=False,  # don't close the shared connector on exit
-            timeout=aiohttp.ClientTimeout(total=self.config.timeout_seconds),
-        )
+        self._session = _get_client()
         return self
 
     async def __aexit__(self, *_exc) -> None:
-        if self._session is not None:
-            await self._session.close()
-            self._session = None
+        # The client is shared; leaving the block only releases this handle.
+        self._session = None
 
     async def embed(self, texts: Sequence[str]) -> list[np.ndarray]:
         """Embed a batch. First working provider wins; fail over on errors."""
@@ -113,16 +119,17 @@ class EmbeddingChain:
                 # Successful call — clear any stale unhealthy entry.
                 _unhealthy_until.pop(key, None)
                 return [self._postprocess(v) for v in raws]
-            except aiohttp.ClientResponseError as e:
-                if e.status in (402, 429) or e.status >= 500:
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                if status in (402, 429) or status >= 500:
                     _unhealthy_until[key] = now + ttl
                     log.warning(
                         "embedding provider %s returned HTTP %d — marked unhealthy for %.0fs",
-                        p.provider, e.status, ttl,
+                        p.provider, status, ttl,
                     )
                 else:
                     log.warning("embedding provider %s failed: %s", p.provider, e)
-                errors.append(f"{p.provider}: HTTP {e.status}")
+                errors.append(f"{p.provider}: HTTP {status}")
             except Exception as e:
                 errors.append(f"{p.provider}: {e}")
                 log.warning("embedding provider %s failed: %s", p.provider, e)
@@ -141,10 +148,11 @@ class EmbeddingChain:
             "Content-Type": "application/json",
         }
         payload = {"model": self.config.model, "input": texts}
-        async with self._session.post(url, headers=headers, json=payload) as r:
-            r.raise_for_status()
-            data = await r.json()
-        return _embeddings_in_index_order(data)
+        r = await self._session.post(
+            url, headers=headers, json=payload, timeout=self.config.timeout_seconds
+        )
+        r.raise_for_status()
+        return _embeddings_in_index_order(r.json())
 
     def _postprocess(self, raw: list[float]) -> np.ndarray:
         import numpy as np  # noqa: PLC0415

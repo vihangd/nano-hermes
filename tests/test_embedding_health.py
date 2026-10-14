@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from unittest.mock import patch
 
-import aiohttp
+import httpx
 import pytest
 
 from nano_hermes.embedding.chain import (
@@ -28,14 +28,15 @@ def _make_config(ttl: float = 600.0) -> EmbeddingConfig:
     )
 
 
-def _make_402_error() -> aiohttp.ClientResponseError:
-    req_info = aiohttp.RequestInfo(
-        url=aiohttp.typedefs.URL("http://x"),
-        method="POST",
-        headers=None,
-        real_url=aiohttp.typedefs.URL("http://x"),
+def _http_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://x")
+    return httpx.HTTPStatusError(
+        f"HTTP {status}", request=request, response=httpx.Response(status, request=request)
     )
-    return aiohttp.ClientResponseError(req_info, history=(), status=402)
+
+
+def _make_402_error() -> httpx.HTTPStatusError:
+    return _http_error(402)
 
 
 @pytest.fixture(autouse=True)
@@ -131,13 +132,7 @@ class TestUnhealthyProviderCache:
         monkeypatch.setenv("DEEPINFRA_API_KEY", "x")
         monkeypatch.setenv("TOGETHER_API_KEY", "y")
 
-        req_info = aiohttp.RequestInfo(
-            url=aiohttp.typedefs.URL("http://x"),
-            method="POST",
-            headers=None,
-            real_url=aiohttp.typedefs.URL("http://x"),
-        )
-        err_429 = aiohttp.ClientResponseError(req_info, history=(), status=429)
+        err_429 = _http_error(429)
 
         async def fail_429(p, texts):
             if p.provider == "deepinfra":
@@ -158,13 +153,7 @@ class TestUnhealthyProviderCache:
         monkeypatch.setenv("DEEPINFRA_API_KEY", "x")
         monkeypatch.setenv("TOGETHER_API_KEY", "y")
 
-        req_info = aiohttp.RequestInfo(
-            url=aiohttp.typedefs.URL("http://x"),
-            method="POST",
-            headers=None,
-            real_url=aiohttp.typedefs.URL("http://x"),
-        )
-        err_400 = aiohttp.ClientResponseError(req_info, history=(), status=400)
+        err_400 = _http_error(400)
 
         async def fail_400(p, texts):
             if p.provider == "deepinfra":

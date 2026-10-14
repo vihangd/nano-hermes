@@ -186,7 +186,7 @@ async def _fake_embed(self, texts):  # signature: (self, texts)
 def _patch_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replace EmbeddingChain.embed with the deterministic fake above.
 
-    aiohttp.ClientSession is still created inside ``async with`` but
+    The shared httpx client is still handed out inside ``async with`` but
     never used, since ``embed`` is intercepted before ``_call`` runs.
     """
     monkeypatch.setattr(

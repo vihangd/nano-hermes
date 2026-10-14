@@ -1,7 +1,7 @@
 """Unit tests for nano_hermes.embedding.chain.EmbeddingChain.
 
 These tests mock the per-provider HTTP call (`EmbeddingChain._call`) rather
-than aiohttp internals — the failover *logic* is the load-bearing thing,
+than httpx internals — the failover *logic* is the load-bearing thing,
 not the HTTP plumbing (which production exercises constantly).
 """
 from __future__ import annotations
@@ -169,11 +169,65 @@ class TestCallEnvVar:
 
 class TestSessionLifecycle:
     @pytest.mark.asyncio
-    async def test_aenter_creates_session_aexit_closes_it(self):
-        chain = EmbeddingChain(config=_config("deepinfra"))
-        assert chain._session is None
-        async with chain:
-            assert chain._session is not None
-            assert not chain._session.closed
-        # After __aexit__: _session reset to None.
-        assert chain._session is None
+    async def test_chains_share_one_pooled_client(self):
+        """Connections are reused across embed calls (a TLS handshake costs
+        50-300 ms on ARM), so every chain on a loop gets the same open client
+        and leaving the block must not close it."""
+        first = EmbeddingChain(config=_config("deepinfra"))
+        assert first._session is None
+        async with first:
+            client = first._session
+            assert client is not None and not client.is_closed
+        assert first._session is None
+        assert not client.is_closed
+        async with EmbeddingChain(config=_config("deepinfra")) as second:
+            assert second._session is client
+
+
+class TestTheHttpPath:
+    """``_call`` against a mock transport: the request nanobot-compatible
+    providers expect, rows bound by ``index``, and failover on a 429."""
+
+    @pytest.mark.asyncio
+    async def test_request_shape_order_and_failover(self, monkeypatch):
+        import asyncio
+        import json
+
+        import httpx
+
+        import nano_hermes.embedding.chain as chain_mod
+
+        seen: list[tuple[str, dict, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            seen.append((str(request.url), body, request.headers["authorization"]))
+            if "deepinfra" in str(request.url):
+                return httpx.Response(429, request=request)
+            # Out of order on purpose: binding must follow "index".
+            return httpx.Response(
+                200,
+                json={"data": [
+                    {"index": 1, "embedding": [0.0, 1.0] + [0.0] * 6},
+                    {"index": 0, "embedding": [1.0, 0.0] + [0.0] * 6},
+                ]},
+                request=request,
+            )
+
+        monkeypatch.setenv("FAKE_DEEPINFRA_KEY", "k1")
+        monkeypatch.setenv("FAKE_TOGETHER_KEY", "k2")
+        monkeypatch.setattr(chain_mod, "_unhealthy_until", {})
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        monkeypatch.setattr(
+            chain_mod, "_shared_client", (asyncio.get_running_loop(), client)
+        )
+        async with EmbeddingChain(config=_config("deepinfra", "together")) as chain:
+            first, second = await chain.embed(["a", "b"])
+        assert first[0] == 1.0 and second[1] == 1.0
+        assert [url.split("/")[2] for url, _, _ in seen] == [
+            "api.deepinfra.com", "api.together.xyz"
+        ]
+        assert seen[1][1] == {"model": "fake-model", "input": ["a", "b"]}
+        assert seen[1][2] == "Bearer k2"
+        assert ("deepinfra", "fake-model") in chain_mod._unhealthy_until
+        await client.aclose()
