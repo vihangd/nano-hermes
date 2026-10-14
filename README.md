@@ -186,6 +186,13 @@ nano_hermes.install(loop, config={
     },
     "reflection_scope": "global",   # "session" (default) or "global"
 
+    # Model for background learning (lesson/insight extraction, consolidation,
+    # curation, skill rewriting) — never the foreground turn. None (default)
+    # uses the agent's own model. On a Pi, run a small fast model for turns and
+    # point this at a stronger one on the same provider: the small model then
+    # reads memories a better model wrote.
+    "background_model": None,
+
     # ── Skill lifecycle & ranking ────────────────────────────────────────
     "skill_stats": {
         # Ranking mode for skill_search re-ranking.
@@ -288,7 +295,7 @@ Fourteen tools land on `loop.tools`:
 
 | Tool | What it does |
 |---|---|
-| `memory_patch(action, slot?, ...)` | Edit `MEMORY.md` / `USER.md` / `SOUL.md`. `slot ∈ {memory, user, soul}`. `action ∈ {add, replace, remove, consolidate, distill, audit}`. `consolidate`: embed entries, merge near-duplicates (cosine ≥ threshold), keeps longest entry per cluster. `distill`: surface recurring themes across successful sessions as candidate facts. `audit`: hygiene sweep over stored facts — retire ones an updated fact made stale (`slot` ignored). |
+| `memory_patch(action, slot, ...)` | Edit `MEMORY.md` / `USER.md` / `SOUL.md`. `slot ∈ {memory, user, soul}` — required for `add` / `replace` / `remove` (no default, so a user fact can't land in the agent's notes by omission). `action ∈ {add, replace, remove, consolidate, distill, audit}`. `consolidate`: embed entries, merge near-duplicates (cosine ≥ threshold), keeps longest entry per cluster. `distill`: surface recurring themes across successful sessions as candidate facts. `audit`: hygiene sweep over stored facts — retire ones an updated fact made stale (`slot` ignored). |
 | `session_search(query, k=8)` | Hybrid FTS5 + embedding search over archived turn chunks. RRF fusion + MMR diversity reranking. Degrades to FTS-only if every embedding provider is unreachable. |
 | `session_browse(...)` | Structured/paginated browse over archived sessions and turns — companion to `session_search` for walking history rather than searching it. |
 | `trajectory_search(query, k=3)` | Semantic search over past session summaries (task, outcome, skills used, reflection). Higher-signal than session_search — distilled lessons, not raw transcripts. |
