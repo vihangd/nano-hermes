@@ -238,3 +238,42 @@ class TestRunSkillDesignerProposal:
             result = asyncio.run(run_skill_designer(hook))
 
         assert "new_coverage_skill" in result
+
+
+class TestRunSkillDesignerGovernance:
+    def test_approval_gate_stages_instead_of_writing(self, tmp_path):
+        """With skills write_approval=approve, an autonomously designed skill
+        is staged for review and nothing reaches the skills tree."""
+        hook = _hook(
+            tmp_path,
+            {"skill_designer_min_cluster_size": 2, "write_approval": "approve"},
+        )
+        e = _vec(0)
+        _seed_trajectory(hook, task="task A", outcome="fail", embedding=e)
+        _seed_trajectory(hook, task="task B", outcome="fail", embedding=e)
+        with patch.object(
+            hook._loop.provider, "chat_with_retry",
+            AsyncMock(return_value=_make_resp(VALID_SKILL_MD)),
+        ):
+            result = asyncio.run(run_skill_designer(hook))
+        assert result == ["new_coverage_skill"]
+        assert not (hook.workspace / "skills" / "new_coverage_skill").exists()
+        staged = hook.db.execute(
+            "SELECT subsystem, skill_name FROM pending_writes"
+        ).fetchall()
+        assert staged == [("skills", "new_coverage_skill")]
+
+    def test_a_failing_llm_call_proposes_nothing(self, tmp_path):
+        hook = _hook(tmp_path, {"skill_designer_min_cluster_size": 2})
+        e = _vec(0)
+        _seed_trajectory(hook, task="task A", outcome="fail", embedding=e)
+        _seed_trajectory(hook, task="task B", outcome="fail", embedding=e)
+        with patch.object(
+            hook._loop.provider, "chat_with_retry",
+            AsyncMock(side_effect=RuntimeError("provider down")),
+        ):
+            result = asyncio.run(run_skill_designer(hook))
+        assert result == []
+        assert not (hook.workspace / "skills").exists() or not any(
+            (hook.workspace / "skills").iterdir()
+        )

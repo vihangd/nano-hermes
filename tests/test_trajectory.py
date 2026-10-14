@@ -438,3 +438,42 @@ class TestTrajectoryContextInjection:
         await hook.before_iteration(AgentHookContext(iteration=1, messages=msgs))
         injected = [m for m in msgs[before_len:] if "past case" in str(m.get("content", ""))]
         assert injected == []
+
+
+class TestTrajectoryEmbedding:
+    async def test_a_written_trajectory_gets_its_vector(self, tmp_path):
+        """trajectory_search's dense channel reads trajectories_vec; the path
+        that fills it on success had no test (only the failure fallbacks)."""
+        import numpy as np
+
+        from nano_hermes.session.db import open_db
+        from nano_hermes.session.trajectory import TrajectoryWriter
+
+        db = open_db(tmp_path, target_dims=4)
+        db.execute("INSERT INTO sessions (session_key, started_at) VALUES ('s', 0)")
+        db.commit()
+        embedded: list[str] = []
+
+        class _Chain:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def embed(self, texts):
+                embedded.extend(texts)
+                return [np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)]
+
+        writer = TrajectoryWriter(db, embedder_factory=_Chain)
+        tid = writer.write(
+            session_id=1,
+            messages=[{"role": "user", "content": "deploy the app"}],
+            skills_used=[],
+            reflections=[],
+            had_errors=False,
+        )
+        await writer.drain()
+        assert embedded == ["deploy the app"]
+        rows = db.execute("SELECT trajectory_id FROM trajectories_vec").fetchall()
+        assert rows == [(tid,)]
