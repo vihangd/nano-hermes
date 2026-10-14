@@ -187,8 +187,8 @@ nano_hermes.install(loop, config={
     "reflection_scope": "global",   # "session" (default) or "global"
 
     # Model for background learning (lesson/insight extraction, consolidation,
-    # curation, skill rewriting) — never the foreground turn. None (default)
-    # uses the agent's own model. On a Pi, run a small fast model for turns and
+    # curation, skill rewriting), plus memory_patch distill/audit, which run
+    # inside the turn when the agent calls them. None (default) uses the agent's own model. On a Pi, run a small fast model for turns and
     # point this at a stronger one on the same provider: the small model then
     # reads memories a better model wrote.
     "background_model": None,

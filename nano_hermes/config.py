@@ -418,8 +418,9 @@ class NanoHermesConfig(BaseModel):
     sqlite_busy_timeout_ms: int = 10000
     reflection_scope: Literal["session", "global"] = "session"
     # Model for background learning work (lesson/insight extraction,
-    # consolidation, curation, skill rewriting) — never the foreground turn.
-    # None uses the loop's own model. Set it to a stronger model on the same
+    # consolidation, curation, skill rewriting), plus memory_patch's
+    # distill/audit/supersession checks, which run inside the agent's turn when
+    # it calls them — a slow model here slows those tool calls. None uses the loop's own model. Set it to a stronger model on the same
     # provider to let a small, fast foreground model on a Pi read memories a
     # better model wrote (context-space distillation, DuoMem arXiv:2606.29961);
     # set it to a cheaper one to save cost.

@@ -24,8 +24,9 @@ import argparse
 import asyncio
 import inspect
 import logging
-import resource
+import os
 import statistics
+import subprocess
 import sys
 import tempfile
 import time
@@ -33,8 +34,16 @@ from pathlib import Path
 
 
 def _rss_mb() -> float:
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
+    """Current RSS (not ru_maxrss, which is the peak and hides an import's cost
+    when an earlier one peaked higher)."""
+    try:
+        pages = int(Path("/proc/self/statm").read_text().split()[1])
+        return pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
+    except OSError:  # macOS: no /proc
+        out = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(os.getpid())], capture_output=True, text=True
+        ).stdout
+        return int(out) / 1024
 
 
 def main() -> None:

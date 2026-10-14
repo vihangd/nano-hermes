@@ -181,7 +181,8 @@ class NanoHermesHook(AgentHook):
     @property
     def background_model(self) -> str | None:
         """Model for background learning calls: ``config.background_model`` if
-        set, else the loop's own model. Never used on the foreground turn."""
+        set, else the loop's own model. Also drives memory_patch distill/audit,
+        which the agent runs inside its turn."""
         return self.config.background_model or getattr(self._loop, "model", None)
 
     def embedder(self) -> EmbeddingChain:

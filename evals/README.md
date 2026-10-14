@@ -123,7 +123,7 @@ iteration and `on_finally`, inside the turn's request context.
 
 Desktop reference (M-series, 2026-10-14, median of 5 runs): hook 0.64 / 3.2 /
 0.91 ms for the three shapes above; import 40–55 ms depending on machine load,
-+9.4 MB RSS on top of nanobot. Audits have extrapolated to a Pi 3B+ at x26; a
++11.5 MB RSS (current, not peak) on top of nanobot. Audits have extrapolated to a Pi 3B+ at x26; a
 run on the board replaces that guess. Settings that embed on iteration 0
 (cheatsheet, trajectory injection, global reflections) add one embedding round
 trip per turn on top.
