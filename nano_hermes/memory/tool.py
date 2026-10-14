@@ -27,7 +27,11 @@ _SCHEMA: dict[str, Any] = {
         "slot": {
             "type": "string",
             "enum": ["memory", "user", "soul"],
-            "description": "Which memory file to patch.",
+            "description": (
+                "Which memory file to patch: memory (your notes), user (facts "
+                "about the user), soul (your persona). Required for "
+                "add/replace/remove."
+            ),
         },
         "action": {
             "type": "string",
@@ -89,8 +93,19 @@ class MemoryPatchTool(Tool):
     async def execute(self, **kwargs: Any) -> str:
         if not request_persists():
             return NOT_PERSISTED
-        slot: str = kwargs.get("slot", "memory")
         action: str = kwargs["action"]
+        slot = kwargs.get("slot")
+        if slot is None:
+            if action in ("add", "replace", "remove"):
+                # No default for writes: a user preference added without a slot
+                # silently landed in the agent's own notes (MEMORY.md) instead of
+                # USER.md. Hermes requires an explicit target for the same
+                # reason (cb62ae45f6).
+                return (
+                    f"Error: action={action} requires `slot` — memory (your notes), "
+                    "user (facts about the user) or soul (your persona)"
+                )
+            slot = "memory"
         content = kwargs.get("content")
         needle = kwargs.get("needle")
         replacement = kwargs.get("replacement")

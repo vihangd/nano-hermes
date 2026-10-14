@@ -77,3 +77,15 @@ def test_a_self_overlapping_needle_is_ambiguous() -> None:
 
     with pytest.raises(ValueError, match="more than one place"):
         _locate("memory", "codes: ababab", "abab")
+
+
+async def test_a_write_without_a_slot_is_refused(loop: AgentLoop) -> None:
+    """A defaulted slot filed user facts into the agent's own notes."""
+    nano_hermes.install(loop)
+    before = loop.context.memory.read_memory()
+    out = await loop.tools.get("memory_patch").execute(
+        action="add", content="user prefers tea"
+    )
+    assert out.startswith("Error") and "requires `slot`" in out
+    assert loop.context.memory.read_memory() == before
+    assert "tea" not in loop.context.memory.read_user()
