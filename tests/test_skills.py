@@ -206,33 +206,36 @@ class TestSkillSearch:
         recorded: list[list[str]] = []
         monkeypatch.setattr(hook, "record_skill_candidates", recorded.append)
 
-        out = await loop.tools.get("skill_search").execute(query="academic papers on arxiv")
+        out = await loop.tools.get("skill_search").execute(query="find the academic papers on arxiv")
         lines = out.splitlines()
         assert "lexical fallback" in lines[0]
         assert "arxiv-search" in lines[1], out
         assert "paper-dead" not in out  # deprecated stays hidden
         assert recorded and recorded[0][0] == "arxiv-search"
 
-    async def test_lexical_fallback_when_refresh_fails(
+    async def test_failed_refresh_keeps_the_vector_index(
         self,
         loop: AgentLoop,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A failed re-embed of stale skills must not sink the search."""
+        """A failed re-embed of stale skills must not throw away the index the
+        query can still be ranked against."""
         from nano_hermes.embedding.chain import AllProvidersFailed
         from nano_hermes.skills.indexer import SkillIndexer
 
         _copy_bundled_skill("duckduckgo-search", tmp_path)
         _patch_embedding(monkeypatch)
+        nano_hermes.install(loop)
+        tool = loop.tools.get("skill_search")
+        await tool.execute(query="duckduckgo search")  # index it once
 
         async def boom(*a, **k):
             raise AllProvidersFailed("down")
 
         monkeypatch.setattr(SkillIndexer, "_refresh_with_chain", boom)
-        nano_hermes.install(loop)
-        out = await loop.tools.get("skill_search").execute(query="duckduckgo search")
-        assert "lexical fallback" in out and "duckduckgo-search" in out, out
+        out = await tool.execute(query="duckduckgo search")
+        assert "lexical fallback" not in out and "duckduckgo-search" in out, out
 
     async def test_unchanged_skill_is_not_reindexed(
         self,

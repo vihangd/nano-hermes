@@ -120,7 +120,12 @@ class SkillIndexer:
 
         try:
             async with self._embedder_factory() as chain:
-                await self._refresh_with_chain(entries, description_by_name, chain)
+                try:
+                    await self._refresh_with_chain(entries, description_by_name, chain)
+                except AllProvidersFailed as e:
+                    # Stale skills keep their old vectors; the index is still
+                    # good enough to rank against if the query embeds.
+                    log.warning("skill_search: refresh failed, using existing index: %s", e)
                 [query_vec] = await chain.embed([query])
         except AllProvidersFailed:
             hits = self._lexical_query(query, k, description_by_name, location_by_name)
@@ -311,44 +316,39 @@ class SkillIndexer:
         description_by_name: dict[str, str],
         location_by_name: dict[str, str],
     ) -> list[SkillHit]:
-        # ponytail: in-memory BM25 rebuilt per call, binary tf (descriptions are
-        # one-liners); move to an FTS5 table if skill counts reach thousands.
+        # ponytail: throwaway in-memory FTS5 table per call (tens to hundreds
+        # of one-line descriptions); persist it if skill counts reach thousands.
+        from ..session.search import _fts_rows  # noqa: PLC0415
+
         deprecated = {
             r[0] for r in self._db.execute(
                 "SELECT name FROM skill_stats WHERE status = 'deprecated'"
             )
         }
-        docs = {
-            name: _name_tokens(f"{name} {desc}")
-            for name, desc in description_by_name.items()
-            if name not in deprecated
-        }
-        q = _name_tokens(query)
-        if not docs or not q:
-            return []
-        n = len(docs)
-        avgdl = sum(len(d) for d in docs.values()) / n
-        df = {t: sum(t in d for d in docs.values()) for t in q}
-        k1, b = 1.2, 0.75
-        scores: dict[str, float] = {}
-        for name, d in docs.items():
-            norm = (k1 + 1) / (1 + k1 * (1 - b + b * len(d) / avgdl))
-            score = sum(
-                math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5)) * norm
-                for t in q & d
+        mem = sqlite3.connect(":memory:")
+        try:
+            mem.execute("CREATE VIRTUAL TABLE skills USING fts5(name, description)")
+            mem.executemany(
+                "INSERT INTO skills VALUES (?, ?)",
+                [(n, d) for n, d in description_by_name.items() if n not in deprecated],
             )
-            if score > 0:
-                scores[name] = score
-        ranked = sorted(scores, key=lambda nm: -scores[nm])[:k]
+            rows = _fts_rows(
+                mem,
+                "SELECT name, bm25(skills) FROM skills WHERE skills MATCH ? "
+                "ORDER BY rank LIMIT ?",
+                query, k,
+            )
+        finally:
+            mem.close()
         return [
             SkillHit(
-                name=nm,
-                description=description_by_name[nm],
-                location=location_by_name.get(nm, ""),
-                distance=1.0 / (1.0 + scores[nm]),
+                name=name,
+                description=description_by_name[name],
+                location=location_by_name.get(name, ""),
+                distance=1.0 / (1.0 - score),  # bm25() is <= 0, lower is better
                 lexical=True,
             )
-            for nm in ranked
+            for name, score in rows
         ]
 
     def _vec_query(

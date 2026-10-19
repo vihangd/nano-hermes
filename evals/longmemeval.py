@@ -98,8 +98,8 @@ async def score_question(item: dict, embedder: str, dims: int) -> dict[str, dict
             embed_texts.append(add_context_preamble(t["content"], task))
 
     tmp = Path(tempfile.mkdtemp())
+    db = open_db(str(tmp / "lme.db"), dims)
     try:
-        db = open_db(str(tmp / "lme.db"), dims)
         ids = seed_db(db, _Haystack(chunks))
         vecs = await _embed_batched(embed_texts, embedder, dims)
         for c, v in zip(chunks, vecs):
@@ -121,9 +121,9 @@ async def score_question(item: dict, embedder: str, dims: int) -> dict[str, dict
                 ext_by_chunk[c] for c in _retrieve(arm, db, item["question"], qvec, cfg, POOL)
             ))
             out[arm] = session_scores(ranked, gold)
-        db.close()
         return out
     finally:
+        db.close()
         shutil.rmtree(tmp, ignore_errors=True)
 
 
