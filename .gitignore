@@ -66,3 +66,6 @@ RESEARCH_AI_AGENT_SECURITY.md
 
 # Plans (local only, never commit)
 docs/plans/
+
+# LongMemEval and other downloaded eval data
+evals/data/

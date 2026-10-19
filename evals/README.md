@@ -127,3 +127,33 @@ Desktop reference (M-series, 2026-10-14, median of 5 runs): hook 0.64 / 3.2 /
 run on the board replaces that guess. Settings that embed on iteration 0
 (cheatsheet, trajectory injection, global reflections) add one embedding round
 trip per turn on top.
+
+## LongMemEval_S session retrieval (`evals/longmemeval.py`)
+
+A public-set number for the retrieval half. Each LongMemEval question
+(arXiv:2410.10813, MIT) comes with ~50 haystack sessions and the ids of the
+sessions holding the evidence, so session-level retrieval is scored with no LLM
+and no judge: one chunk per message, embedded with the archiver's task preamble,
+each arm's top 50 chunks collapsed to sessions in rank order. The 30 abstention
+questions are skipped, as in the paper.
+
+```bash
+mkdir -p evals/data && wget -P evals/data \
+  https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
+uv run python -m evals.longmemeval --data evals/data/longmemeval_s_cleaned.json --embedder fake --limit 0
+uv run python -m evals.longmemeval --data evals/data/longmemeval_s_cleaned.json --embedder real --limit 50
+```
+
+`any@k` = at least one evidence session in the top k; `all@k` = every one.
+`--embedder real` embeds ~115k tokens per question (~6M for 50, ~55M for all).
+
+`fts_only` on all 470 questions (2026-10-19; lexical, so the fake embedder
+doesn't affect it): any@5 0.953, all@5 0.838, any@10 0.975, all@10 0.902,
+nDCG@10 0.897. Weakest type: single-session-preference, any@5 0.733 —
+preferences are phrased unlike the question, which is the dense channel's job.
+Dense and fused arms still need a `--embedder real` run.
+
+This is retrieval, not the QA accuracy memory leaderboards publish. The paper
+reports retrieval only on LongMemEval_M (Table 9: BM25 R@5 0.634, Stella-1.5B
+0.720), whose ~500-session haystacks are far harder than S's ~50, so the S
+figures above are not comparable to it.
