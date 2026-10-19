@@ -26,6 +26,30 @@ def _set_trust(hook, fact_id, value):
     hook.db.commit()
 
 
+def _unit(i):
+    import numpy as np
+
+    v = np.zeros(512, dtype=np.float32)
+    v[i] = 1.0
+    return v
+
+
+class _UnitChain:
+    """Embeds every query as unit vector 0."""
+    async def __aenter__(self): return self
+    async def __aexit__(self, *a): return False
+    async def embed(self, texts): return [_unit(0)]
+
+
+def _same_vec(hook, *fact_ids, at=0):
+    for fid in fact_ids:
+        hook.db.execute(
+            "INSERT INTO semantic_facts_vec (fact_id, embedding) VALUES (?, ?)",
+            (fid, _unit(at).tobytes()),
+        )
+    hook.db.commit()
+
+
 class TestDefaultTrust:
     def test_new_lesson_is_neutral(self, tmp_path):
         hook = _hook(tmp_path)
@@ -95,8 +119,9 @@ class TestTrustFiltersRetrieval:
         hook = _hook(tmp_path)
         good = _store_lesson(hook.db, "Trusted lesson stays.", "task")
         bad = _store_lesson(hook.db, "Distrusted lesson hidden.", "task")
+        _same_vec(hook, good, bad)
         _set_trust(hook, bad, 0.1)  # below default floor 0.3
-        with patch.object(hook, "embedder", side_effect=Exception("no provider")):
+        with patch.object(hook, "embedder", _UnitChain):
             lessons = await retrieve_lessons(hook, "task", top_k=5)
         ids = [fid for fid, _, _ in lessons]
         assert good in ids
@@ -156,13 +181,14 @@ class TestTrustFiltersRetrieval:
         ).fetchone()[0]
         assert gone == 0
 
-    async def test_higher_trust_ranks_first_fallback(self, tmp_path):
+    async def test_higher_trust_ranks_first_at_equal_distance(self, tmp_path):
         hook = _hook(tmp_path)
         lo = _store_lesson(hook.db, "Lower trust lesson.", "task")
         hi = _store_lesson(hook.db, "Higher trust lesson.", "task")
+        _same_vec(hook, lo, hi, at=1)  # distance 1 from the query: trust decides
         _set_trust(hook, lo, 0.5)
         _set_trust(hook, hi, 1.8)
-        with patch.object(hook, "embedder", side_effect=Exception("no provider")):
+        with patch.object(hook, "embedder", _UnitChain):
             lessons = await retrieve_lessons(hook, "task", top_k=5)
         ids = [fid for fid, _, _ in lessons]
-        assert ids[0] == hi  # trust_score DESC in fallback
+        assert ids[0] == hi

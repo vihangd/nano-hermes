@@ -193,3 +193,22 @@ def _patch_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
         "nano_hermes.embedding.chain.EmbeddingChain.embed",
         _fake_embed,
     )
+
+
+async def _fake_embed_distinct(self, texts):
+    """One unit vector per distinct text (crc32-indexed): equal texts embed
+    identically, different texts are orthogonal barring a 1-in-512 clash."""
+    import zlib
+
+    out = []
+    for t in texts:
+        v = np.zeros(_FAKE_DIMS, dtype=np.float32)
+        v[zlib.crc32(t.encode()) % _FAKE_DIMS] = 1.0
+        out.append(v)
+    return out
+
+
+def _patch_embedding_distinct(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "nano_hermes.embedding.chain.EmbeddingChain.embed", _fake_embed_distinct
+    )

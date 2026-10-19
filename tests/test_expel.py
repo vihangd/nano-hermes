@@ -6,7 +6,7 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nano_hermes
-from conftest import _make_loop
+from conftest import _make_loop, _patch_embedding_distinct
 from nano_hermes.memory.expel import (
     _outcome_class,
     _opposite_outcomes,
@@ -154,6 +154,11 @@ class TestStoreInsight:
         assert id2 > id1
 
 
+def _marked(insight, evidence="A checked the token; B did not"):
+    out = f"INSIGHT: {insight}\nWHEN: calling an authenticated API"
+    return out + (f"\nEVIDENCE: {evidence}" if evidence else "")
+
+
 class TestExtractContrastiveInsight:
     def _make_resp(self, content="Always verify inputs first."):
         resp = MagicMock()
@@ -212,12 +217,13 @@ class TestExtractContrastiveInsight:
             )
         assert result is None
 
-    def test_valid_insight_stored(self, tmp_path):
+    def test_valid_insight_stored(self, tmp_path, monkeypatch):
+        _patch_embedding_distinct(monkeypatch)
         hook = _hook(tmp_path)
         insight_text = "Always verify API tokens before making calls to prevent auth errors."
         mock_provider = AsyncMock()
         mock_provider.chat_with_retry = AsyncMock(
-            return_value=self._make_resp(insight_text)
+            return_value=self._make_resp(_marked(insight_text))
         )
         hook._loop.provider = mock_provider
 
@@ -239,6 +245,24 @@ class TestExtractContrastiveInsight:
         assert row is not None
         assert row[0] == insight_text
         assert row[1] == "expel"
+
+    def test_insight_without_evidence_not_stored(self, tmp_path, monkeypatch):
+        _patch_embedding_distinct(monkeypatch)
+        hook = _hook(tmp_path)
+        hook._loop.provider = AsyncMock()
+        hook._loop.provider.chat_with_retry = AsyncMock(
+            return_value=self._make_resp(_marked("Verify API tokens before calling.", evidence=""))
+        )
+        with patch(
+            "nano_hermes.memory.expel.find_contrasting_session", return_value=(99, "fail"),
+        ), patch("nano_hermes.memory.expel._chunk_text", return_value="call the api"):
+            result = asyncio.run(
+                extract_contrastive_insight(hook, session_id=1, outcome="success", messages=[])
+            )
+        assert result is None
+        assert hook.db.execute(
+            "SELECT COUNT(*) FROM semantic_facts WHERE fact_type = 'expel'"
+        ).fetchone()[0] == 0
 
     def test_llm_error_returns_none(self, tmp_path):
         hook = _hook(tmp_path)
@@ -262,11 +286,12 @@ class TestExtractContrastiveInsight:
             )
         assert result is None
 
-    def test_success_to_fail_contrast(self, tmp_path):
+    def test_success_to_fail_contrast(self, tmp_path, monkeypatch):
+        _patch_embedding_distinct(monkeypatch)
         hook = _hook(tmp_path)
         mock_provider = AsyncMock()
         insight = "Confirm the environment variable is set before running the task."
-        mock_provider.chat_with_retry = AsyncMock(return_value=self._make_resp(insight))
+        mock_provider.chat_with_retry = AsyncMock(return_value=self._make_resp(_marked(insight)))
         hook._loop.provider = mock_provider
 
         with patch(
@@ -278,11 +303,12 @@ class TestExtractContrastiveInsight:
             )
         assert result == insight
 
-    def test_fail_to_success_contrast(self, tmp_path):
+    def test_fail_to_success_contrast(self, tmp_path, monkeypatch):
+        _patch_embedding_distinct(monkeypatch)
         hook = _hook(tmp_path)
         mock_provider = AsyncMock()
         insight = "The key difference was using the correct retry backoff strategy."
-        mock_provider.chat_with_retry = AsyncMock(return_value=self._make_resp(insight))
+        mock_provider.chat_with_retry = AsyncMock(return_value=self._make_resp(_marked(insight)))
         hook._loop.provider = mock_provider
 
         with patch(

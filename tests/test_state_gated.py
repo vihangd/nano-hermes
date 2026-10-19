@@ -55,10 +55,11 @@ class TestConditionStored:
         resp = MagicMock(finish_reason="stop")
         resp.content = (
             "LESSON: Roll back fast when health checks fail.\n"
-            "WHEN: deploying a service behind a load balancer"
+            "WHEN: deploying a service behind a load balancer\n"
+            "EVIDENCE: the health check failed after the deploy"
         )
         with patch.object(hook._loop.provider, "chat_with_retry", AsyncMock(return_value=resp)):
-            with patch("nano_hermes.memory.cheatsheet._embed_lesson", AsyncMock()):
+            with patch("nano_hermes.memory.cheatsheet._embed_bytes", AsyncMock(return_value=b"\0" * 2048)):
                 await extract_cheatsheet_lesson(hook, _msgs(), "fail")
         row = hook.db.execute(
             "SELECT context, task_category, content FROM semantic_facts "
@@ -71,9 +72,12 @@ class TestConditionStored:
     async def test_missing_when_falls_back_to_category(self, tmp_path):
         hook = _hook(tmp_path)
         resp = MagicMock(finish_reason="stop")
-        resp.content = "Always take a backup before a destructive migration step."
+        resp.content = (
+            "Always take a backup before a destructive migration step.\n"
+            "EVIDENCE: the migration dropped a column"
+        )
         with patch.object(hook._loop.provider, "chat_with_retry", AsyncMock(return_value=resp)):
-            with patch("nano_hermes.memory.cheatsheet._embed_lesson", AsyncMock()):
+            with patch("nano_hermes.memory.cheatsheet._embed_bytes", AsyncMock(return_value=b"\0" * 2048)):
                 await extract_cheatsheet_lesson(hook, _msgs(), "success")
         row = hook.db.execute(
             "SELECT context, task_category FROM semantic_facts WHERE fact_type='cheatsheet'"

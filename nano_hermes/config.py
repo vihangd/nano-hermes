@@ -407,6 +407,10 @@ class NanoHermesConfig(BaseModel):
     # ExpeL contrastive insight extraction (arXiv:2308.10144).
     expel_enabled: bool = False
     expel_similarity_threshold: float = 0.75  # min cosine sim to consider same task type
+    # Cheatsheet/ExpeL lessons whose WHEN condition is at least this cosine-
+    # similar to a live lesson's are not stored (selective addition,
+    # arXiv:2505.16067).
+    lesson_dedup_similarity: float = 0.92
     # Minimum days between full VACUUMs. Once data ages past the retention
     # window, every startup purges a fresh day of rows; without this gate
     # each purge would trigger a whole-DB VACUUM (exclusive lock, slow on a

@@ -1,12 +1,11 @@
 """Tests for Dynamic Cheatsheet (memory/cheatsheet.py)."""
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nano_hermes
 import pytest
-from conftest import _make_loop
+from conftest import _make_loop, _patch_embedding_distinct
 from nano_hermes.memory.cheatsheet import (
     _first_user_text,
     _last_assistant_text,
@@ -77,20 +76,59 @@ class TestStoreLesson:
 # ---------------------------------------------------------------------------
 
 
+_LESSON = (
+    "LESSON: Always check permissions before writing files.\n"
+    "WHEN: writing to a shared directory\n"
+    "EVIDENCE: the write failed with EACCES"
+)
+
+
+async def _extract(hook, content):
+    resp = MagicMock(finish_reason="stop", content=content)
+    with patch.object(hook._loop.provider, "chat_with_retry", AsyncMock(return_value=resp)):
+        await extract_cheatsheet_lesson(hook, _msgs(), "success")
+
+
+def _count(hook):
+    return hook.db.execute(
+        "SELECT COUNT(*) FROM semantic_facts WHERE fact_type='cheatsheet'"
+    ).fetchone()[0]
+
+
 class TestExtractCheatsheetLesson:
-    async def test_lesson_stored_on_success(self, tmp_path):
+    async def test_lesson_stored_on_success(self, tmp_path, monkeypatch):
+        _patch_embedding_distinct(monkeypatch)
         hook = _hook(tmp_path)
-        mock_resp = MagicMock()
-        mock_resp.finish_reason = "stop"
-        mock_resp.content = "Always check permissions before writing files."
-        with patch.object(hook._loop.provider, "chat_with_retry", AsyncMock(return_value=mock_resp)):
-            with patch("nano_hermes.memory.cheatsheet._embed_lesson", AsyncMock()):
-                await extract_cheatsheet_lesson(hook, _msgs(), "success")
+        await _extract(hook, _LESSON)
         rows = hook.db.execute(
             "SELECT content, fact_type FROM semantic_facts WHERE fact_type='cheatsheet'"
         ).fetchall()
         assert len(rows) == 1
         assert "permissions" in rows[0][0]
+        # Indexed at write time, so retrieval can find it.
+        assert hook.db.execute("SELECT COUNT(*) FROM semantic_facts_vec").fetchone()[0] == 1
+
+    async def test_lesson_without_evidence_not_stored(self, tmp_path, monkeypatch):
+        _patch_embedding_distinct(monkeypatch)
+        hook = _hook(tmp_path)
+        await _extract(hook, _LESSON.split("\nEVIDENCE")[0])
+        assert _count(hook) == 0
+
+    async def test_near_duplicate_condition_not_stored(self, tmp_path, monkeypatch):
+        _patch_embedding_distinct(monkeypatch)
+        hook = _hook(tmp_path)
+        await _extract(hook, _LESSON)
+        await _extract(hook, _LESSON.replace("Always check", "Check"))  # same WHEN
+        assert _count(hook) == 1
+        await _extract(hook, _LESSON.replace("writing to a shared directory", "deleting files"))
+        assert _count(hook) == 2
+
+    async def test_unindexable_lesson_not_stored(self, tmp_path):
+        """Retrieval is KNN-only: a lesson with no vector could never be injected."""
+        hook = _hook(tmp_path)
+        with patch.object(hook, "embedder", side_effect=Exception("no provider")):
+            await _extract(hook, _LESSON)
+        assert _count(hook) == 0
 
     async def test_skip_response_not_stored(self, tmp_path):
         hook = _hook(tmp_path)
@@ -151,16 +189,17 @@ class TestExtractCheatsheetLesson:
 
 
 class TestRetrieveLessons:
-    async def test_retrieves_stored_lessons_via_fts_fallback(self, tmp_path):
+    async def test_embedder_down_injects_nothing(self, tmp_path):
+        """No query match → no lessons, rather than the top-trust ones unmatched."""
         hook = _hook(tmp_path)
-        _store_lesson(hook.db, "First lesson about testing.", "test task")
-        _store_lesson(hook.db, "Second lesson about deployment.", "deploy task")
-
-        # Embedding fails → FTS fallback
+        fid = _store_lesson(hook.db, "First lesson about testing.", "test task")
+        hook.db.execute(
+            "INSERT INTO semantic_facts_vec (fact_id, embedding) VALUES (?, ?)",
+            (fid, b"\0\0\x80\x3f" + b"\0" * 2044),
+        )
         with patch.object(hook, "embedder", side_effect=Exception("no provider")):
             lessons = await retrieve_lessons(hook, "test task", top_k=3)
-
-        assert len(lessons) >= 1
+        assert lessons == []
 
     async def test_empty_db_returns_empty(self, tmp_path):
         hook = _hook(tmp_path)
@@ -168,13 +207,17 @@ class TestRetrieveLessons:
             lessons = await retrieve_lessons(hook, "something", top_k=3)
         assert lessons == []
 
-    async def test_multiple_lessons_returned(self, tmp_path):
+    async def test_matching_lesson_retrieved_first(self, tmp_path, monkeypatch):
+        from nano_hermes.memory.cheatsheet import store_if_novel
+
+        _patch_embedding_distinct(monkeypatch)
         hook = _hook(tmp_path)
-        _store_lesson(hook.db, "Check logs before escalating issues to prod.", "check logs")
-        _store_lesson(hook.db, "Use dry-run flags before destructive ops.", "dry run")
-        with patch.object(hook, "embedder", side_effect=Exception("no provider")):
-            lessons = await retrieve_lessons(hook, "anything", top_k=3)
-        assert len(lessons) == 2
+        for text, cond in [("Check logs before escalating.", "check logs"),
+                           ("Use dry-run flags first.", "dry run")]:
+            await store_if_novel(hook, cond, lambda t=text, c=cond: _store_lesson(hook.db, t, c, c))
+        lessons = await retrieve_lessons(hook, "dry run", top_k=3)
+        assert lessons[0][1] == "Use dry-run flags first."
+        assert lessons[0][2] == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------

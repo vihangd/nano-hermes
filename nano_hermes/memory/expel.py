@@ -19,7 +19,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from ..utils.error_classifier import classify_llm_response
-from .cheatsheet import _embed_lesson as _embed_fact, _parse_marked
+from .cheatsheet import _evidence, _parse_marked, store_if_novel
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -39,10 +39,11 @@ TASK B (outcome: {outcome_b}):
 {task_b}
 Key events: {events_b}
 
-Output exactly two lines:
+Output exactly three lines:
 INSIGHT: <the insight>
 WHEN: <one-line situation where this insight applies>
-If no meaningful insight can be extracted, output exactly: SKIP"""
+EVIDENCE: <the specific events above, from A and B, that show the difference>
+If you cannot name such events, the insight is speculation: output exactly SKIP."""
 
 
 def _parse_insight(raw: str) -> tuple[str, str]:
@@ -235,12 +236,19 @@ async def extract_contrastive_insight(
     insight, condition = _parse_insight(raw)
     if not insight or len(insight) < 20:
         return None
+    if not _evidence(raw):
+        log.debug("expel: insight cites no evidence — skipping")
+        return None
 
     # Use the current session's first chunk as task category.
     first_chunk = _chunk_text(hook.db, session_id, limit=120)
     applies_when = condition or first_chunk
-    fact_id = _store_insight(hook.db, insight, first_chunk, applies_when)
-    await _embed_fact(hook, fact_id, applies_when)
+    fact_id = await store_if_novel(
+        hook, applies_when,
+        lambda: _store_insight(hook.db, insight, first_chunk, applies_when),
+    )
+    if fact_id is None:
+        return None
     log.info(
         "expel: stored contrastive insight (session %d ↔ %d, sim≥%.2f, fact=%d)",
         session_id,

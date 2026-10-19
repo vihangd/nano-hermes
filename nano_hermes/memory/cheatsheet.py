@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from ..utils.error_classifier import classify_llm_response
 
@@ -36,10 +36,11 @@ Task: {task}
 Outcome: {outcome}
 Key events: {events}
 
-Output exactly two lines:
+Output exactly three lines:
 LESSON: <the lesson>
 WHEN: <one-line situation where this lesson applies>
-If no meaningful lesson can be extracted, output exactly: SKIP"""
+EVIDENCE: <the specific event above that the lesson rests on>
+If you cannot name such an event, the lesson is speculation: output exactly SKIP."""
 
 
 def _parse_marked(raw: str, head: str) -> tuple[str, str]:
@@ -60,6 +61,8 @@ def _parse_marked(raw: str, head: str) -> tuple[str, str]:
         elif up.startswith("WHEN:"):
             section = "when"
             when = s[len("WHEN:"):].strip()
+        elif up.startswith("EVIDENCE:"):
+            section = "evidence"  # read by _evidence, not part of the body
         elif section == "body":
             body_lines.append(s)
         elif section == "when" and s:
@@ -68,6 +71,15 @@ def _parse_marked(raw: str, head: str) -> tuple[str, str]:
     if not body:
         body = raw.strip()  # old-style: whole text is the body
     return body, when
+
+
+def _evidence(raw: str) -> str:
+    """The ``EVIDENCE:`` line's value, or "" when the model gave none."""
+    for line in raw.splitlines():
+        s = line.strip()
+        if s.upper().startswith("EVIDENCE:"):
+            return s[len("EVIDENCE:"):].strip()
+    return ""
 
 
 def _parse_lesson(raw: str) -> tuple[str, str]:
@@ -147,16 +159,63 @@ async def extract_cheatsheet_lesson(
     lesson, condition = _parse_lesson(raw)
     if not lesson or len(lesson) < 20:
         return
+    if not _evidence(raw):
+        log.debug("cheatsheet: lesson cites no evidence — skipping")
+        return
 
     category = _task_category(first_user)
     # The applicability condition is what retrieval matches the current task
     # against; fall back to the task category when the model omits it.
     applies_when = condition or category
-    fact_id = _store_lesson(hook.db, lesson, category, applies_when)
+    await store_if_novel(
+        hook, applies_when, lambda: _store_lesson(hook.db, lesson, category, applies_when)
+    )
 
-    # Embed asynchronously — fire-and-forget; embedding failure is non-fatal.
-    import asyncio  # noqa: PLC0415
-    asyncio.create_task(_embed_lesson(hook, fact_id, applies_when))
+
+async def _embed_bytes(hook: "NanoHermesHook", text: str) -> bytes | None:
+    try:
+        import numpy as np  # noqa: PLC0415
+
+        async with hook.embedder() as chain:
+            [vec] = await chain.embed([text])
+        return None if vec is None else np.asarray(vec, dtype=np.float32).tobytes()
+    except Exception:
+        log.debug("lesson: embedding failed", exc_info=True)
+        return None
+
+
+async def store_if_novel(
+    hook: "NanoHermesHook", applies_when: str, insert: Callable[[], int]
+) -> int | None:
+    """Store a lesson only if it is indexable and new; return its id or None.
+
+    Selective addition beats storing every experience (arXiv:2505.16067), so a
+    lesson whose condition nearly matches a live lesson's is dropped. With no
+    vector the lesson is dropped too: retrieval is KNN-only, so it could never
+    be injected.
+    """
+    vec_bytes = await _embed_bytes(hook, applies_when)
+    if vec_bytes is None:
+        return None
+    db = hook.db
+    dup = db.execute(
+        "SELECT 1 FROM semantic_facts_vec sfv "
+        "JOIN semantic_facts sf ON sf.id = sfv.fact_id "
+        "WHERE sfv.embedding MATCH ? AND k = 64 "
+        "  AND sf.fact_type IN ('cheatsheet', 'expel') AND sf.invalid_at IS NULL "
+        "  AND 1.0 - sfv.distance >= ? LIMIT 1",
+        (vec_bytes, hook.config.lesson_dedup_similarity),
+    ).fetchone()
+    if dup is not None:
+        log.debug("lesson: near-duplicate of a live lesson — skipping")
+        return None
+    fact_id = insert()
+    db.execute(
+        "INSERT OR REPLACE INTO semantic_facts_vec (fact_id, embedding) VALUES (?, ?)",
+        (fact_id, vec_bytes),
+    )
+    db.commit()
+    return fact_id
 
 
 def _store_lesson(
@@ -176,29 +235,6 @@ def _store_lesson(
     return int(cur.lastrowid)
 
 
-async def _embed_lesson(
-    hook: "NanoHermesHook", fact_id: int, embed_text: str
-) -> None:
-    """Embed the applicability condition into semantic_facts_vec (best-effort)."""
-    if fact_id <= 0 or not embed_text:
-        return
-    try:
-        import numpy as np  # noqa: PLC0415
-
-        async with hook.embedder() as chain:
-            [vec] = await chain.embed([embed_text])
-        if vec is None:
-            return
-        vec_bytes = np.asarray(vec, dtype=np.float32).tobytes()
-        hook.db.execute(
-            "INSERT OR REPLACE INTO semantic_facts_vec (fact_id, embedding) VALUES (?, ?)",
-            (fact_id, vec_bytes),
-        )
-        hook.db.commit()
-    except Exception:
-        log.debug("cheatsheet: embedding failed for fact %d", fact_id, exc_info=True)
-
-
 async def retrieve_lessons(
     hook: "NanoHermesHook",
     task_text: str,
@@ -208,9 +244,10 @@ async def retrieve_lessons(
 
     Ranks by ``distance / trust`` and hides facts below the trust floor, so
     lessons that correlated with past failures sink and eventually drop out.
-    ``relevance`` = ``max(0, 1 − distance)`` (1.0 on the FTS fallback), used to
-    weight outcome-based trust attribution. Tries KNN over ``semantic_facts_vec``
-    first; falls back to trust/recency-ordered scan when embeddings are down.
+    ``relevance`` = ``max(0, 1 − distance)``, used to weight outcome-based
+    trust attribution. KNN only: with embeddings down nothing is matched to the
+    task, and injecting unmatched lessons hurts (arXiv:2505.16067) while
+    crediting them with outcomes they had no part in.
     """
     db = hook.db
     min_trust = hook.config.decay.fact_trust_min
@@ -241,21 +278,7 @@ async def retrieve_lessons(
             ).fetchall()
             lessons = [(r[0], r[1], max(0.0, 1.0 - r[2])) for r in rows]
     except Exception:
-        log.debug("cheatsheet: KNN retrieval failed — using fallback", exc_info=True)
-
-    if not lessons:
-        try:
-            rows = db.execute(
-                "SELECT id, content FROM semantic_facts "
-                "WHERE fact_type IN ('cheatsheet', 'expel') AND invalid_at IS NULL "
-                "  AND trust_score >= ? "
-                "ORDER BY trust_score DESC, created_at DESC LIMIT ?",
-                (min_trust, top_k),
-            ).fetchall()
-            lessons = [(r[0], r[1], 1.0) for r in rows]
-        except Exception:
-            log.debug("cheatsheet: fallback retrieval failed", exc_info=True)
-
+        log.debug("cheatsheet: KNN retrieval failed — injecting none", exc_info=True)
     return lessons
 
 

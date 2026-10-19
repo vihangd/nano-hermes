@@ -150,6 +150,23 @@ async def test_injected_lessons_are_recorded_under_the_injecting_chat(
     assert hook._lessons("chan:b") == {}
 
 
+async def test_embedder_down_injects_no_lessons_and_records_none(tmp_path):
+    """With nothing matched to the task, no lesson is injected — so none is
+    credited or penalised by this session's outcome."""
+    from unittest.mock import patch
+
+    from nano_hermes.memory.cheatsheet import _store_lesson
+
+    hook = nano_hermes.install(
+        _make_loop(tmp_path), config={"skill_stats": {"cheatsheet_enabled": True}}
+    )
+    _store_lesson(hook.db, "Roll back when health checks fail.", "deploy")
+    with patch.object(hook, "embedder", side_effect=Exception("no provider")):
+        injected = await _turn(hook, [], _user("deploy the app"), "chan:a")
+    assert not any("Roll back" in s for s in injected), injected
+    assert hook._lessons("chan:a") == {}
+
+
 async def test_boundary_lessons_come_from_the_session_that_ended(tmp_path):
     """The boundary fires on the window that crossed it — after /new, the next
     task's first prompt. Lesson extraction must read the ended session's own
