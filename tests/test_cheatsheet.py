@@ -123,6 +123,14 @@ class TestExtractCheatsheetLesson:
         await _extract(hook, _LESSON.replace("writing to a shared directory", "deleting files"))
         assert _count(hook) == 2
 
+    async def test_distrusted_lesson_does_not_block_its_replacement(self, tmp_path, monkeypatch):
+        _patch_embedding_distinct(monkeypatch)
+        hook = _hook(tmp_path)
+        await _extract(hook, _LESSON)
+        hook.db.execute("UPDATE semantic_facts SET trust_score = 0.1")  # below the 0.3 floor
+        await _extract(hook, _LESSON.replace("Always check", "Check"))  # same WHEN
+        assert _count(hook) == 2
+
     async def test_unindexable_lesson_not_stored(self, tmp_path):
         """Retrieval is KNN-only: a lesson with no vector could never be injected."""
         hook = _hook(tmp_path)

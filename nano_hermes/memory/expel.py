@@ -19,7 +19,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from ..utils.error_classifier import classify_llm_response
-from .cheatsheet import _evidence, _parse_marked, store_if_novel
+from .cheatsheet import _parse_marked, store_if_novel
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -46,7 +46,7 @@ EVIDENCE: <the specific events above, from A and B, that show the difference>
 If you cannot name such events, the insight is speculation: output exactly SKIP."""
 
 
-def _parse_insight(raw: str) -> tuple[str, str]:
+def _parse_insight(raw: str) -> tuple[str, str, str]:
     """Parse INSIGHT/WHEN response; tolerate models that ignore the format."""
     return _parse_marked(raw, "INSIGHT")
 
@@ -219,7 +219,7 @@ async def extract_contrastive_insight(
         resp = await hook._loop.provider.chat_with_retry(
             messages=[{"role": "user", "content": prompt}],
             model=hook.background_model,
-            max_tokens=150,
+            max_tokens=300,  # three lines; a cut-off EVIDENCE line drops the insight
         )
     except Exception:
         log.debug("expel: LLM call failed", exc_info=True)
@@ -233,10 +233,10 @@ async def extract_contrastive_insight(
     raw = (resp.content or "").strip()
     if not raw or raw.upper().startswith("SKIP"):
         return None
-    insight, condition = _parse_insight(raw)
+    insight, condition, evidence = _parse_insight(raw)
     if not insight or len(insight) < 20:
         return None
-    if not _evidence(raw):
+    if not evidence:
         log.debug("expel: insight cites no evidence — skipping")
         return None
 

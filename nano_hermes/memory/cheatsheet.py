@@ -43,47 +43,43 @@ EVIDENCE: <the specific event above that the lesson rests on>
 If you cannot name such an event, the lesson is speculation: output exactly SKIP."""
 
 
-def _parse_marked(raw: str, head: str) -> tuple[str, str]:
-    """Parse a ``HEAD: …`` / ``WHEN: …`` response into (body, condition).
+_NO_EVIDENCE = {"", "none", "n/a", "na", "unknown", "nothing", "no evidence"}
 
-    Captures multi-line bodies (everything up to the WHEN marker). Falls back
-    to treating the whole text as the body when no HEAD marker is present.
+
+def _parse_marked(raw: str, head: str) -> tuple[str, str, str]:
+    """Parse a ``HEAD: …`` / ``WHEN: …`` / ``EVIDENCE: …`` response into
+    (body, condition, evidence).
+
+    Each section runs until the next marker, so multi-line values survive.
+    When the model omits the HEAD marker, the unmarked text before the first
+    marker is the body — never the WHEN/EVIDENCE lines. Placeholder evidence
+    ("none", "N/A", …) comes back as "".
     """
-    body_lines: list[str] = []
-    when = ""
-    section = None  # None | "body" | "when"
+    parts: dict[str, list[str]] = {"pre": [], "body": [], "when": [], "evidence": []}
+    section = "pre"
+    markers = ((head + ":", "body"), ("WHEN:", "when"), ("EVIDENCE:", "evidence"))
     for line in raw.splitlines():
         s = line.strip()
         up = s.upper()
-        if up.startswith(head + ":"):
-            section = "body"
-            body_lines.append(s[len(head) + 1:].strip())
-        elif up.startswith("WHEN:"):
-            section = "when"
-            when = s[len("WHEN:"):].strip()
-        elif up.startswith("EVIDENCE:"):
-            section = "evidence"  # read by _evidence, not part of the body
-        elif section == "body":
-            body_lines.append(s)
-        elif section == "when" and s:
-            when = (when + " " + s).strip()
-    body = " ".join(p for p in body_lines if p).strip()
-    if not body:
-        body = raw.strip()  # old-style: whole text is the body
-    return body, when
+        for marker, name in markers:
+            if up.startswith(marker):
+                section = name
+                s = s[len(marker):].strip()
+                break
+        parts[section].append(s)
+
+    def join(name: str) -> str:
+        return " ".join(p for p in parts[name] if p).strip()
+
+    body = join("body") or join("pre")
+    evidence = join("evidence")
+    if evidence.strip(" .-").lower() in _NO_EVIDENCE:
+        evidence = ""
+    return body, join("when"), evidence
 
 
-def _evidence(raw: str) -> str:
-    """The ``EVIDENCE:`` line's value, or "" when the model gave none."""
-    for line in raw.splitlines():
-        s = line.strip()
-        if s.upper().startswith("EVIDENCE:"):
-            return s[len("EVIDENCE:"):].strip()
-    return ""
-
-
-def _parse_lesson(raw: str) -> tuple[str, str]:
-    """Parse the LESSON/WHEN response. Tolerates models that ignore the format."""
+def _parse_lesson(raw: str) -> tuple[str, str, str]:
+    """Parse the LESSON/WHEN/EVIDENCE response. Tolerates a missing LESSON marker."""
     return _parse_marked(raw, "LESSON")
 
 
@@ -142,7 +138,7 @@ async def extract_cheatsheet_lesson(
         resp = await hook._loop.provider.chat_with_retry(
             messages=[{"role": "user", "content": prompt}],
             model=hook.background_model,
-            max_tokens=150,
+            max_tokens=300,  # three lines; a cut-off EVIDENCE line drops the lesson
         )
     except Exception:
         log.debug("cheatsheet: LLM call failed — skipping", exc_info=True)
@@ -156,10 +152,10 @@ async def extract_cheatsheet_lesson(
     raw = (resp.content or "").strip()
     if not raw or raw.upper().startswith("SKIP"):
         return
-    lesson, condition = _parse_lesson(raw)
+    lesson, condition, evidence = _parse_lesson(raw)
     if not lesson or len(lesson) < 20:
         return
-    if not _evidence(raw):
+    if not evidence:
         log.debug("cheatsheet: lesson cites no evidence — skipping")
         return
 
@@ -203,8 +199,10 @@ async def store_if_novel(
         "JOIN semantic_facts sf ON sf.id = sfv.fact_id "
         "WHERE sfv.embedding MATCH ? AND k = 64 "
         "  AND sf.fact_type IN ('cheatsheet', 'expel') AND sf.invalid_at IS NULL "
-        "  AND 1.0 - sfv.distance >= ? LIMIT 1",
-        (vec_bytes, hook.config.lesson_dedup_similarity),
+        # A distrusted lesson is hidden from retrieval; it must not also block
+        # the corrective lesson that would replace it.
+        "  AND sf.trust_score >= ? AND 1.0 - sfv.distance >= ? LIMIT 1",
+        (vec_bytes, hook.config.decay.fact_trust_min, hook.config.lesson_dedup_similarity),
     ).fetchone()
     if dup is not None:
         log.debug("lesson: near-duplicate of a live lesson — skipping")
@@ -253,30 +251,26 @@ async def retrieve_lessons(
     min_trust = hook.config.decay.fact_trust_min
     lessons: list[tuple[int, str, float]] = []
 
-    # Try KNN embedding search.
+    vec_bytes = await _embed_bytes(hook, task_text[:400])
+    if vec_bytes is None:
+        return lessons  # nothing can be matched to the task
+    # semantic_facts_vec also holds distilled 'fact' embeddings, and
+    # fact_type/trust are post-KNN join filters — a small k slice can be
+    # crowded out by 'fact' rows before any lesson survives the filter.
+    # ponytail: fetch a generous neighbourhood; if heavy 'fact' volumes
+    # still starve lessons, give lessons a dedicated vec0 table.
+    knn = max(64, top_k * 8)
     try:
-        import numpy as np  # noqa: PLC0415
-
-        async with hook.embedder() as chain:
-            [vec] = await chain.embed([task_text[:400]])
-        if vec is not None:
-            vec_bytes = np.asarray(vec, dtype=np.float32).tobytes()
-            # semantic_facts_vec also holds distilled 'fact' embeddings, and
-            # fact_type/trust are post-KNN join filters — a small k slice can be
-            # crowded out by 'fact' rows before any lesson survives the filter.
-            # ponytail: fetch a generous neighbourhood; if heavy 'fact' volumes
-            # still starve lessons, give lessons a dedicated vec0 table.
-            knn = max(64, top_k * 8)
-            rows = db.execute(
-                "SELECT sf.id, sf.content, sfv.distance FROM semantic_facts_vec sfv "
-                "JOIN semantic_facts sf ON sf.id = sfv.fact_id "
-                "WHERE sfv.embedding MATCH ? AND sf.fact_type IN ('cheatsheet', 'expel') "
-                "  AND sf.invalid_at IS NULL AND sf.trust_score >= ? AND k = ? "
-                "ORDER BY sfv.distance / MAX(sf.trust_score, 0.01) "
-                "LIMIT ?",
-                (vec_bytes, min_trust, knn, top_k),
-            ).fetchall()
-            lessons = [(r[0], r[1], max(0.0, 1.0 - r[2])) for r in rows]
+        rows = db.execute(
+            "SELECT sf.id, sf.content, sfv.distance FROM semantic_facts_vec sfv "
+            "JOIN semantic_facts sf ON sf.id = sfv.fact_id "
+            "WHERE sfv.embedding MATCH ? AND sf.fact_type IN ('cheatsheet', 'expel') "
+            "  AND sf.invalid_at IS NULL AND sf.trust_score >= ? AND k = ? "
+            "ORDER BY sfv.distance / MAX(sf.trust_score, 0.01) "
+            "LIMIT ?",
+            (vec_bytes, min_trust, knn, top_k),
+        ).fetchall()
+        lessons = [(r[0], r[1], max(0.0, 1.0 - r[2])) for r in rows]
     except Exception:
         log.debug("cheatsheet: KNN retrieval failed — injecting none", exc_info=True)
     return lessons

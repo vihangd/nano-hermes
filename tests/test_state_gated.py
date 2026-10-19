@@ -22,29 +22,29 @@ def _msgs():
 
 class TestParsers:
     def test_lesson_two_line(self):
-        lesson, when = _parse_lesson("LESSON: Verify inputs first.\nWHEN: handling user data")
+        lesson, when, _ = _parse_lesson("LESSON: Verify inputs first.\nWHEN: handling user data")
         assert lesson == "Verify inputs first."
         assert when == "handling user data"
 
     def test_lesson_fallback_whole_text(self):
-        lesson, when = _parse_lesson("Just a plain lesson with no markers.")
+        lesson, when, _ = _parse_lesson("Just a plain lesson with no markers.")
         assert lesson == "Just a plain lesson with no markers."
         assert when == ""
 
     def test_lesson_multiline_body_preserved(self):
-        lesson, when = _parse_lesson(
+        lesson, when, _ = _parse_lesson(
             "LESSON: First sentence.\nSecond sentence.\nWHEN: under load"
         )
         assert lesson == "First sentence. Second sentence."
         assert when == "under load"
 
     def test_insight_two_line(self):
-        insight, when = _parse_insight("INSIGHT: A beats B.\nWHEN: deploying at scale")
+        insight, when, _ = _parse_insight("INSIGHT: A beats B.\nWHEN: deploying at scale")
         assert insight == "A beats B."
         assert when == "deploying at scale"
 
     def test_insight_fallback(self):
-        insight, when = _parse_insight("plain insight text here")
+        insight, when, _ = _parse_insight("plain insight text here")
         assert insight == "plain insight text here"
         assert when == ""
 
@@ -83,3 +83,13 @@ class TestConditionStored:
             "SELECT context, task_category FROM semantic_facts WHERE fact_type='cheatsheet'"
         ).fetchone()
         assert row[0] == row[1]  # condition empty → context falls back to category
+        # No LESSON marker: the body is the unmarked text, not the EVIDENCE line.
+        content = hook.db.execute(
+            "SELECT content FROM semantic_facts WHERE fact_type='cheatsheet'"
+        ).fetchone()[0]
+        assert content == "Always take a backup before a destructive migration step."
+
+    def test_evidence_spans_lines_and_placeholders_are_rejected(self):
+        assert _parse_lesson("LESSON: Do X first.\nEVIDENCE:\n- the write failed")[2] == "- the write failed"
+        for none in ("none", "N/A", "Unknown.", "-"):
+            assert _parse_lesson(f"LESSON: Do X first.\nEVIDENCE: {none}")[2] == ""
