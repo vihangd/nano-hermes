@@ -83,6 +83,8 @@ class SkillSearchTool(Tool):
             return "no indexed skills (none have a description?)"
         self._hook.record_skill_candidates([h.name for h in hits])
         lines = []
+        if hits[0].lexical:
+            lines.append("(lexical fallback — embedding providers are down)")
         for h in hits:
             line = f"[{h.distance:.3f}] {h.name} — {h.description[:160]} ({h.location})"
             partners = get_compositions(self._hook.db, h.name)

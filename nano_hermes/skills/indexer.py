@@ -38,7 +38,7 @@ import numpy as np
 from nanobot.agent.skills import SkillsLoader as NanobotSkillsLoader
 
 from ..config import SkillStatsConfig
-from ..embedding.chain import EmbeddingChain
+from ..embedding.chain import AllProvidersFailed, EmbeddingChain
 from .external import (
     _parse_frontmatter,
     discover_external_skills,
@@ -59,6 +59,7 @@ class SkillHit:
     location: str
     distance: float
     siblings: list[str] = field(default_factory=list)
+    lexical: bool = False  # ranked by BM25 because every embedder failed
 
 
 def _content_text(name: str, description: str) -> str:
@@ -108,16 +109,25 @@ class SkillIndexer:
     async def search(self, query: str, k: int = 5) -> list[SkillHit]:
         """Refresh the index, then return top-k skills by similarity to *query*.
 
-        Raises ``AllProvidersFailed`` if every embedding provider is
-        unreachable — the wrapping Tool decides how to surface the error.
+        If every embedding provider is unreachable, ranks by BM25 over
+        name + description instead (SkillSeek, arXiv:2609.38822: BM25 matches
+        a BGE bi-encoder at R@5 on a 192-skill pool). Raises
+        ``AllProvidersFailed`` only when that finds nothing either.
         """
         entries = self._list_entries()
         description_by_name = self._descriptions(entries)
         location_by_name = {e["name"]: e["path"] for e in entries}
 
-        async with self._embedder_factory() as chain:
-            await self._refresh_with_chain(entries, description_by_name, chain)
-            [query_vec] = await chain.embed([query])
+        try:
+            async with self._embedder_factory() as chain:
+                await self._refresh_with_chain(entries, description_by_name, chain)
+                [query_vec] = await chain.embed([query])
+        except AllProvidersFailed:
+            hits = self._lexical_query(query, k, description_by_name, location_by_name)
+            if not hits:
+                raise
+            log.warning("skill_search: embedders down — lexical fallback")
+            return hits
 
         return self._vec_query(
             query_vec, k, description_by_name, location_by_name, query=query
@@ -293,6 +303,53 @@ class SkillIndexer:
                 )
                 removed += 1
         return removed
+
+    def _lexical_query(
+        self,
+        query: str,
+        k: int,
+        description_by_name: dict[str, str],
+        location_by_name: dict[str, str],
+    ) -> list[SkillHit]:
+        # ponytail: in-memory BM25 rebuilt per call, binary tf (descriptions are
+        # one-liners); move to an FTS5 table if skill counts reach thousands.
+        deprecated = {
+            r[0] for r in self._db.execute(
+                "SELECT name FROM skill_stats WHERE status = 'deprecated'"
+            )
+        }
+        docs = {
+            name: _name_tokens(f"{name} {desc}")
+            for name, desc in description_by_name.items()
+            if name not in deprecated
+        }
+        q = _name_tokens(query)
+        if not docs or not q:
+            return []
+        n = len(docs)
+        avgdl = sum(len(d) for d in docs.values()) / n
+        df = {t: sum(t in d for d in docs.values()) for t in q}
+        k1, b = 1.2, 0.75
+        scores: dict[str, float] = {}
+        for name, d in docs.items():
+            norm = (k1 + 1) / (1 + k1 * (1 - b + b * len(d) / avgdl))
+            score = sum(
+                math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5)) * norm
+                for t in q & d
+            )
+            if score > 0:
+                scores[name] = score
+        ranked = sorted(scores, key=lambda nm: -scores[nm])[:k]
+        return [
+            SkillHit(
+                name=nm,
+                description=description_by_name[nm],
+                location=location_by_name.get(nm, ""),
+                distance=1.0 / (1.0 + scores[nm]),
+                lexical=True,
+            )
+            for nm in ranked
+        ]
 
     def _vec_query(
         self,
