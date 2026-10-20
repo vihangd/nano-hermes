@@ -7,7 +7,7 @@ side-effects leak to every subsequent test in the suite.
 """
 from __future__ import annotations
 
-import asyncio
+import inspect
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -154,6 +154,34 @@ class TestPatchedRequestModelDrain:
 
         sent_messages = original_mock.call_args[0][2]
         assert sent_messages == messages
+
+
+    async def test_keyword_args_forwarded(self, restore_cli_patches):
+        """nanobot >=0.3.0 calls _request_model with keyword-only args
+        (request_state=, malformed_retry=, transcript=); the wrapper must
+        accept and forward them or every LLM call raises TypeError."""
+        original_mock = AsyncMock(return_value="sentinel")
+        AgentRunner._request_model = original_mock  # type: ignore[method-assign]
+        cli_mod._patch_agent_loop()
+
+        state = object()
+        with patch("nano_hermes.cli._find_hermes_hook", return_value=None):
+            out = await AgentRunner._request_model(
+                MagicMock(), None, [], MagicMock(), None,
+                request_state=state, malformed_retry=True,
+            )
+        assert out == "sentinel"
+        assert original_mock.call_args.kwargs == {"request_state": state, "malformed_retry": True}
+
+    def test_wrapper_accepts_every_parameter_of_installed_nanobot(self, restore_cli_patches):
+        """Bind the installed nanobot's real call shape to the wrapper."""
+        real = AgentRunner._request_model
+        cli_mod._patch_agent_loop()
+        kw = {
+            n: None for n, p in inspect.signature(real).parameters.items()
+            if p.kind is inspect.Parameter.KEYWORD_ONLY
+        }
+        inspect.signature(AgentRunner._request_model).bind(None, None, [], None, None, **kw)
 
 
 class TestMainPendingSubcommand:

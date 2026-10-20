@@ -70,13 +70,15 @@ def _patch_agent_loop() -> None:
     # drain and append them here so they reach the LLM in the same turn.
     original_request_model = AgentRunner._request_model
 
-    async def patched_request_model(self, spec, messages, hook, context):  # type: ignore[no-untyped-def]
+    # nanobot >=0.3.0 adds keyword-only args (request_state, malformed_retry,
+    # transcript); pass everything else through untouched.
+    async def patched_request_model(self, spec, messages, hook, context, *args, **kwargs):  # type: ignore[no-untyped-def]
         hermes = _find_hermes_hook(hook)
         if hermes is not None:
             pending = hermes.drain_injections()
             if pending:
                 messages = list(messages) + pending
-        return await original_request_model(self, spec, messages, hook, context)
+        return await original_request_model(self, spec, messages, hook, context, *args, **kwargs)
 
     AgentRunner._request_model = patched_request_model  # type: ignore[method-assign]
 
