@@ -14,31 +14,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from nanobot.agent.hook import AgentHook
-from nanobot.agent.loop import AgentLoop
 from nanobot.agent.runner import AgentRunner
 
 import nano_hermes.cli as cli_mod
 from nano_hermes.hook import NanoHermesHook
 
 from conftest import _make_loop
-
-
-@pytest.fixture
-def restore_cli_patches():
-    """Snapshot the global class methods + module flag; restore on teardown.
-
-    Without this, a single cli test would mutate AgentLoop.__init__ for
-    every subsequent test in the suite, causing duplicate-tool-registration
-    crashes in tests that explicitly call nano_hermes.install(loop).
-    """
-    saved_init = AgentLoop.__init__
-    saved_request_model = AgentRunner._request_model
-    saved_patched = cli_mod._PATCHED
-    cli_mod._PATCHED = False  # reset so we can patch fresh
-    yield
-    AgentLoop.__init__ = saved_init  # type: ignore[method-assign]
-    AgentRunner._request_model = saved_request_model  # type: ignore[method-assign]
-    cli_mod._PATCHED = saved_patched
 
 
 class TestFindHermesHook:
@@ -156,32 +137,57 @@ class TestPatchedRequestModelDrain:
         assert sent_messages == messages
 
 
-    async def test_keyword_args_forwarded(self, restore_cli_patches):
-        """nanobot >=0.3.0 calls _request_model with keyword-only args
-        (request_state=, malformed_retry=, transcript=); the wrapper must
-        accept and forward them or every LLM call raises TypeError."""
+    async def test_injection_already_in_request_not_appended_again(self, restore_cli_patches):
+        """When governance changed nothing, messages_for_model *is* the hook's
+        list and already holds the injection; appending it would send it twice."""
         original_mock = AsyncMock(return_value="sentinel")
         AgentRunner._request_model = original_mock  # type: ignore[method-assign]
         cli_mod._patch_agent_loop()
 
-        state = object()
+        injection = {"role": "user", "content": "injected context"}
+        late = {"role": "user", "content": "queued after the copy"}
+        mock_hermes = MagicMock()
+        mock_hermes.drain_injections.return_value = [injection, late]
+        messages = [{"role": "user", "content": "original"}, injection]
+
+        with patch("nano_hermes.cli._find_hermes_hook", return_value=mock_hermes):
+            await AgentRunner._request_model(MagicMock(), None, messages, MagicMock(), None)
+
+        sent = original_mock.call_args[0][2]
+        assert sent == [messages[0], injection, late]
+
+    async def test_keyword_args_forwarded(self, restore_cli_patches):
+        """nanobot 0.3.0 calls _request_model with keyword-only args
+        (malformed_retry=); the wrapper must accept and forward them or every
+        LLM call raises TypeError."""
+        original_mock = AsyncMock(return_value="sentinel")
+        AgentRunner._request_model = original_mock  # type: ignore[method-assign]
+        cli_mod._patch_agent_loop()
+
         with patch("nano_hermes.cli._find_hermes_hook", return_value=None):
             out = await AgentRunner._request_model(
-                MagicMock(), None, [], MagicMock(), None,
-                request_state=state, malformed_retry=True,
+                MagicMock(), None, [], MagicMock(), None, malformed_retry=True,
             )
         assert out == "sentinel"
-        assert original_mock.call_args.kwargs == {"request_state": state, "malformed_retry": True}
+        assert original_mock.call_args.kwargs == {"malformed_retry": True}
 
-    def test_wrapper_accepts_every_parameter_of_installed_nanobot(self, restore_cli_patches):
-        """Bind the installed nanobot's real call shape to the wrapper."""
+    def test_not_patched_when_request_built_after_before_iteration(self, restore_cli_patches):
+        """nanobot >=0.3.5 (``request_state`` parameter) builds the request
+        from context.messages after before_iteration, so the hook's own
+        append already reaches the model; patching would double-inject."""
+        async def new_shape(self, spec, messages, hook, context, *, request_state, transcript):
+            return None
+
+        AgentRunner._request_model = new_shape  # type: ignore[method-assign]
+        cli_mod._patch_agent_loop()
+        assert AgentRunner._request_model is new_shape
+
+    def test_installed_nanobot_matches_the_patch_decision(self, restore_cli_patches):
+        """Whatever nanobot is installed: patched iff it lacks request_state."""
         real = AgentRunner._request_model
         cli_mod._patch_agent_loop()
-        kw = {
-            n: None for n, p in inspect.signature(real).parameters.items()
-            if p.kind is inspect.Parameter.KEYWORD_ONLY
-        }
-        inspect.signature(AgentRunner._request_model).bind(None, None, [], None, None, **kw)
+        builds_late = "request_state" in inspect.signature(real).parameters
+        assert (AgentRunner._request_model is real) == builds_late
 
 
 class TestMainPendingSubcommand:

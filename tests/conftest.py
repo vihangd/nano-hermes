@@ -88,6 +88,27 @@ def _make_loop(tmp_path: Path) -> AgentLoop:
 
 
 @pytest.fixture
+def restore_cli_patches():
+    """Snapshot the global class methods + module flag; restore on teardown.
+
+    Without this, a single cli test would mutate AgentLoop.__init__ for
+    every subsequent test in the suite, causing duplicate-tool-registration
+    crashes in tests that explicitly call nano_hermes.install(loop).
+    """
+    import nano_hermes.cli as cli_mod
+    from nanobot.agent.runner import AgentRunner
+
+    saved_init = AgentLoop.__init__
+    saved_request_model = AgentRunner._request_model
+    saved_patched = cli_mod._PATCHED
+    cli_mod._PATCHED = False  # reset so we can patch fresh
+    yield
+    AgentLoop.__init__ = saved_init  # type: ignore[method-assign]
+    AgentRunner._request_model = saved_request_model  # type: ignore[method-assign]
+    cli_mod._PATCHED = saved_patched
+
+
+@pytest.fixture
 def loop(tmp_path: Path) -> AgentLoop:
     return _make_loop(tmp_path)
 

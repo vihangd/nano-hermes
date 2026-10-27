@@ -18,6 +18,7 @@ away and the ``nanobot`` command picks us up via ``pip`` metadata.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any
 
@@ -64,23 +65,30 @@ def _patch_agent_loop() -> None:
     AgentLoop.__init__ = patched_init  # type: ignore[method-assign]
 
     # --- Patch 2: drain pending injections into messages_for_model ---
-    # nanobot computes messages_for_model before calling before_iteration, so
-    # anything the hook appends to context.messages is one iteration late.
-    # NanoHermesHook._inject() queues injections in _pending_injections; we
-    # drain and append them here so they reach the LLM in the same turn.
+    # nanobot 0.2.x/0.3.0 compute messages_for_model before calling
+    # before_iteration. When context governance rewrote history that is a
+    # copy, so anything the hook appends to context.messages is one iteration
+    # late; when governance changed nothing it is the same list and the append
+    # is already there. NanoHermesHook._inject() queues injections in
+    # _pending_injections; we drain them here and append the ones the request
+    # does not already hold (by identity), so each reaches the LLM once.
+    # From 0.3.5 (marked by the ``request_state`` parameter) the request is
+    # built from context.messages *after* before_iteration, so injections
+    # already reach the model and the patch stays out.
     original_request_model = AgentRunner._request_model
+    if "request_state" not in inspect.signature(original_request_model).parameters:
 
-    # nanobot >=0.3.0 adds keyword-only args (request_state, malformed_retry,
-    # transcript); pass everything else through untouched.
-    async def patched_request_model(self, spec, messages, hook, context, *args, **kwargs):  # type: ignore[no-untyped-def]
-        hermes = _find_hermes_hook(hook)
-        if hermes is not None:
-            pending = hermes.drain_injections()
-            if pending:
-                messages = list(messages) + pending
-        return await original_request_model(self, spec, messages, hook, context, *args, **kwargs)
+        # 0.3.0 adds keyword-only args (malformed_retry); pass them through.
+        async def patched_request_model(self, spec, messages, hook, context, *args, **kwargs):  # type: ignore[no-untyped-def]
+            hermes = _find_hermes_hook(hook)
+            if hermes is not None:
+                held = {id(m) for m in messages}
+                pending = [m for m in hermes.drain_injections() if id(m) not in held]
+                if pending:
+                    messages = list(messages) + pending
+            return await original_request_model(self, spec, messages, hook, context, *args, **kwargs)
 
-    AgentRunner._request_model = patched_request_model  # type: ignore[method-assign]
+        AgentRunner._request_model = patched_request_model  # type: ignore[method-assign]
 
     _PATCHED = True
 
