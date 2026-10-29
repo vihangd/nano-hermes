@@ -35,7 +35,8 @@ _GOAL_CONTINUE = "You have an active sustained goal:"
 # not read as pushback.
 _CORRECTION_RE = re.compile(
     # A bare "no"/"nope" is often just the answer to a yes/no question.
-    r"^\W*(?:(?:no|nope)\b(?=[,.!\s]+\w)(?![,.!\s]+(?:that'?s|it'?s)\s+(?:perfect|great|fine|right))|"
+    r"^\W*(?:(?:no|nope)\b(?=[,.!\s]+\w)(?![,.!\s]+(?:(?:that'?s|it'?s)\s+(?:perfect|great|fine|right)|"
+    r"problem|worries|thanks?|need|rush|hurry)\b)|"
     r"wrong\b|"
     r"that'?s\s+(?:not|wrong)\b|that\s+is\s+not\b|not\s+(?:quite|right|what)\b|"
     r"(?:it|this|that)\s+(?:still\s+)?(?:doesn'?t|didn'?t|does\s+not|did\s+not)\s+work\b|"
@@ -49,7 +50,7 @@ _BROKEN_RE = re.compile(
 )
 _POSITIVE_RE = re.compile(
     r"^\W*(?:(?:no,?\s*)?(?:that'?s|it'?s)\s+(?:perfect|great|exactly\s+it|right)|"
-    r"thanks?\b|thank\s+you\b|thx\b|ty\b|perfect\b|great\b|awesome\b|nice\b|"
+    r"no\s+(?:problem|worries)\b|thanks?\b|thank\s+you\b|thx\b|ty\b|perfect\b|great\b|awesome\b|nice\b|"
     r"(?:that|it|this)\s+(?:works|worked|did\s+it)\b|works\s+now\b|looks\s+good\b|lgtm\b)",
     re.IGNORECASE,
 )

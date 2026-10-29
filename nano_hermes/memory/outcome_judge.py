@@ -109,7 +109,11 @@ async def _post_jev(cfg: "OutcomeJudgeConfig", key: str, body: dict) -> dict | N
                 log.debug("outcome judge: jev transport error %s", e)
             else:
                 if resp.status_code == 200:
-                    return resp.json()
+                    try:
+                        data = resp.json()
+                    except ValueError:
+                        return None
+                    return data if isinstance(data, dict) else None
                 if resp.status_code not in _RETRY_STATUS:
                     log.info("outcome judge: jev HTTP %d: %s", resp.status_code, resp.text[:200])
                     return None

@@ -59,6 +59,9 @@ def _outcomes(hook) -> list[str]:
         ("it still doesn't work", "correction"),
         ("try again", "correction"),
         ("no", "neutral"),          # answer to a yes/no question
+        ("no problem, thanks", "positive"),
+        ("no worries", "positive"),
+        ("no need, that works", "neutral"),
         ("actually, add tests", "neutral"),
         ("can you add a flag", "neutral"),
         (f"thanks\n{_RT}\nChannel: telegram", "positive"),
