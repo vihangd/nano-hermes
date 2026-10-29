@@ -82,19 +82,19 @@ class TestFinalizeExceptionPath:
         traj = MagicMock()
         traj.write.side_effect = RuntimeError("trajectory write failed")
         coord = _make_coord(db=db, traj_writer=traj)
-        coord.finalize(session_id=1, skills_used={"my_skill"}, had_errors=False)
+        coord.finalize(session_id=1, skills_used={"my_skill"}, outcome="ok")
         traj.write.assert_called_once()
 
     def test_finalize_success_passes_correct_args(self):
         db = _mem_db_with_tables()
         traj = MagicMock()
         coord = _make_coord(db=db, traj_writer=traj)
-        coord.finalize(session_id=1, skills_used={"skill_a"}, had_errors=True)
+        coord.finalize(session_id=1, skills_used={"skill_a"}, outcome="fail")
         traj.write.assert_called_once()
         kw = traj.write.call_args.kwargs
         assert kw["session_id"] == 1
         assert "skill_a" in kw["skills_used"]
-        assert kw["had_errors"] is True
+        assert kw["outcome"] == "fail"
 
 import nano_hermes
 from conftest import _make_loop
@@ -173,7 +173,7 @@ class TestFinalize:
         sid, _ = coord.sync(msgs)
         assert sid is not None
 
-        coord.finalize(sid, skills_used={"skill-a"}, had_errors=False)
+        coord.finalize(sid, skills_used={"skill-a"}, outcome="ok")
 
         row = hook.db.execute(
             "SELECT task, outcome FROM trajectories WHERE session_id = ?", (sid,)
@@ -194,7 +194,7 @@ class TestFinalize:
         ).fetchone()
         assert row_before[0] is None
 
-        coord.finalize(sid, skills_used=set(), had_errors=False)
+        coord.finalize(sid, skills_used=set(), outcome="ok")
 
         row_after = hook.db.execute(
             "SELECT ended_at FROM sessions WHERE id = ?", (sid,)

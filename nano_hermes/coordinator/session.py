@@ -209,9 +209,11 @@ class SessionCoordinator:
         self,
         session_id: int,
         skills_used: set[str],
-        had_errors: bool,
+        outcome: str,
+        signals: dict | None = None,
     ) -> None:
-        """Write a trajectory row for a completed session.
+        """Write a trajectory row for a completed session (*outcome* from
+        ``session.outcome.label``; *signals* stored for label evaluation).
 
         Ensures ended_at is set (fallback in case sync() missed it).
         """
@@ -236,7 +238,8 @@ class SessionCoordinator:
                 messages=messages,
                 skills_used=list(skills_used),
                 reflections=reflections,
-                had_errors=had_errors,
+                outcome=outcome,
+                signals=signals,
             )
         except Exception:
             log.exception("trajectory finalization failed for session %d", session_id)

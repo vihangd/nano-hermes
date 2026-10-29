@@ -32,9 +32,10 @@ from .lru import touch
 from .embedding.chain import EmbeddingChain
 from .memory.budgets import BudgetedMemory
 from .reflect.salience import last_user_text
-from .session.archiver import SessionArchiver
+from .session.archiver import SessionArchiver, _extract_text
 from .paths import state_db
 from .session.db import evict_low_value_facts, open_db, purge_older_than
+from .session.outcome import OutcomeTracker, label, trailing_user_texts
 from .session.trajectory import TrajectoryWriter
 from .skills.indexer import SkillIndexer
 
@@ -147,6 +148,8 @@ class NanoHermesHook(AgentHook):
         # (id(messages), user-message count) at this conversation's previous
         # iteration — see _count_user_turns.
         self._turn_user_counts: dict[str, tuple[int, int]] = {}
+        # Per-conversation outcome signals, labelled at the session boundary.
+        self._outcomes = OutcomeTracker()
 
     # ------------------------------------------------------------------
     # Public API surface (unchanged for external callers)
@@ -199,9 +202,15 @@ class NanoHermesHook(AgentHook):
         """Called by SkillSearchTool to register skills returned this iteration."""
         self._skill_tracker.record_candidates(names)
 
-    def record_skill_rating(self, name: str) -> None:
-        """Called by SkillRateTool to register a rated skill for trajectory."""
+    def record_skill_rating(self, name: str, success: bool = True) -> None:
+        """Called by SkillRateTool to register a rated skill for trajectory.
+
+        A failure rating is outcome evidence; a success rating is the agent
+        grading itself, so it never makes a session ``ok``.
+        """
         self._skill_tracker.record_rating(name)
+        if not success and request_persists():
+            self._outcomes.record_rated_failure(request_session_key() or "")
 
     async def _check_promotions(self, names: list[str]) -> None:
         """Delegate to SkillUsageTracker. Called by rate_tool.py."""
@@ -311,7 +320,9 @@ class NanoHermesHook(AgentHook):
         if not ids:
             return
         cfg = self.config.decay
-        base = cfg.fact_trust_helpful_delta if outcome == "success" else -cfg.fact_trust_unhelpful_delta
+        if outcome not in ("ok", "fail"):
+            return  # partial/unknown: no trust evidence either way
+        base = cfg.fact_trust_helpful_delta if outcome == "ok" else -cfg.fact_trust_unhelpful_delta
         try:
             # Weight each lesson's delta by how relevant it was to this task —
             # a marginal filler injection barely moves; a bullseye match earns full credit.
@@ -475,7 +486,18 @@ class NanoHermesHook(AgentHook):
         Run-level context carries no session key, so the turn's conversation
         comes from nanobot's request contextvar (still bound here).
         """
-        self.archiver.release_window(request_session_key())
+        key = request_session_key()
+        self.archiver.release_window(key)
+        if request_persists():
+            self._outcomes.record_run(
+                key or "", context.stop_reason, list(context.tool_events or [])
+            )
+
+    async def on_error(self, context: AgentRunHookContext) -> None:
+        """A failed run's stop reason; nanobot 0.2.2 skips ``on_finally`` when
+        the run raised, so this is the only place it is seen there."""
+        if request_persists():
+            self._outcomes.record_run(request_session_key() or "", context.stop_reason or "error", [])
 
     async def after_iteration(self, context: AgentHookContext) -> None:
         mark_request_hooked()
@@ -485,6 +507,7 @@ class NanoHermesHook(AgentHook):
         key = context.session_key or ""
         if context.error:
             self._skill_tracker.record_error(key)
+            self._outcomes.record_llm_error(key)
 
         try:
             # mid_turn: the reply was appended after get_history ran, so its
@@ -534,6 +557,14 @@ class NanoHermesHook(AgentHook):
         # reflection nudge so the agent distils what was learned while
         # the objective is still fresh in the conversation.
         transition = self._goal_tracker(key).update(context.messages)
+        self._outcomes.set_goal_active(key, self._goal_tracker(key).active)
+        # nanobot >= 0.3: update_goal(action=complete|cancel|block|replace).
+        # 0.2.2's complete_goal carries no action, so it gives no signal.
+        for tc, ev in zip(context.tool_calls, context.tool_events):
+            if getattr(tc, "name", None) == "update_goal" and ev.get("status") == "ok":
+                action = (getattr(tc, "arguments", None) or {}).get("action")
+                if action:
+                    self._outcomes.record_goal(key, str(action))
         if transition == "completed":
             objective = self._goal_tracker(key).last_objective or "(objective text unavailable)"
             log.info("nano-hermes: /goal completed — queuing goal-completion nudge")
@@ -585,11 +616,14 @@ class NanoHermesHook(AgentHook):
                 self._reflection_coord.observe_user_turn(
                     turn_key, window_user_turns=users, turns=fresh
                 )
+                self._outcomes.record_user_messages(turn_key, trailing_user_texts(msgs))
         else:
             seen = self._turn_user_counts.get(turn_key)
             if seen is not None and seen[0] == id(msgs) and users > seen[1]:
                 for _ in range(users - seen[1]):
                     self._reflection_coord.note_user_turn(turn_key)
+                new = [m for m in msgs if m.get("role") == "user"][seen[1]:]
+                self._outcomes.record_user_messages(turn_key, [_extract_text(m) for m in new])
         # id() is safe here: within a turn the runner holds the list alive, and
         # iteration 0 of the next turn overwrites the entry before it is read.
         self._turn_user_counts[turn_key] = (id(msgs), users)
@@ -844,23 +878,25 @@ class NanoHermesHook(AgentHook):
 
         if completed_id is not None:
             # Session boundary: finalize trajectory, reset skill state, prune dicts.
-            skills_used, skills_loaded, had_errors = self._skill_tracker.reset_session(key)
+            skills_used, skills_loaded, _ = self._skill_tracker.reset_session(key)
             self._mark_skills_viewed(skills_loaded)
             if len(skills_loaded) >= 2:
                 from .skills.composition import record_composition  # noqa: PLC0415
                 record_composition(self.db, skills_loaded)
-            self._reflection_coord.back_propagate_utility(had_errors, key)
-            self._reflection_coord.attribute_principles(
-                "fail" if had_errors else "ok", key
-            )
-            self._session_coord.finalize(completed_id, skills_used, had_errors)
+            # The user's reaction to the ended session's last reply usually
+            # opens this window (compaction splits sessions there).
+            self._outcomes.credit_followup(key, trailing_user_texts(messages))
+            signals = self._outcomes.take(key)
+            outcome = label(signals)
+            self._reflection_coord.back_propagate_utility(outcome, key)
+            self._reflection_coord.attribute_principles(outcome, key)
+            self._session_coord.finalize(completed_id, skills_used, outcome, signals.as_dict())
             self._reflection_coord.on_new_session(completed_id, key)
             self.archiver.prune_session_by_id(completed_id)
             self._completed_session_count += 1
             self._maybe_schedule_evolution()
             self._maybe_schedule_principle_curation()
             import asyncio  # noqa: PLC0415
-            outcome = "fail" if had_errors else "success"
             self._apply_lesson_trust(outcome, key)
             # The completed session's own transcript. ``messages`` is the window
             # that *crossed* the boundary — after /new it is the next task's
@@ -868,12 +904,13 @@ class NanoHermesHook(AgentHook):
             # wrong task under the old one's outcome.
             msgs_snapshot = self._session_coord.transcript(completed_id)
             # Dynamic Cheatsheet: schedule lesson extraction for the completed session.
-            if getattr(self.config.skill_stats, "cheatsheet_enabled", False):
+            labelled = outcome in ("ok", "fail")  # lessons need a trustworthy outcome
+            if labelled and getattr(self.config.skill_stats, "cheatsheet_enabled", False):
                 t = asyncio.create_task(self._extract_cheatsheet_lesson(msgs_snapshot, outcome))
                 self._lesson_tasks.add(t)
                 t.add_done_callback(self._lesson_tasks.discard)
             # ExpeL: schedule contrastive insight extraction for the completed session.
-            if getattr(self.config, "expel_enabled", False):
+            if labelled and getattr(self.config, "expel_enabled", False):
                 t = asyncio.create_task(
                     self._extract_expel_insight(completed_id, outcome, msgs_snapshot)
                 )

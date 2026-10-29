@@ -93,6 +93,8 @@ def find_contrasting_session(
     Uses embedding cosine similarity if available; falls back to None
     (no contrast) when embeddings are absent.
     """
+    if outcome not in ("ok", "success", "fail"):
+        return None  # partial/unknown: no clean class to contrast against
     opp_outcomes = _opposite_outcomes(_outcome_class(outcome))
     placeholders = ",".join("?" * len(opp_outcomes))
     since = time.time() - lookback_days * 86400

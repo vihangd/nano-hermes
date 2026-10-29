@@ -58,7 +58,7 @@ class TestTrajectoryWrite:
         assert len(rows) == 1
         assert rows[0][0] == session_a
         assert "haiku" in rows[0][1]
-        assert rows[0][2] == "ok"  # no errors
+        assert rows[0][2] == "unknown"  # no errors is not evidence of success
 
     async def test_trajectory_outcome_fail_on_short_error_session(
         self,
@@ -138,12 +138,12 @@ class TestTrajectoryWrite:
 # ---------------------------------------------------------------------------
 
 class TestTrajectoryEdgeCases:
-    async def test_partial_outcome_with_errors_and_substantial_messages(
+    async def test_llm_error_fails_the_session_however_long(
         self,
         loop: AgentLoop,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Error session with >4 substantive messages → outcome='partial'."""
+        """A model-call error is a hard failure, not 'partial' for long sessions."""
         _unset_embedding_keys(monkeypatch)
         hook = nano_hermes.install(loop)
 
@@ -164,7 +164,7 @@ class TestTrajectoryEdgeCases:
 
         row = hook.db.execute("SELECT outcome FROM trajectories").fetchone()
         assert row is not None
-        assert row[0] == "partial"
+        assert row[0] == "fail"
 
     async def test_trajectory_includes_reflection_text(
         self,
@@ -471,7 +471,7 @@ class TestTrajectoryEmbedding:
             messages=[{"role": "user", "content": "deploy the app"}],
             skills_used=[],
             reflections=[],
-            had_errors=False,
+            outcome="ok",
         )
         await writer.drain()
         assert embedded == ["deploy the app"]

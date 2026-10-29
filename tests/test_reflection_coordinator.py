@@ -165,7 +165,7 @@ class TestBackPropagateUtility:
     def test_success_increases_utility(self, hook, coord):
         rid = self._seed_reflection(hook, "good reflection", utility=0.5)
         coord._conv("").injected_reflection_ids = {rid}
-        coord.back_propagate_utility(had_errors=False)
+        coord.back_propagate_utility("ok")
 
         row = hook.db.execute("SELECT utility FROM reflections WHERE id = ?", (rid,)).fetchone()
         assert row[0] > 0.5  # utility moves toward 1.0
@@ -173,7 +173,7 @@ class TestBackPropagateUtility:
     def test_failure_decreases_utility(self, hook, coord):
         rid = self._seed_reflection(hook, "bad reflection", utility=0.5)
         coord._conv("").injected_reflection_ids = {rid}
-        coord.back_propagate_utility(had_errors=True)
+        coord.back_propagate_utility("fail")
 
         row = hook.db.execute("SELECT utility FROM reflections WHERE id = ?", (rid,)).fetchone()
         assert row[0] < 0.5  # utility moves toward 0.0
@@ -181,13 +181,13 @@ class TestBackPropagateUtility:
     def test_no_ids_is_noop(self, hook, coord):
         coord._conv("").injected_reflection_ids = set()
         # Must not raise
-        coord.back_propagate_utility(had_errors=False)
+        coord.back_propagate_utility("ok")
 
     def test_non_injected_reflections_unchanged(self, hook, coord):
         rid_injected = self._seed_reflection(hook, "injected", utility=0.5)
         rid_other = self._seed_reflection(hook, "not injected", utility=0.5)
         coord._conv("").injected_reflection_ids = {rid_injected}
-        coord.back_propagate_utility(had_errors=False)
+        coord.back_propagate_utility("ok")
 
         row = hook.db.execute("SELECT utility FROM reflections WHERE id = ?", (rid_other,)).fetchone()
         assert row[0] == pytest.approx(0.5)  # unaffected
@@ -230,7 +230,7 @@ class TestCoActivation:
         rid_a = self._seed_reflection(hook, "reflection A")
         rid_b = self._seed_reflection(hook, "reflection B")
         coord._conv("").injected_reflection_ids = {rid_a, rid_b}
-        coord.back_propagate_utility(had_errors=False)
+        coord.back_propagate_utility("ok")
 
         a, b = min(rid_a, rid_b), max(rid_a, rid_b)
         row = hook.db.execute(
@@ -248,7 +248,7 @@ class TestCoActivation:
 
         for _ in range(3):
             coord._conv("").injected_reflection_ids = {rid_a, rid_b}
-            coord.back_propagate_utility(had_errors=False)
+            coord.back_propagate_utility("ok")
 
         row = hook.db.execute(
             "SELECT coactivation_count FROM reflection_coactivations "
@@ -263,7 +263,7 @@ class TestCoActivation:
         rid_b = self._seed_reflection(hook, "second reflection")
         # rid_b > rid_a since AUTOINCREMENT; verify smaller is always column a
         coord._conv("").injected_reflection_ids = {rid_a, rid_b}
-        coord.back_propagate_utility(had_errors=False)
+        coord.back_propagate_utility("ok")
 
         row = hook.db.execute(
             "SELECT reflection_a_id, reflection_b_id FROM reflection_coactivations"
@@ -274,7 +274,7 @@ class TestCoActivation:
     def test_single_injection_produces_no_edges(self, hook, coord):
         rid = self._seed_reflection(hook, "lone reflection")
         coord._conv("").injected_reflection_ids = {rid}
-        coord.back_propagate_utility(had_errors=False)
+        coord.back_propagate_utility("ok")
 
         rows = hook.db.execute("SELECT * FROM reflection_coactivations").fetchall()
         assert rows == []
@@ -284,7 +284,7 @@ class TestCoActivation:
         rid_b = self._seed_reflection(hook, "refl B")
         rid_c = self._seed_reflection(hook, "refl C")
         coord._conv("").injected_reflection_ids = {rid_a, rid_b, rid_c}
-        coord.back_propagate_utility(had_errors=False)
+        coord.back_propagate_utility("ok")
 
         rows = hook.db.execute("SELECT * FROM reflection_coactivations").fetchall()
         assert len(rows) == 3  # C(3,2) = 3 pairs

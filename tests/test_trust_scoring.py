@@ -62,7 +62,7 @@ class TestApplyLessonTrust:
         hook = _hook(tmp_path)
         fid = _store_lesson(hook.db, "A useful lesson here.", "t")
         hook._lessons_by_key[""] = {fid: 1.0}
-        hook._apply_lesson_trust("success")
+        hook._apply_lesson_trust("ok")
         assert _trust(hook, fid) == pytest.approx(1.05)
         assert hook._lessons("") == {}  # cleared
 
@@ -86,13 +86,13 @@ class TestApplyLessonTrust:
         fid = _store_lesson(hook.db, "Repeatedly great lesson.", "t")
         _set_trust(hook, fid, 1.98)
         hook._lessons_by_key[""] = {fid: 1.0}
-        hook._apply_lesson_trust("success")  # 1.98 + 0.05 capped at 2.0
+        hook._apply_lesson_trust("ok")  # 1.98 + 0.05 capped at 2.0
         assert _trust(hook, fid) == 2.0
 
     def test_empty_set_noop(self, tmp_path):
         hook = _hook(tmp_path)
         hook._lessons_by_key[""] = {}
-        hook._apply_lesson_trust("success")  # must not raise
+        hook._apply_lesson_trust("ok")  # must not raise
 
     def test_delta_scaled_by_relevance(self, tmp_path):
         # On a fail, a bullseye lesson (rel 1.0) drops ~5× more than a
@@ -110,7 +110,7 @@ class TestApplyLessonTrust:
         hook = _hook(tmp_path)
         fid = _store_lesson(hook.db, "A lesson at full relevance.", "t")
         hook._lessons_by_key[""] = {fid: 1.0}
-        hook._apply_lesson_trust("success")
+        hook._apply_lesson_trust("ok")
         assert _trust(hook, fid) == pytest.approx(1.05)
 
 

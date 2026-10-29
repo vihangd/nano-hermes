@@ -120,7 +120,7 @@ class SkillRateTool(Tool):
         await self._hook._check_promotions([skill_name])
 
         # Register for trajectory tracking.
-        self._hook.record_skill_rating(skill_name)
+        self._hook.record_skill_rating(skill_name, is_success)
 
         # Read back to see if status changed so we can report it.
         new_row = self._hook.db.execute(

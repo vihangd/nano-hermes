@@ -151,7 +151,7 @@ CREATE TABLE IF NOT EXISTS trajectories (
     session_id      INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
     task            TEXT NOT NULL,
     skills_used     TEXT,                              -- JSON list
-    outcome         TEXT NOT NULL,                     -- ok | fail | partial
+    outcome         TEXT NOT NULL,                     -- ok | partial | fail | unknown
     reflection      TEXT,
     created_at      REAL NOT NULL
 );
@@ -444,6 +444,16 @@ _MIGRATIONS = [
     # use, so a frequently-viewed skill isn't staled as if dormant.
     "ALTER TABLE skill_stats ADD COLUMN last_viewed_at REAL",
     "ALTER TABLE skill_stats ADD COLUMN view_count INTEGER NOT NULL DEFAULT 0",
+    # Outcome labels (session/outcome.py): who set the label, the signals it
+    # rested on, and an optional hand label for scripts/label_eval.py.
+    "ALTER TABLE trajectories ADD COLUMN outcome_source TEXT",
+    "ALTER TABLE trajectories ADD COLUMN outcome_signals TEXT",
+    "ALTER TABLE trajectories ADD COLUMN human_outcome TEXT",
+    # The old label was "ok" unless the model call itself errored — no
+    # evidence of success. Every statement here re-runs while the version is
+    # unstamped, so the source guard keeps this from touching new labels.
+    "UPDATE trajectories SET outcome = 'unknown' "
+    "WHERE outcome = 'ok' AND outcome_source IS NULL",
 ]
 
 

@@ -5,8 +5,8 @@ captures the full arc of one conversation: what the task was, which
 skills were consulted, whether it succeeded, and any reflections written.
 
 No LLM calls — task is the first user message (500-char cap), outcome is
-a heuristic (ok/fail/partial), reflections are the raw reflection texts
-stored by the reflect tool.
+the rule label from ``session/outcome.py`` (ok/partial/fail/unknown),
+reflections are the raw reflection texts stored by the reflect tool.
 
 Phase 3: also embeds the task text and writes to ``trajectories_vec``
 for semantic retrieval of similar past tasks.
@@ -47,7 +47,8 @@ class TrajectoryWriter:
         messages: list[dict[str, Any]],
         skills_used: list[str],
         reflections: list[str],
-        had_errors: bool,
+        outcome: str,
+        signals: dict | None = None,
     ) -> int | None:
         """Write one trajectory row. Returns the new row id, or None if
         no task could be extracted (e.g. empty or system-only session).
@@ -59,7 +60,6 @@ class TrajectoryWriter:
         if not task:
             return None
 
-        outcome = self._outcome(messages, had_errors)
         reflection_text = "\n".join(reflections) if reflections else None
 
         try:
@@ -70,8 +70,9 @@ class TrajectoryWriter:
                 "trajectories_fts",
                 lambda: self._db.execute(
                     "INSERT INTO trajectories "
-                    "(session_id, task, skills_used, outcome, reflection, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "(session_id, task, skills_used, outcome, reflection, created_at, "
+                    "outcome_source, outcome_signals) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'rules', ?)",
                     (
                         session_id,
                         task,
@@ -79,6 +80,7 @@ class TrajectoryWriter:
                         outcome,
                         reflection_text,
                         time.time(),
+                        json.dumps(signals) if signals is not None else None,
                     ),
                 ),
             )
@@ -149,22 +151,3 @@ class TrajectoryWriter:
                 if text:
                     return text[:500]
         return None
-
-    @staticmethod
-    def _outcome(messages: list[dict[str, Any]], had_errors: bool) -> str:
-        """Classify outcome as ok / partial / fail.
-
-        - ok: no errors
-        - fail: errors and a short session (agent gave up quickly)
-        - partial: errors but the agent did substantial work anyway
-        """
-        if not had_errors:
-            return "ok"
-        # Count non-system, non-empty messages as a proxy for "work done"
-        substantive = sum(
-            1
-            for m in messages
-            if m.get("role") in ("user", "assistant", "tool")
-            and _extract_text(m)
-        )
-        return "partial" if substantive > 4 else "fail"

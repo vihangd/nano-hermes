@@ -286,7 +286,7 @@ class ReflectionCoordinator:
 
         ACE's label-free feedback: a principle that rode along in a successful
         session gains a helpful (``success_count``); one in a failed session
-        gains a ``harmful_count``. 'partial' outcomes are neutral. Always clears
+        gains a ``harmful_count``. 'partial'/'unknown' are neutral. Always clears
         the per-session injected set.
         """
         st = self._conv(key)
@@ -441,23 +441,28 @@ class ReflectionCoordinator:
         except Exception:
             log.debug("RMM citation recording failed", exc_info=True)
 
-    def back_propagate_utility(self, had_errors: bool, key: str | None = None) -> None:
+    def back_propagate_utility(self, outcome: str, key: str | None = None) -> None:
         """MemRL: update utility scores for reflections injected this session.
 
-        Called at session boundary with the session's outcome. Applies a
+        Called at session boundary with the session's outcome label. Applies a
         simple temporal-difference update:
-          - Success (no errors): utility += α * (1.0 - utility)
-          - Failure (had errors): utility += α * (0.0 - utility)
+          - ok:   utility += α * (1.0 - utility)
+          - fail: utility += α * (0.0 - utility)
+          - partial / unknown: no update (a noisy reward is worse than none)
         α = 0.1 (conservative step size to avoid oscillation).
 
-        Also records co-activation edges between every pair of reflections
-        injected together in this session (associative graph, item 10).
+        Always records co-activation edges between every pair of reflections
+        injected together in this session (associative graph, item 10) —
+        those don't depend on the outcome.
         """
         st = self._conv(key)
         if not st.injected_reflection_ids:
             return
+        if outcome not in ("ok", "fail"):
+            self._record_coactivations(key)
+            return
         alpha = 0.1
-        reward = 0.0 if had_errors else 1.0
+        reward = 1.0 if outcome == "ok" else 0.0
         placeholders = ",".join("?" * len(st.injected_reflection_ids))
         try:
             rows = self._db.execute(
@@ -748,9 +753,10 @@ class ReflectionCoordinator:
                 task_txt, skills_used_json, outcome, reflection = detail[tid]
                 skills = _json.loads(skills_used_json) if skills_used_json else []
                 skill_str = ", ".join(skills) if skills else "none"
-                tag = _tag.get(outcome, outcome)
+                # An unlabelled case is shown without a verdict, never as a win.
+                tag = _tag.get(outcome)
                 lines = [
-                    f"### Past case {i}: {tag}",
+                    f"### Past case {i}: {tag}" if tag else f"### Past case {i}",
                     f"Skills: {skill_str}",
                     f"Task: {task_txt[:200]}",
                 ]

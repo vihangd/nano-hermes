@@ -91,6 +91,7 @@ async def test_a_boundary_scores_and_resets_only_its_own_conversation(tmp_path):
         hook._skill_tracker._state(key).session_skills_used.add(skill)
         hook._lessons(key)[lesson] = 1.0
 
+    await _turn(hook, a, _user("thanks, that works"), "chan:a")  # A succeeded
     # /new in chat A: a fresh window under the same key ends A's session.
     a2 = []
     await _turn(hook, a2, _user("fresh start"), "chan:a")
@@ -184,6 +185,7 @@ async def test_boundary_lessons_come_from_the_session_that_ended(tmp_path):
     hook._extract_cheatsheet_lesson = capture
     a = []
     await _turn(hook, a, _user("migrate the database"), "chan:a")
+    await _turn(hook, a, _user("perfect, thanks"), "chan:a")  # a labelled outcome
     await _turn(hook, [], _user("write a haiku"), "chan:a")  # /new
     await asyncio.gather(*hook._lesson_tasks)
     assert len(seen) == 1
