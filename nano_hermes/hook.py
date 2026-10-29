@@ -35,7 +35,7 @@ from .reflect.salience import last_user_text
 from .session.archiver import SessionArchiver, _extract_text
 from .paths import state_db
 from .session.db import evict_low_value_facts, open_db, purge_older_than
-from .session.outcome import OutcomeTracker, label, trailing_user_texts
+from .session.outcome import OutcomeTracker, is_hard_failure, label, trailing_user_texts
 from .session.trajectory import TrajectoryWriter
 from .skills.indexer import SkillIndexer
 
@@ -758,6 +758,35 @@ class NanoHermesHook(AgentHook):
         except Exception:
             log.exception("evolution cycle: OPRO failed")
 
+    def _track_lesson_task(self, coro) -> None:
+        t = asyncio.create_task(coro)
+        self._lesson_tasks.add(t)
+        t.add_done_callback(self._lesson_tasks.discard)
+
+    def _schedule_lessons(self, session_id: int, outcome: str, messages: list) -> None:
+        """Cheatsheet + ExpeL for an ended session; both need a clean ok/fail."""
+        if outcome not in ("ok", "fail"):
+            return
+        if getattr(self.config.skill_stats, "cheatsheet_enabled", False):
+            self._track_lesson_task(self._extract_cheatsheet_lesson(messages, outcome))
+        if getattr(self.config, "expel_enabled", False):
+            self._track_lesson_task(self._extract_expel_insight(session_id, outcome, messages))
+
+    async def _judge_session(self, session_id: int, rule: str, messages: list) -> None:
+        """Background: judge an ended session, store the verdict, then (apply
+        mode) run lesson extraction with the judged label."""
+        from .memory import outcome_judge  # noqa: PLC0415
+
+        outcome = rule
+        try:
+            result = await outcome_judge.judge(self, messages)
+            if result is not None:
+                outcome = outcome_judge.record(self, session_id, rule, result)
+        except Exception:
+            log.debug("outcome judge failed", exc_info=True)
+        if self.config.outcome_judge.mode == "apply":
+            self._schedule_lessons(session_id, outcome, messages)
+
     async def _extract_cheatsheet_lesson(
         self, messages: list, outcome: str
     ) -> None:
@@ -903,7 +932,6 @@ class NanoHermesHook(AgentHook):
             self._completed_session_count += 1
             self._maybe_schedule_evolution()
             self._maybe_schedule_principle_curation()
-            import asyncio  # noqa: PLC0415
             self._apply_lesson_trust(outcome, key)
             # The completed session's own transcript. ``messages`` is the window
             # that *crossed* the boundary — after /new it is the next task's
@@ -911,16 +939,18 @@ class NanoHermesHook(AgentHook):
             # wrong task under the old one's outcome.
             msgs_snapshot = self._session_coord.transcript(completed_id)
             # Dynamic Cheatsheet: schedule lesson extraction for the completed session.
-            labelled = outcome in ("ok", "fail")  # lessons need a trustworthy outcome
-            if labelled and getattr(self.config.skill_stats, "cheatsheet_enabled", False):
-                t = asyncio.create_task(self._extract_cheatsheet_lesson(msgs_snapshot, outcome))
-                self._lesson_tasks.add(t)
-                t.add_done_callback(self._lesson_tasks.discard)
-            # ExpeL: schedule contrastive insight extraction for the completed session.
-            if labelled and getattr(self.config, "expel_enabled", False):
-                t = asyncio.create_task(
-                    self._extract_expel_insight(completed_id, outcome, msgs_snapshot)
+            judge_cfg = self.config.outcome_judge
+            if (
+                judge_cfg.enabled
+                and OutcomeTracker.labelled(key)
+                and not is_hard_failure(signals)
+            ):
+                # The judge may change the label, so in apply mode lesson
+                # extraction waits for its verdict.
+                self._track_lesson_task(
+                    self._judge_session(completed_id, outcome, msgs_snapshot)
                 )
-                self._lesson_tasks.add(t)
-                t.add_done_callback(self._lesson_tasks.discard)
+                if judge_cfg.mode == "apply":
+                    return existing
+            self._schedule_lessons(completed_id, outcome, msgs_snapshot)
         return existing

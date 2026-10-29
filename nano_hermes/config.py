@@ -390,6 +390,41 @@ class DecayConfig(BaseModel):
     fact_trust_min: float = Field(default=0.3, ge=0)
 
 
+class OutcomeJudgeConfig(BaseModel):
+    """Background judge for session outcome labels (memory/outcome_judge.py).
+
+    Runs after a session ends, off the reply path, on every session the rule
+    label (session/outcome.py) didn't already mark as a hard failure. Jev
+    (TypeSafe's System One decision model) is the primary backend; the
+    configured background LLM is the fallback.
+
+    Start in ``"shadow"`` mode: the verdict is only recorded in
+    ``trajectories.outcome_signals``. Hand-label ~50 sessions with
+    ``scripts/label_eval.py``, pick ``min_confidence`` from its report, then
+    switch to ``"apply"``. The jev backend sends a redacted transcript tail to
+    TypeSafe (or OpenRouter), a new third party: direct TypeSafe keeps data
+    "as long as necessary" (zero retention is enterprise-only).
+    """
+    enabled: bool = False
+    mode: Literal["shadow", "apply"] = "shadow"
+    backend: Literal["jev", "llm"] = "jev"
+    # Used when the primary backend is unavailable (no key) or its call fails.
+    fallback: Literal["llm", "none"] = "llm"
+    # Jev probabilities must clear this (or fall below 1 - this) to count.
+    # Published audits show Jev is overconfident — tune it on your own labels.
+    min_confidence: float = Field(default=0.9, ge=0.5, le=1.0)
+    # Direct TypeSafe; the OpenRouter-compatible route is
+    # https://openrouter.ai/api/v1/systemone with an OpenRouter key.
+    jev_url: str = "https://api.typesafe.ai/v1/systemone"
+    # Pinned: aliases like jev-latest move, and thresholds are version-specific.
+    jev_model: str = "jev-1.14.0"
+    # Env var holding the key (never put the key itself in config).
+    jev_key_env: str = "TYPESAFE_API_KEY"
+    # Jev rejects (not truncates) requests over its per-question context.
+    max_state_tokens: int = Field(default=24000, ge=1000)
+    timeout_s: float = Field(default=60.0, gt=0)
+
+
 class NanoHermesConfig(BaseModel):
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     principles: PrincipleEvolutionConfig = Field(
@@ -403,6 +438,7 @@ class NanoHermesConfig(BaseModel):
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     trajectory: TrajectoryConfig = Field(default_factory=TrajectoryConfig)
     workflow_induction: WorkflowInductionConfig = Field(default_factory=WorkflowInductionConfig)
+    outcome_judge: OutcomeJudgeConfig = Field(default_factory=OutcomeJudgeConfig)
     trajectory_retention_days: int = 45
     # ExpeL contrastive insight extraction (arXiv:2308.10144).
     expel_enabled: bool = False
