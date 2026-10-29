@@ -54,6 +54,8 @@ The 1 GB / ARM Cortex-A53 / microSD profile is the bottom-end target. It works, 
 - **Prefer a UHS-II / U3 microSD card.** SQLite WAL plus FTS5 and vec0 do a lot of small writes; a slow card is the most common source of turn-to-turn jitter.
 - **RAM budget is tight.** Baseline (nanobot + nano-hermes hook + DB connection) is ~250-300 MB. Long `/goal` sessions with many tool calls can push past 500 MB — leave headroom for the OS. The Pi 4/5 is the better target for 24/7 use.
 - **Keep `distill_max_chunks ≤ 150`.** The hub-cluster pass is O(N²); the default cap is tuned for this hardware.
+- **Use nanobot ≥ 0.3.5.** 0.2.2's Telegram streaming can send a reply twice (once quoting an older message); fixed upstream in 0.3.5. Reinstalls must repeat `--with nanobot-ai==<ver>`, or nanobot is dropped from the tool env.
+- **Skill count is the main per-turn cost.** nanobot re-parses every SKILL.md's frontmatter while building each system prompt (≈26 ms/turn on desktop with the stock catalog, est. ~0.5 s on a 3B+); prune skills you don't use. nano-hermes' own hook adds ~0.5 ms/turn on desktop (≈3 ms with 8 tool calls).
 - **Maintenance.** The retention purge runs on every session start and now also `VACUUM`s when rows were actually removed, so FTS5/vec0 fragmentation stays bounded without manual intervention.
 
 ### For developing nano-hermes itself
@@ -63,7 +65,7 @@ cd /path/to/nano-hermes
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e /path/to/nanobot      # local nanobot checkout
 pip install -e '.[dev]'              # nano-hermes + pytest + sqlite-vec
-pytest -v                            # 636 tests, expect all green
+pytest -q                            # expect all green
 ```
 
 If `sqlite-vec` has no wheel for your Python version (e.g. 3.14), build from source:
