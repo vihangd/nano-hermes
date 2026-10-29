@@ -445,7 +445,7 @@ _MIGRATIONS = [
     "ALTER TABLE skill_stats ADD COLUMN last_viewed_at REAL",
     "ALTER TABLE skill_stats ADD COLUMN view_count INTEGER NOT NULL DEFAULT 0",
     # Outcome labels (session/outcome.py): who set the label, the signals it
-    # rested on, and an optional hand label for scripts/label_eval.py.
+    # rested on, and an optional hand label for evals/label_eval.py.
     "ALTER TABLE trajectories ADD COLUMN outcome_source TEXT",
     "ALTER TABLE trajectories ADD COLUMN outcome_signals TEXT",
     "ALTER TABLE trajectories ADD COLUMN human_outcome TEXT",

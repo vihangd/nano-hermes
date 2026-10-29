@@ -400,7 +400,7 @@ class OutcomeJudgeConfig(BaseModel):
 
     Start in ``"shadow"`` mode: the verdict is only recorded in
     ``trajectories.outcome_signals``. Hand-label ~50 sessions with
-    ``scripts/label_eval.py``, pick ``min_confidence`` from its report, then
+    ``evals/label_eval.py``, pick ``min_confidence`` from its report, then
     switch to ``"apply"``. The jev backend sends a redacted transcript tail to
     TypeSafe (or OpenRouter), a new third party: direct TypeSafe keeps data
     "as long as necessary" (zero retention is enterprise-only).

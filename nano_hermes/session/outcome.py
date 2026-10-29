@@ -30,27 +30,31 @@ _FAIL_STOPS = frozenset({"error", "tool_error", "empty_final_response"})
 _GOAL_CONTINUE = "You have an active sustained goal:"
 
 # Strict lists for labelling — the lenient salience list (reflect/salience.py)
-# stays for Reflexion nudges. Matched near the start of the user's message,
-# on word boundaries, so "actually, add tests" or "no, that's perfect" are
-# not read as pushback.
+# stays for Reflexion nudges. Matched at the start of the user's message, on
+# word boundaries. A leading "no"/"nope" is allowed but never decides: it is
+# as often the answer to the assistant's own question ("no, just commit it",
+# "no, looks good") as pushback, so what follows it does.
+_LEAD = r"^\W*(?:(?:no|nope)\b[,.!]?\s*)?"
 _CORRECTION_RE = re.compile(
-    # A bare "no"/"nope" is often just the answer to a yes/no question.
-    r"^\W*(?:(?:no|nope)\b(?=[,.!\s]+\w)(?![,.!\s]+(?:(?:that'?s|it'?s)\s+(?:perfect|great|fine|right)|"
-    r"problem|worries|thanks?|need|rush|hurry)\b)|"
-    r"wrong\b|"
-    r"that'?s\s+(?:not|wrong)\b|that\s+is\s+not\b|not\s+(?:quite|right|what)\b|"
+    _LEAD
+    + r"(?:wrong\b|that'?s\s+(?:not|wrong)\b|that\s+is\s+(?:not|wrong)\b|"
+    r"not\s+(?:quite|right|what)\b|"
     r"(?:it|this|that)\s+(?:still\s+)?(?:doesn'?t|didn'?t|does\s+not|did\s+not)\s+work\b|"
     r"(?:still|it'?s\s+still)\s+(?:broken|failing|wrong|not\s+working)\b|try\s+again\b)",
     re.IGNORECASE,
 )
+# Pushback anywhere in a message that opened positively ("great, but …").
+_BUT_RE = re.compile(r"\b(?:but|however|except)\b", re.IGNORECASE)
 _BROKEN_RE = re.compile(
-    r"\b(?:still\s+(?:broken|failing|wrong|not\s+working)|doesn'?t\s+work|didn'?t\s+work|"
-    r"not\s+working|is\s+wrong)\b",
+    r"\b(?:broken|fails?|failing|failed|wrong|doesn'?t\s+work|didn'?t\s+work|"
+    r"not\s+working|not\s+right)\b",
     re.IGNORECASE,
 )
 _POSITIVE_RE = re.compile(
-    r"^\W*(?:(?:no,?\s*)?(?:that'?s|it'?s)\s+(?:perfect|great|exactly\s+it|right)|"
-    r"no\s+(?:problem|worries)\b|thanks?\b|thank\s+you\b|thx\b|ty\b|perfect\b|great\b|awesome\b|nice\b|"
+    _LEAD
+    + r"(?:(?:that'?s|it'?s)\s+(?:perfect|great|exactly\s+it|right)|"
+    r"problem\b|worries\b|thanks?\b|thank\s+you\b|thx\b|ty\b|perfect\b|great\b|"
+    r"awesome\b|nice\b|all\s+good\b|"
     r"(?:that|it|this)\s+(?:works|worked|did\s+it)\b|works\s+now\b|looks\s+good\b|lgtm\b)",
     re.IGNORECASE,
 )
@@ -80,6 +84,10 @@ def _current_text(text: str) -> str:
     cut = text.find("\n" + _RUNTIME_SENTINEL)
     if cut >= 0:
         text = text[:cut]
+    # ponytail: the history half (often a compaction summary) has blank lines
+    # too, so the split point is unknowable; the last paragraph is the best
+    # guess and loses a multi-paragraph reply's opening. Fine for reactions,
+    # which are short.
     if text.startswith(_MESSAGE_TIME_PREFIX) and "\n\n" in text:
         text = text.rsplit("\n\n", 1)[1]
     return text.strip()
@@ -95,8 +103,11 @@ def classify_user_text(text: str | None) -> str | None:
     if _CORRECTION_RE.search(text):
         return "correction"
     if _POSITIVE_RE.search(text):
-        # "thanks, but it's still broken" is pushback.
-        return "correction" if _BROKEN_RE.search(text) else "positive"
+        # "thanks, but it's still broken" is pushback; "great, but add X" is
+        # a new request, not a verdict.
+        if _BROKEN_RE.search(text):
+            return "correction"
+        return "neutral" if _BUT_RE.search(text) else "positive"
     return "neutral"
 
 
@@ -198,6 +209,8 @@ class OutcomeTracker:
         st = self._state(key)
         if stop_reason:
             st.last_stop = stop_reason
+            if stop_reason == "completed":
+                st.llm_error = False  # a later run recovered: label the last run
         st.tool_calls += len(tool_events)
         st.tool_errors += sum(1 for ev in tool_events if ev.get("status") == "error")
 

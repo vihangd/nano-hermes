@@ -174,3 +174,21 @@ async def test_hard_failure_never_reaches_the_judge(tmp_path, jev):
     outcome, source, signals = await _end(hook)
     assert (outcome, source) == ("fail", "rules")
     assert jev[1] == [] and "judge" not in json.loads(signals)
+
+
+async def test_jev_200_without_answers_falls_back_to_llm(tmp_path, jev):
+    jev[0].append((200, {"error": "schema changed"}))
+    hook = _hook(tmp_path)
+    hook._loop.provider = SimpleNamespace(
+        chat_with_retry=AsyncMock(return_value=SimpleNamespace(
+            content="FAIL", finish_reason="stop", error=None
+        ))
+    )
+    result = await oj.judge(hook, [{"role": "user", "content": "x"}])
+    assert result["backend"] == "llm" and result["verdict"] == "fail"
+
+
+def test_fit_transcript_cuts_one_huge_message_by_tokens():
+    huge = "字" * 20000  # ~1 char per token: a chars-per-token guess overshoots
+    _, transcript = oj._fit_transcript([{"role": "user", "content": huge}], 2000)
+    assert 0 < oj._count_tokens(transcript) <= 2000

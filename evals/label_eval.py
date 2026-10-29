@@ -19,6 +19,7 @@ from collections import Counter
 from pathlib import Path
 
 from nano_hermes.governance.pending import _load_config
+from nano_hermes.memory.outcome_judge import _jev_verdict
 from nano_hermes.session.db import open_db
 from nano_hermes.session.outcome import OUTCOMES, _current_text
 
@@ -99,8 +100,8 @@ def report(db) -> list[str]:
             jev.append((judge["p_accomplished"], judge["p_failed"], human))
     for t in _THRESHOLDS if jev else ():
         pairs = [
-            ("ok" if p_ok >= t and p_fail <= 1 - t else
-             "fail" if p_fail >= t and p_ok <= 1 - t else "unknown", human)
+            (_jev_verdict({"accomplished": {"noul": p_ok}, "failed": {"noul": p_fail}}, t)[0]
+             or "unknown", human)
             for p_ok, p_fail, human in jev
         ]
         lines.append(f"jev verdict at min_confidence={t}:")

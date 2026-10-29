@@ -75,24 +75,28 @@ Conversation (oldest first, may be truncated):
 def _fit_transcript(messages: list[dict[str, Any]], max_tokens: int) -> tuple[str, str]:
     """(task, transcript tail) redacted and fitted under *max_tokens*.
 
-    Drops the oldest messages first: the outcome lives at the end.
+    Walks from the end — the outcome lives there — and redacts only what it
+    keeps: a chat session's transcript can span weeks.
     """
-    lines = []
-    for m in messages:
-        text = _extract_text(m).strip()
-        if text and m.get("role") in ("user", "assistant"):
-            lines.append(f"{m['role'].upper()}: {redact(text).text}")
     task = next(
         (redact(_extract_text(m)).text[:500] for m in messages if m.get("role") == "user"), ""
     )
     budget = max_tokens - _count_tokens(task) - 200  # questions + JSON overhead
     kept: list[str] = []
     used = 0
-    for line in reversed(lines):
+    for m in reversed(messages):
+        text = _extract_text(m).strip()
+        if budget - used <= 0:
+            break
+        if not text or m.get("role") not in ("user", "assistant"):
+            continue
+        line = f"{m['role'].upper()}: {redact(text).text}"
         cost = _count_tokens(line)
         if used + cost > budget:
-            if not kept:  # a single huge last message: keep its tail
-                kept.append(line[-budget * 3:])
+            if not kept:  # one huge last message: keep its tail, token-exact
+                while line and _count_tokens(line) > budget:
+                    line = line[len(line) // 2:]
+                kept.append(line)
             break
         kept.append(line)
         used += cost
@@ -155,6 +159,9 @@ async def _judge_jev(cfg: "OutcomeJudgeConfig", task: str, transcript: str) -> d
     if not data:
         return None
     verdict, detail = _jev_verdict(data.get("answers") or {}, cfg.min_confidence)
+    if not detail:
+        log.info("outcome judge: jev response without answers: %.200s", data)
+        return None  # a malformed answer is a failed call: let the fallback run
     return {"backend": "jev", "model": data.get("model", cfg.jev_model), "verdict": verdict, **detail}
 
 

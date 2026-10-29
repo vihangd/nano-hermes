@@ -54,7 +54,14 @@ def _outcomes(hook) -> list[str]:
         ("no, that's perfect", "positive"),
         ("that works", "positive"),
         ("no that is wrong", "correction"),
-        ("no, use the other file", "correction"),
+        ("no, use the other file", "neutral"),  # "no" alone never decides
+        ("No, just commit it", "neutral"),
+        ("No, looks good", "positive"),
+        ("nope, all good", "positive"),
+        ("no longer needed, thanks", "neutral"),
+        ("great, but it fails on X", "correction"),
+        ("nice try but wrong file", "correction"),
+        ("great, but add tests too", "neutral"),
         ("thanks, but it's still broken", "correction"),
         ("it still doesn't work", "correction"),
         ("try again", "correction"),
@@ -285,3 +292,14 @@ async def test_correction_salience_counts_each_user_message_once(tmp_path):
     before = hook._reflection_coord._conv("k").salience_score
     await _turn(hook, msgs, _user("that's wrong"), "k", tool_iterations=3)
     assert hook._reflection_coord._conv("k").salience_score - before == 1.0
+
+
+async def test_a_recovered_model_error_does_not_fail_the_session(tmp_path):
+    hook = _hook(tmp_path)
+    msgs: list = []
+    await _turn(hook, msgs, _user("go"), "")
+    await _turn(hook, msgs, _user("retry please"), "", error="provider hiccup")
+    await hook.on_finally(AgentRunHookContext(messages=[], stop_reason="completed"))
+    await _turn(hook, msgs, _user("thanks, that works"), "")
+    await _turn(hook, [], _user("next"), "")
+    assert _outcomes(hook) == ["ok"]

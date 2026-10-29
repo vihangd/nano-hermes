@@ -57,7 +57,8 @@ def _parse_insight(raw: str) -> tuple[str, str, str]:
 def _outcome_class(outcome: str) -> str:
     """Map an outcome to 'success' or 'failure' for contrast pairing.
 
-    The hook passes "success"/"fail"; stored trajectories say "ok"/"fail"/"partial".
+    Labels are "ok"/"partial"/"fail"/"unknown" (session/outcome.py); "success"
+    is accepted from older callers.
     """
     return "success" if outcome in ("ok", "success") else "failure"
 
