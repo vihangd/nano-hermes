@@ -43,12 +43,6 @@ class _SkillState:
     session_had_errors: bool = False
 
 
-def _is_error_result(result: object) -> bool:
-    return bool(getattr(result, "is_error", False)) or (
-        isinstance(result, str) and result.startswith("Error")
-    )
-
-
 class SkillUsageTracker:
     def __init__(
         self,
@@ -88,19 +82,6 @@ class SkillUsageTracker:
     def record_read(self, skill_name: str, tool_index: int, key: str | None = None) -> None:
         """Record a directly-observed read_file on a SKILL.md path."""
         self._state(key).loaded_skills[skill_name] = tool_index
-
-    def drop_failed_reads(self, tool_results: list, key: str | None = None) -> None:
-        """Forget reads whose result was an error: a failed read loaded nothing.
-
-        nanobot's read_file reports failure as a string starting "Error"
-        (a ``ToolResult`` with ``is_error`` from 0.3.x on), indexed like
-        ``tool_calls``.
-        """
-        st = self._state(key)
-        st.loaded_skills = {
-            name: i for name, i in st.loaded_skills.items()
-            if not (i < len(tool_results) and _is_error_result(tool_results[i]))
-        }
 
     def record_rating(self, name: str, key: str | None = None) -> None:
         """Register an explicitly-rated skill for trajectory tracking."""

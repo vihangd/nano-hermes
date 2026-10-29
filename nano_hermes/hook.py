@@ -469,16 +469,6 @@ class NanoHermesHook(AgentHook):
         # Accumulate tool-burst salience per-batch (preserves original semantics).
         self._reflection_coord.record_tool_burst(tool_count, key)
 
-        # Detect which skills the agent actually loads via read_file on SKILL.md.
-        for i, tc in enumerate(context.tool_calls):
-            if getattr(tc, "name", None) != "read_file":
-                continue
-            args = getattr(tc, "arguments", None) or {}
-            path = args.get("path", "")
-            skill_name = SkillUsageTracker.extract_skill_name_from_path(path)
-            if skill_name:
-                self._skill_tracker.record_read(skill_name, i, key)
-
     async def on_finally(self, context: AgentRunHookContext) -> None:
         """End of a run: release the archiver's hold on this turn's window.
 
@@ -508,8 +498,18 @@ class NanoHermesHook(AgentHook):
 
         self._sync_session(context.messages, context.session_key)
 
+        # Skills the agent actually loaded: read_file on a SKILL.md that
+        # nanobot reports as status "ok" (a failed read loaded nothing).
+        # tool_events is indexed like tool_calls.
+        for i, (tc, ev) in enumerate(zip(context.tool_calls, context.tool_events)):
+            if getattr(tc, "name", None) != "read_file" or ev.get("status") != "ok":
+                continue
+            args = getattr(tc, "arguments", None) or {}
+            skill_name = SkillUsageTracker.extract_skill_name_from_path(args.get("path", ""))
+            if skill_name:
+                self._skill_tracker.record_read(skill_name, i, key)
+
         # Accumulate skill observations into session-level state.
-        self._skill_tracker.drop_failed_reads(context.tool_results, key)
         self._skill_tracker.update_accumulators(key)
 
         # Score error and correction salience (tool-burst already accumulated

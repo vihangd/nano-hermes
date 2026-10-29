@@ -1308,9 +1308,10 @@ class TestObservedUseCrediting:
 
         msgs: list[dict] = [{"role": "user", "content": "test"}]
         ctx = AgentHookContext(
-            iteration=0, messages=msgs, tool_calls=[tc_other, tc_read]
+            iteration=0, messages=msgs, tool_calls=[tc_other, tc_read],
+            tool_events=[{"name": "bash", "status": "ok"}, {"name": "read_file", "status": "ok"}],
         )
-        await hook.before_execute_tools(ctx)
+        await hook.after_iteration(ctx)
 
         assert "my-skill" in hook._skill_tracker._state("").loaded_skills
         assert hook._skill_tracker._state("").loaded_skills["my-skill"] == 1  # index of tc_read in tool_calls
@@ -1335,10 +1336,10 @@ class TestObservedUseCrediting:
         tc_read = MagicMock(spec=ToolCallRequest)
         tc_read.name = "read_file"
         tc_read.arguments = {"path": "skills/my-skill/SKILL.md"}
-        await hook.before_execute_tools(
-            AgentHookContext(iteration=0, messages=msgs, tool_calls=[tc_read])
-        )
-        await hook.after_iteration(AgentHookContext(iteration=0, messages=msgs))
+        await hook.after_iteration(AgentHookContext(
+            iteration=0, messages=msgs, tool_calls=[tc_read],
+            tool_events=[{"name": "read_file", "status": "ok"}],
+        ))
 
         # Trajectory tracking: skill appears in _session_skills_used
         assert "my-skill" in hook._skill_tracker._state("").session_skills_used
@@ -1352,25 +1353,28 @@ class TestObservedUseCrediting:
     async def test_failed_skill_read_is_not_loaded(
         self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A read_file that errored loaded nothing; only the good read counts."""
+        """A read_file nanobot reports as an error loaded nothing; a later
+        failed re-read of a skill doesn't undo the earlier good read."""
         _unset_embedding_keys(monkeypatch)
         hook = nano_hermes.install(loop)
         msgs: list[dict] = [{"role": "user", "content": "test"}]
         await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
 
         calls = []
-        for path in ("skills/missing/SKILL.md", "skills/present/SKILL.md"):
+        paths = ("skills/missing/SKILL.md", "skills/present/SKILL.md", "skills/present/SKILL.md")
+        for path in paths:
             tc = MagicMock(spec=ToolCallRequest)
             tc.name = "read_file"
             tc.arguments = {"path": path}
             calls.append(tc)
-        ctx = AgentHookContext(iteration=0, messages=msgs, tool_calls=calls)
-        await hook.before_execute_tools(ctx)
-        # nanobot's read_file error shape (plain str on 0.2.2, ToolResult on 0.3.x).
-        ctx.tool_results = [
-            "Error: File not found: skills/missing/SKILL.md",
-            "---\nname: present\n---\nbody",
-        ]
+        ctx = AgentHookContext(
+            iteration=0, messages=msgs, tool_calls=calls,
+            tool_events=[
+                {"name": "read_file", "status": "error"},
+                {"name": "read_file", "status": "ok"},
+                {"name": "read_file", "status": "error"},  # e.g. bad offset
+            ],
+        )
         await hook.after_iteration(ctx)
 
         st = hook._skill_tracker._state("")
