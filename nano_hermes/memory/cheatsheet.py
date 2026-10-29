@@ -32,7 +32,8 @@ Given this completed session, extract ONE concise transferable lesson \
 (max 2 sentences) that would help on similar future tasks, AND a one-line \
 condition describing WHEN the lesson applies. Focus on what worked or what to avoid.
 A useful lesson states the mechanism (why it went wrong or right), names a \
-concrete action (not "be careful"), and names any action to never take.
+concrete action (not "be careful"), and, only if the events show one, an \
+action to never take.
 
 Task: {task}
 Outcome: {outcome}

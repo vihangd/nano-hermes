@@ -179,7 +179,10 @@ class TestRunSkillDesignerProposal:
 
         assert "new_coverage_skill" in result
         # Skill directory should exist
-        assert (hook.workspace / "skills" / "new_coverage_skill" / "SKILL.md").exists()
+        md = (hook.workspace / "skills" / "new_coverage_skill" / "SKILL.md").read_text()
+        # One frontmatter block, carrying the model's description.
+        assert md.count("---\n") == 2
+        assert "description: handles coverage gaps\n" in md
 
     def test_skips_on_unparseable_name(self, tmp_path):
         hook = _hook(tmp_path, {"skill_designer_min_cluster_size": 2})

@@ -19,6 +19,7 @@ import re
 import time
 from typing import TYPE_CHECKING
 
+from .external import _FRONTMATTER_RE, _parse_frontmatter
 from .guard import scan_skill_content
 
 if TYPE_CHECKING:
@@ -39,8 +40,7 @@ SIMILAR FAILED TASKS (the agent had no skill to help with these):
 ---
 
 Design a new SKILL.md file that would help the agent handle tasks like these.
-Each step is a concrete action (not "be careful"); say why these tasks failed
-and name any action to never take.
+Each step is a concrete action (not "be careful").
 Use this exact format:
 ---
 name: <skill_name_snake_case>
@@ -52,6 +52,9 @@ description: <one-line description>
 
 ## Steps
 <numbered steps>
+
+## Pitfalls
+<why these tasks failed, and any action to never take>
 
 Output ONLY the SKILL.md content. Skill name must be unique and descriptive.
 """
@@ -200,6 +203,12 @@ async def run_skill_designer(hook: "NanoHermesHook") -> list[str]:
             log.warning("skill_designer: could not parse skill name from response")
             continue
         skill_name = m.group(1)
+        # The model writes a whole SKILL.md; the writers below add the
+        # frontmatter themselves, so pass its description and bare body.
+        description = _parse_frontmatter(body).get("description", "")
+        fm = _FRONTMATTER_RE.match(body)
+        if fm:
+            body = body[fm.end():].strip()
 
         # Security scan
         scan_err = scan_skill_content(body)
@@ -213,7 +222,7 @@ async def run_skill_designer(hook: "NanoHermesHook") -> list[str]:
             wa.stage_skill_write(
                 hook,
                 skill_name=skill_name,
-                description="",
+                description=description,
                 body=body,
                 reason=f"skill_designer: coverage gap ({len(cluster)} no-skill failures)",
                 origin="skill_designer",
@@ -224,7 +233,7 @@ async def run_skill_designer(hook: "NanoHermesHook") -> list[str]:
 
         result = await tool._create(
             skill_name=skill_name,
-            description="",
+            description=description,
             body=body,
             files=[],
             redaction_note=" [designed by SkillDesigner]",
