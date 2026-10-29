@@ -143,6 +143,18 @@ class TestMatchCenteredSnippet:
         # The cluster ("alpha gamma gamma") should appear in the window.
         assert "gamma" in snippet
 
+    def test_tier2_prefers_co_occurrence_over_denser_single_term(self):
+        # Terms far apart near the head (where 'alpha' is densest, so a
+        # tier-3 window would land there); together only near the tail.
+        text = (
+            "alpha alpha alpha " + "x" * 500 + " beta " + "y" * 500
+            + " beta then alpha " + "z" * 300
+        )
+        # No literal "alpha beta" phrase, so tier 1 can't fire.
+        snippet = _match_centered_snippet(text, "alpha beta", max_chars=80)
+        assert "beta then alpha" in snippet
+        assert "alpha alpha" not in snippet
+
     def test_tier3_individual_term_fallback(self):
         # 'rare_term' appears once deep in the text; no phrase / co-occurrence.
         prefix = "b" * 300

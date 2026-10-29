@@ -27,3 +27,38 @@ def test_gate_skips_when_current(tmp_path):
     cols = {r[1] for r in conn.execute("PRAGMA table_info(semantic_facts)")}
     assert "trust_score" not in cols  # skipped — not re-applied
     conn.close()
+
+
+def test_chunks_vec_migrated_to_cosine_preserving_rows(tmp_path):
+    from sqlite_vec import serialize_float32
+
+    ws = str(tmp_path / "state.db")
+    db = open_db(ws, 4)
+    # Recreate chunks_vec the pre-cosine way (default L2 metric).
+    db.execute("DROP TABLE chunks_vec")
+    db.execute(
+        "CREATE VIRTUAL TABLE chunks_vec USING vec0("
+        "chunk_id INTEGER PRIMARY KEY, embedding FLOAT[4])"
+    )
+    db.executemany(
+        "INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)",
+        [(1, serialize_float32([2, 0, 0, 0])), (2, serialize_float32([0, 1, 0, 0]))],
+    )
+    db.commit()
+    db.close()
+
+    db = open_db(ws, 4)
+    ddl = db.execute(
+        "SELECT sql FROM sqlite_master WHERE name='chunks_vec'"
+    ).fetchone()[0]
+    assert "distance_metric=cosine" in ddl
+    ids = [r[0] for r in db.execute("SELECT chunk_id FROM chunks_vec ORDER BY chunk_id")]
+    assert ids == [1, 2]
+    hits = db.execute(
+        "SELECT chunk_id, distance FROM chunks_vec WHERE embedding MATCH ? "
+        "AND k = 2 ORDER BY distance",
+        (serialize_float32([1, 0, 0, 0]),),
+    ).fetchall()
+    # Cosine: [1,0,0,0] vs [2,0,0,0] is distance 0 (L2 would be 1.0).
+    assert hits[0][0] == 1 and abs(hits[0][1]) < 1e-6
+    db.close()

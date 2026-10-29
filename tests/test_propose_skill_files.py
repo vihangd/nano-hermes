@@ -269,3 +269,34 @@ class TestExistingDirWithNoDBRow:
         )
         assert "Error" in result
         assert "already exists on disk" in result
+
+
+class TestWriteSkillEscapeGuard:
+    """Defense-in-depth: ``_write_skill`` re-resolves every path even though
+    ``execute`` already regex-validates them, so a caller that bypasses the
+    regex (or a future regex regression) still can't write outside the dir."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["files", "delete_files"])
+    @pytest.mark.parametrize("kind", ["relative", "absolute"])
+    async def test_escape_rejected_and_fresh_dir_removed(self, tmp_path, field, kind):
+        tool, _ = _make_tool(tmp_path)
+        outside = tmp_path / "outside.txt"
+        if field == "delete_files":
+            outside.write_text("keep me")
+        rel = "../../outside.txt" if kind == "relative" else str(outside)
+        files = [{"path": rel, "content": "pwned"}] if field == "files" else []
+        delete_files = [rel] if field == "delete_files" else []
+
+        result = await tool._write_skill(
+            "esc-skill", "Desc.", "Body.", files, delete_files,
+            upsert_sql="SELECT ?", success_msg="ok",
+        )
+
+        label = "companion file" if field == "files" else "delete_files"
+        assert result.startswith(f"Error: {label} path escapes skill directory")
+        assert not (tmp_path / "skills" / "esc-skill").exists()
+        if field == "files":
+            assert not outside.exists()
+        else:
+            assert outside.read_text() == "keep me"

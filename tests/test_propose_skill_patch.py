@@ -298,6 +298,29 @@ class TestPatchValidation:
         assert text.startswith("---\nname: fm-break\n")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "old,new,expected",
+        [
+            ("name: fm-guard\n", "", "no longer contains 'name'"),
+            ("description: Test skill fm-guard.", "description:", "non-empty 'description'"),
+            ("name: fm-guard", "name: renamed", "no longer matches the skill directory"),
+        ],
+        ids=["drop-name", "empty-description", "rename"],
+    )
+    async def test_patch_frontmatter_fields_guarded(self, tmp_path, old, new, expected):
+        tool, hook = _make_tool(tmp_path)
+        await _make_skill(tool, hook, "fm-guard", "Body content.")
+        skill_md = tmp_path / "skills" / "fm-guard" / "SKILL.md"
+        before = skill_md.read_text()
+
+        result = await tool.execute(
+            action="patch", name="fm-guard", old_string=old, new_string=new,
+        )
+        assert result.startswith("Error: patch would break SKILL.md:")
+        assert expected in result
+        assert skill_md.read_text() == before
+
+    @pytest.mark.asyncio
     async def test_patch_security_scan_blocks(self, tmp_path):
         """Patching destructive content into SKILL.md must be blocked.
 

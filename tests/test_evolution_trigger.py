@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 import nano_hermes
 from conftest import _make_loop
 
@@ -280,6 +282,34 @@ class TestEvolutionCycleAbortSemantics:
             log.append("umbrella")
             raise RuntimeError("transient")
         spec["nano_hermes.skills.umbrella.run_umbrella_merge"] = _aum
+
+        await _run_with_stages(hook, spec)
+
+        assert log == ["gepa", "rewriter", "umbrella", "ratchet", "designer", "opro"]
+
+    @pytest.mark.parametrize(
+        ("failing", "target"),
+        [
+            ("gepa", "nano_hermes.skills.gepa.run_gepa"),
+            ("rewriter", "nano_hermes.skills.rewriter.run_rewriter"),
+            ("umbrella", "nano_hermes.skills.umbrella.run_umbrella_merge"),
+            ("ratchet", "nano_hermes.skills.skill_retirement.run_ratchet"),
+            ("designer", "nano_hermes.skills.skill_designer.run_skill_designer"),
+            ("opro", "nano_hermes.governance.prompt_optimizer.run_opro"),
+        ],
+    )
+    async def test_any_stage_failure_is_isolated(self, tmp_path, failing, target):
+        # A plain exception in any one stage must not stop the stages after it.
+        hook = _make_hook(tmp_path, interval=1)
+        spec, log = _patch_stages()
+
+        def _raise(*a, **k):
+            log.append(failing)
+            raise RuntimeError("transient")
+
+        async def _araise(*a, **k):
+            _raise()
+        spec[target] = _raise if failing == "ratchet" else _araise
 
         await _run_with_stages(hook, spec)
 

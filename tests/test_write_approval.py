@@ -303,3 +303,18 @@ class TestApprovePrinciples:
         assert applied.await_args.args[1] == ops
         assert out.startswith("approved")
         assert wa.get_pending(hook.db, pid)["status"] == "approved"
+
+    def test_diff_pending_previews_principle_ops(self, tmp_path):
+        hook = nano_hermes.install(
+            _make_loop(tmp_path),
+            config={"principles": {"enabled": True, "write_approval": "approve"}},
+        )
+        ops = [
+            {"op": "add", "condition": "when X", "action": "do Y"},
+            {"op": "remove", "id": 7},
+        ]
+        pid = wa.stage_principle_ops(hook, ops=ops, reason="test")
+        out = wa.diff_pending(hook.db, hook.workspace, pid)
+        assert f"#{pid} principles" in out and "2 op(s)" in out
+        assert "  add: when X" in out
+        assert "  remove: 7" in out
