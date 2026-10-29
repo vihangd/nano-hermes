@@ -39,6 +39,8 @@ SIMILAR FAILED TASKS (the agent had no skill to help with these):
 ---
 
 Design a new SKILL.md file that would help the agent handle tasks like these.
+Each step is a concrete action (not "be careful"); say why these tasks failed
+and name any action to never take.
 Use this exact format:
 ---
 name: <skill_name_snake_case>

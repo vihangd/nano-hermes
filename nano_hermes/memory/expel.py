@@ -30,6 +30,8 @@ _EXPEL_PROMPT = """\
 Two similar tasks had DIFFERENT outcomes. Extract ONE concise insight \
 (max 2 sentences) that explains the key difference and would help handle \
 this type of task better in the future.
+A useful insight states the mechanism (why it went wrong or right), names a \
+concrete action (not "be careful"), and names any action to never take.
 
 TASK A (outcome: {outcome_a}):
 {task_a}
