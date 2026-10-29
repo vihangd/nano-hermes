@@ -55,14 +55,18 @@ def _parse_insight(raw: str) -> tuple[str, str, str]:
 
 
 def _outcome_class(outcome: str) -> str:
-    """Map raw outcome to 'success' or 'failure' for contrast pairing."""
-    return "success" if outcome == "success" else "failure"
+    """Map an outcome to 'success' or 'failure' for contrast pairing.
+
+    The hook passes "success"/"fail"; stored trajectories say "ok"/"fail"/"partial".
+    """
+    return "success" if outcome in ("ok", "success") else "failure"
 
 
 def _opposite_outcomes(outcome_class: str) -> tuple[str, ...]:
+    """Stored ``trajectories.outcome`` values of the opposite class."""
     if outcome_class == "success":
         return ("fail", "partial")
-    return ("success",)
+    return ("ok",)
 
 
 def _chunk_text(db: sqlite3.Connection, session_id: int, limit: int = 400) -> str:

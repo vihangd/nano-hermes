@@ -63,6 +63,7 @@ def _add_chunk_emb(db, session_id, vec, content="do the thing"):
 class TestOutcomeHelpers:
     def test_outcome_class_success(self):
         assert _outcome_class("success") == "success"
+        assert _outcome_class("ok") == "success"  # stored trajectory value
 
     def test_outcome_class_fail(self):
         assert _outcome_class("fail") == "failure"
@@ -74,7 +75,7 @@ class TestOutcomeHelpers:
         assert set(_opposite_outcomes("success")) == {"fail", "partial"}
 
     def test_opposite_of_failure(self):
-        assert set(_opposite_outcomes("failure")) == {"success"}
+        assert set(_opposite_outcomes("failure")) == {"ok"}
 
 
 class TestFindContrastingSession:
@@ -90,7 +91,7 @@ class TestFindContrastingSession:
         sid2 = _add_session(hook.db, "s2")
         _add_chunk(hook.db, sid1)
         _add_chunk(hook.db, sid2)
-        _add_trajectory(hook.db, sid2, "success")  # same class — no contrast
+        _add_trajectory(hook.db, sid2, "ok")  # same class — no contrast
         assert find_contrasting_session(hook.db, sid1, "success") is None
 
     def test_no_chunk_embedding_returns_none(self, tmp_path):
@@ -121,6 +122,18 @@ class TestFindContrastingSession:
         assert result is not None
         assert result[0] == match
         assert result[1] == "fail"
+
+    def test_failed_session_pairs_with_stored_ok(self, tmp_path):
+        # TrajectoryWriter stores successes as "ok", never "success".
+        dims = 512
+        near = [1.0] + [0.0] * (dims - 1)
+        hook = _hook(tmp_path)
+        cur = _add_session(hook.db, "cur")
+        match = _add_session(hook.db, "match")
+        _add_chunk_emb(hook.db, cur, near)
+        _add_chunk_emb(hook.db, match, near)
+        _add_trajectory(hook.db, match, "ok")
+        assert find_contrasting_session(hook.db, cur, "fail", threshold=0.5) == (match, "ok")
 
     def test_below_threshold_returns_none(self, tmp_path):
         dims = 512
