@@ -203,6 +203,14 @@ async def run_skill_designer(hook: "NanoHermesHook") -> list[str]:
             log.warning("skill_designer: could not parse skill name from response")
             continue
         skill_name = m.group(1)
+
+        # Security scan — the whole response, frontmatter included, before
+        # the description is split out.
+        scan_err = scan_skill_content(body)
+        if scan_err:
+            log.warning("skill_designer: security scan blocked '%s' — %s", skill_name, scan_err)
+            continue
+
         # The model writes a whole SKILL.md; the writers below add the
         # frontmatter themselves, so pass its description and bare body.
         description = _parse_frontmatter(body).get("description", "")
@@ -210,11 +218,6 @@ async def run_skill_designer(hook: "NanoHermesHook") -> list[str]:
         if fm:
             body = body[fm.end():].strip()
 
-        # Security scan
-        scan_err = scan_skill_content(body)
-        if scan_err:
-            log.warning("skill_designer: security scan blocked '%s' — %s", skill_name, scan_err)
-            continue
 
         # Write-approval gate
         from ..governance import write_approval as wa  # noqa: PLC0415

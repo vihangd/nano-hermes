@@ -18,7 +18,8 @@ log = logging.getLogger(__name__)
 
 _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("ignore instructions", re.compile(
-        r"ignore\s+(previous|all|above)\s+instructions", re.IGNORECASE
+        r"ignore\s+(?:all\s+)?(?:the\s+)?(previous|prior|all|above)\s+instructions",
+        re.IGNORECASE
     )),
     ("role hijack", re.compile(r"you\s+are\s+now\s+", re.IGNORECASE)),
     ("deception directive", re.compile(
