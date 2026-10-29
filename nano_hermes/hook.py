@@ -509,6 +509,7 @@ class NanoHermesHook(AgentHook):
         self._sync_session(context.messages, context.session_key)
 
         # Accumulate skill observations into session-level state.
+        self._skill_tracker.drop_failed_reads(context.tool_results, key)
         self._skill_tracker.update_accumulators(key)
 
         # Score error and correction salience (tool-burst already accumulated

@@ -1349,6 +1349,35 @@ class TestObservedUseCrediting:
         ).fetchone()
         assert row[0] == 0, f"expected use_count=0 (no skill_rate), got {row[0]}"
 
+    async def test_failed_skill_read_is_not_loaded(
+        self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A read_file that errored loaded nothing; only the good read counts."""
+        _unset_embedding_keys(monkeypatch)
+        hook = nano_hermes.install(loop)
+        msgs: list[dict] = [{"role": "user", "content": "test"}]
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs))
+
+        calls = []
+        for path in ("skills/missing/SKILL.md", "skills/present/SKILL.md"):
+            tc = MagicMock(spec=ToolCallRequest)
+            tc.name = "read_file"
+            tc.arguments = {"path": path}
+            calls.append(tc)
+        ctx = AgentHookContext(iteration=0, messages=msgs, tool_calls=calls)
+        await hook.before_execute_tools(ctx)
+        # nanobot's read_file error shape (plain str on 0.2.2, ToolResult on 0.3.x).
+        ctx.tool_results = [
+            "Error: File not found: skills/missing/SKILL.md",
+            "---\nname: present\n---\nbody",
+        ]
+        await hook.after_iteration(ctx)
+
+        st = hook._skill_tracker._state("")
+        assert "missing" not in st.session_skills_loaded
+        assert "missing" not in st.session_skills_used
+        assert "present" in st.session_skills_loaded
+
     async def test_no_auto_stat_write_from_observed_use(
         self, loop: AgentLoop, monkeypatch: pytest.MonkeyPatch
     ) -> None:
