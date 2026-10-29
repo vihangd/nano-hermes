@@ -273,3 +273,12 @@ def test_a_sessions_first_message_reacts_to_nothing():
     tracker = OutcomeTracker()
     tracker.record_user_messages("k", ["it still doesn't work, fix the login"])
     assert label(tracker.take("k")) == "unknown"
+
+
+async def test_correction_salience_counts_each_user_message_once(tmp_path):
+    hook = _hook(tmp_path)
+    msgs: list = []
+    await _turn(hook, msgs, _user("fix the bug"), "k")
+    before = hook._reflection_coord._conv("k").salience_score
+    await _turn(hook, msgs, _user("that's wrong"), "k", tool_iterations=3)
+    assert hook._reflection_coord._conv("k").salience_score - before == 1.0

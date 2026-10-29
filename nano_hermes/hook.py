@@ -150,6 +150,9 @@ class NanoHermesHook(AgentHook):
         self._turn_user_counts: dict[str, tuple[int, int]] = {}
         # Per-conversation outcome signals, labelled at the session boundary.
         self._outcomes = OutcomeTracker()
+        # Conversations whose current iteration brought a new user message —
+        # correction salience scores each user message once, not per iteration.
+        self._fresh_user_turn: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public API surface (unchanged for external callers)
@@ -540,7 +543,9 @@ class NanoHermesHook(AgentHook):
         # Not cached on (id(messages), len): a recycled list address of the
         # same length served another chat's text to correction scoring, and
         # the reverse scan costs well under a millisecond per turn.
-        current_user_text = last_user_text(context.messages)
+        fresh = key in self._fresh_user_turn
+        self._fresh_user_turn.discard(key)
+        current_user_text = last_user_text(context.messages) if fresh else None
         self._reflection_coord.score_iteration(
             had_error=context.error is not None,
             user_text=current_user_text,
@@ -617,6 +622,7 @@ class NanoHermesHook(AgentHook):
                     turn_key, window_user_turns=users, turns=fresh
                 )
                 self._outcomes.record_user_messages(turn_key, trailing_user_texts(msgs))
+                self._fresh_user_turn.add(turn_key)
         else:
             seen = self._turn_user_counts.get(turn_key)
             if seen is not None and seen[0] == id(msgs) and users > seen[1]:
@@ -624,6 +630,7 @@ class NanoHermesHook(AgentHook):
                     self._reflection_coord.note_user_turn(turn_key)
                 new = [m for m in msgs if m.get("role") == "user"][seen[1]:]
                 self._outcomes.record_user_messages(turn_key, [_extract_text(m) for m in new])
+                self._fresh_user_turn.add(turn_key)
         # id() is safe here: within a turn the runner holds the list alive, and
         # iteration 0 of the next turn overwrites the entry before it is read.
         self._turn_user_counts[turn_key] = (id(msgs), users)
