@@ -68,6 +68,9 @@ def _outcomes(hook) -> list[str]:
         ("no", "neutral"),          # answer to a yes/no question
         ("no problem, thanks", "positive"),
         ("no worries", "positive"),
+    ("Problem is the deploy still hangs", "neutral"),
+    ("worries me that it hangs", "neutral"),
+    ("this worked before you changed it", "neutral"),
         ("no need, that works", "neutral"),
         ("actually, add tests", "neutral"),
         ("can you add a flag", "neutral"),
@@ -157,10 +160,19 @@ async def test_a_correction_is_scored_once_across_tool_iterations(tmp_path):
 
 
 async def test_the_next_sessions_opener_credits_the_ended_session(tmp_path):
+    """Compaction merged the old exchange onto the reaction: it counts."""
     hook = _hook(tmp_path)
     await _turn(hook, [], _user("migrate the db"), "k")
-    await _turn(hook, [], _user("thanks, that worked"), "k")  # opens session 2
+    merged = "[Message Time: 2026-11-03 10:00]\nsummary of the migration\n\nthanks, that worked"
+    await _turn(hook, [], _user(merged), "k")  # opens session 2
     assert _outcomes(hook) == ["ok"]
+
+
+async def test_after_new_the_opener_is_a_new_task(tmp_path):
+    hook = _hook(tmp_path)
+    await _turn(hook, [], _user("migrate the db"), "k")
+    await _turn(hook, [], _user("try again with the staging DB"), "k")  # /new: bare window
+    assert _outcomes(hook) == ["unknown"]
 
 
 async def test_a_model_error_fails_the_session(tmp_path):

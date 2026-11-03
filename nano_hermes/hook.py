@@ -36,7 +36,13 @@ from .reflect.salience import last_user_text
 from .session.archiver import SessionArchiver, _extract_text
 from .paths import state_db
 from .session.db import evict_low_value_facts, open_db, purge_older_than
-from .session.outcome import OutcomeTracker, is_hard_failure, label, trailing_user_texts
+from .session.outcome import (
+    OutcomeTracker,
+    carries_history,
+    is_hard_failure,
+    label,
+    trailing_user_texts,
+)
 from .session.trajectory import TrajectoryWriter
 from .skills.indexer import SkillIndexer
 
@@ -957,8 +963,10 @@ class NanoHermesHook(AgentHook):
                 from .skills.composition import record_composition  # noqa: PLC0415
                 record_composition(self.db, skills_loaded)
             # The user's reaction to the ended session's last reply usually
-            # opens this window (compaction splits sessions there).
-            self._outcomes.credit_followup(key, trailing_user_texts(messages))
+            # opens this window when compaction split them; after /new it is
+            # a new task.
+            if carries_history(messages):
+                self._outcomes.credit_followup(key, trailing_user_texts(messages))
             signals = self._outcomes.take(key)
             outcome = label(signals)
             self._reflection_coord.back_propagate_utility(outcome, key)

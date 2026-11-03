@@ -53,9 +53,10 @@ _BROKEN_RE = re.compile(
 _POSITIVE_RE = re.compile(
     _LEAD
     + r"(?:(?:that'?s|it'?s)\s+(?:perfect|great|exactly\s+it|right)|"
-    r"problem\b|worries\b|thanks?\b|thank\s+you\b|thx\b|ty\b|perfect\b|great\b|"
-    r"awesome\b|nice\b|all\s+good\b|"
-    r"(?:that|it|this)\s+(?:works|worked|did\s+it)\b|works\s+now\b|looks\s+good\b|lgtm\b)",
+    r"(?<=no\s)problem\b|(?<=no\s)worries\b|thanks?\b|thank\s+you\b|thx\b|ty\b|perfect\b|"
+    r"great\b|awesome\b|nice\b|all\s+good\b|"
+    r"(?:that|it|this)\s+(?:works|worked(?!\s+before)|did\s+it)\b|works\s+now\b|"
+    r"looks\s+good\b|lgtm\b)",
     re.IGNORECASE,
 )
 
@@ -72,6 +73,20 @@ def trailing_user_texts(messages: list[dict[str, Any]]) -> list[str]:
             break
         out.append(_extract_text(m))
     return out[::-1]
+
+
+def carries_history(messages: list[dict[str, Any]]) -> bool:
+    """Whether the window holds earlier conversation, not just this turn.
+
+    After compaction the previous exchange survives (as history or merged
+    onto this turn's user message under a ``[Message Time:`` stamp); after
+    ``/new`` the window is the system prompt and the new task alone, so its
+    opener is no reaction to the ended session.
+    """
+    convo = [m for m in messages if m.get("role") != "system"]
+    if len(convo) > len(trailing_user_texts(messages)):
+        return True
+    return bool(convo) and _extract_text(convo[0]).startswith(_MESSAGE_TIME_PREFIX)
 
 
 def _current_text(text: str) -> str:
