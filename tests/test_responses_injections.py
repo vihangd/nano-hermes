@@ -10,7 +10,7 @@ import pytest
 
 state = pytest.importorskip("nanobot.providers.openai_responses.state")
 
-from nano_hermes.cli import _drop_injected_from_state, _keep_injected_system  # noqa: E402
+from nano_hermes.cli import _drop_injected_at_finish, _keep_injected_system  # noqa: E402
 
 _MESSAGES = [
     {"role": "system", "content": "NANOBOT PROMPT"},
@@ -27,31 +27,48 @@ def test_injection_does_not_replace_the_system_prompt():
     ]
 
 
-def test_injection_is_not_stored_in_provider_state():
-    _, items = _keep_injected_system(state.convert_messages)(_MESSAGES)
-    built = _drop_injected_from_state(state.build_responses_state)(
-        provider="deepseek", model="deepseek-v4-flash", input_items=items, output_items=[],
+def _controller(items):
+    cs = pytest.importorskip("nanobot.providers.conversation_state")
+    from nanobot.providers.base import ProviderConversationState
+
+    ctl = cs.ProviderConversationStateController.__new__(cs.ProviderConversationStateController)
+    ctl._boundary = 0
+    ctl._state = ProviderConversationState(
+        kind="openai_responses", provider="deepseek", model="deepseek-v4-flash",
+        version=1, payload={"items": items},
     )
-    stored = built.payload["items"]
-    assert [i["role"] for i in stored] == ["user"]
+    return cs, ctl
+
+
+def test_injection_stays_within_the_run_but_is_not_stored():
+    _, items = _keep_injected_system(state.convert_messages)(_MESSAGES)
+    cs, ctl = _controller(items)
+    # Within the run the replayed state still carries the injection ...
+    assert ctl.checkpoint([]).payload["items"] == items
+    # ... the stored final state does not.
+    final = _drop_injected_at_finish(cs.ProviderConversationStateController.finish)(ctl, [])
+    assert [i["role"] for i in final.payload["items"]] == ["user"]
+    assert ctl._state is final
 
 
 def test_patch_wires_both_wrappers(monkeypatch):
-    import importlib
+    import sys
 
     import nano_hermes.cli as cli_mod
 
-    monkeypatch.setattr(state, "convert_messages", state.convert_messages)
-    mods = []
-    for name in ("openai_responses.state", "openai_compat_provider", "openai_codex_provider",
-                 "azure_openai_provider", "openai_responses.parsing"):
-        mod = importlib.import_module(f"nanobot.providers.{name}")
-        if hasattr(mod, "build_responses_state"):
-            monkeypatch.setattr(mod, "build_responses_state", mod.build_responses_state)
-            mods.append(mod)
+    conv = sys.modules["nanobot.providers.openai_responses.converters"]
+    cs = pytest.importorskip("nanobot.providers.conversation_state")
+    original = conv.convert_messages
+    for mod in list(sys.modules.values()):
+        if getattr(mod, "__dict__", {}).get("convert_messages") is original:
+            monkeypatch.setattr(mod, "convert_messages", original)
+    ctl = cs.ProviderConversationStateController
+    monkeypatch.setattr(ctl, "finish", ctl.finish)
     cli_mod._patch_responses()
-    cli_mod._patch_responses()  # idempotent
+    once = ctl.finish
+    cli_mod._patch_responses()
+    assert ctl.finish is once  # idempotent
     assert state.prepare_responses_input(
         _MESSAGES, state=None, provider="deepseek", model="deepseek-v4-flash",
     )[0] == "NANOBOT PROMPT"
-    assert all(m.build_responses_state._nano_hermes for m in mods)
+    assert conv.convert_messages._nano_hermes and ctl.finish._nano_hermes

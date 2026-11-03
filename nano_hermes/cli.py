@@ -18,6 +18,7 @@ away and the ``nanobot`` command picks us up via ``pip`` metadata.
 """
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import logging
 from typing import Any
@@ -78,49 +79,53 @@ def _keep_injected_system(convert: Any) -> Any:
     return convert_messages
 
 
-def _drop_injected_from_state(build: Any) -> Any:
-    """Wrap ``build_responses_state`` so injections are not stored.
+def _drop_injected_at_finish(finish: Any) -> Any:
+    """Wrap ``ProviderConversationStateController.finish``.
 
-    The state is replayed on every later turn; nanobot itself never puts a
-    system item in ``input`` (its prompt is ``instructions``), so any there are
-    this hook's per-run injections.
+    Its result is the state nanobot stores and replays on every later turn.
+    nanobot itself never puts a system item in ``input`` (its prompt is
+    ``instructions``), so any there are this hook's per-run injections:
+    stripped from the stored state only, so they stay for the whole run.
     """
-    def build_responses_state(*args, input_items, **kwargs):  # type: ignore[no-untyped-def]
-        input_items = [
-            it for it in input_items
-            if not (it.get("type") in (None, "message") and it.get("role") == "system")
-        ]
-        return build(*args, input_items=input_items, **kwargs)
+    def wrapped(self, messages):  # type: ignore[no-untyped-def]
+        state = finish(self, messages)
+        items = state.payload.get("items") if state is not None else None
+        if isinstance(items, list):
+            kept = [
+                it for it in items
+                if not (isinstance(it, dict) and it.get("type") in (None, "message")
+                        and it.get("role") == "system")
+            ]
+            if len(kept) != len(items):
+                state = dataclasses.replace(state, payload={**state.payload, "items": kept})
+                self._state = state
+        return state
 
-    build_responses_state._nano_hermes = True  # type: ignore[attr-defined]
-    return build_responses_state
+    wrapped._nano_hermes = True  # type: ignore[attr-defined]
+    return wrapped
 
 
 def _patch_responses() -> None:
+    """Install both wrappers once (no-op on nanobot without the Responses path)."""
     import importlib
+    import sys
 
     try:
-        state_mod = importlib.import_module("nanobot.providers.openai_responses.state")
+        conv = importlib.import_module("nanobot.providers.openai_responses.converters")
+        cs = importlib.import_module("nanobot.providers.conversation_state")
     except ImportError:
-        return  # nanobot before the Responses path
-    if getattr(state_mod.convert_messages, "_nano_hermes", False):
-        return  # already patched
-    state_mod.convert_messages = _keep_injected_system(state_mod.convert_messages)
-    # The state module itself is a caller on HEAD (attach_responses_state);
-    # 0.3.5 providers import the function by name.
-    for name in (
-        "nanobot.providers.openai_responses.state",
-        "nanobot.providers.openai_compat_provider",
-        "nanobot.providers.openai_codex_provider",
-        "nanobot.providers.azure_openai_provider",
-        "nanobot.providers.openai_responses.parsing",
-    ):
-        try:
-            mod = importlib.import_module(name)
-        except ImportError:
-            continue
-        if hasattr(mod, "build_responses_state"):
-            mod.build_responses_state = _drop_injected_from_state(mod.build_responses_state)
+        return
+    original = conv.convert_messages
+    if getattr(original, "_nano_hermes", False):
+        return
+    wrapped = _keep_injected_system(original)
+    # Every module that imported it by name (state, the package, xAI, ...);
+    # one imported later reads the patched converters module.
+    for mod in list(sys.modules.values()):
+        if getattr(mod, "__dict__", {}).get("convert_messages") is original:
+            mod.convert_messages = wrapped
+    ctl = cs.ProviderConversationStateController
+    ctl.finish = _drop_injected_at_finish(ctl.finish)
 
 
 def _patch_agent_loop() -> None:
@@ -173,9 +178,6 @@ def _patch_agent_loop() -> None:
             return await original_request_model(self, spec, messages, hook, context, *args, **kwargs)
 
         AgentRunner._request_model = patched_request_model  # type: ignore[method-assign]
-
-    # --- Patch 3: injections on the Responses API path (see helpers) ---
-    _patch_responses()
 
     _PATCHED = True
 
