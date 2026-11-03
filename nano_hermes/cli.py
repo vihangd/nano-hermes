@@ -39,6 +39,90 @@ def _find_hermes_hook(hook: Any) -> Any | None:
     return None
 
 
+# Responses API (nanobot 0.3.5+: OpenAI, Azure, Codex, and models a provider
+# lists in ``responses_models`` — deepseek-v4-flash/pro among them).
+_INJECTION_SENTINEL = "\x00nano-hermes-injection-{}\x00"
+
+
+def _keep_injected_system(convert: Any) -> Any:
+    """Wrap nanobot's Chat→Responses ``convert_messages``.
+
+    It folds every system message into ``instructions`` and keeps only the
+    last, so a hook injection replaced nanobot's whole system prompt. The
+    leading system message stays the instructions; later ones go in place as
+    system input items.
+    """
+    def convert_messages(messages, *args, **kwargs):  # type: ignore[no-untyped-def]
+        # ponytail: "not first" = injected; nanobot builds one leading system
+        # message. A resumed delta never starts with an injection (the staged
+        # user message comes first).
+        texts: dict[str, str] = {}
+        swapped = []
+        for i, m in enumerate(messages):
+            if i and m.get("role") == "system" and isinstance(m.get("content"), str):
+                token = _INJECTION_SENTINEL.format(i)
+                texts[token] = m["content"]
+                m = {"role": "user", "content": token}
+            swapped.append(m)
+        instructions, items = convert(swapped, *args, **kwargs)
+        for item in items:
+            content = item.get("content")
+            if item.get("role") == "user" and isinstance(content, list) and len(content) == 1:
+                text = texts.get(content[0].get("text"))
+                if text is not None:
+                    item["role"] = "system"
+                    content[0]["text"] = text
+        return instructions, items
+
+    convert_messages._nano_hermes = True  # type: ignore[attr-defined]
+    return convert_messages
+
+
+def _drop_injected_from_state(build: Any) -> Any:
+    """Wrap ``build_responses_state`` so injections are not stored.
+
+    The state is replayed on every later turn; nanobot itself never puts a
+    system item in ``input`` (its prompt is ``instructions``), so any there are
+    this hook's per-run injections.
+    """
+    def build_responses_state(*args, input_items, **kwargs):  # type: ignore[no-untyped-def]
+        input_items = [
+            it for it in input_items
+            if not (it.get("type") in (None, "message") and it.get("role") == "system")
+        ]
+        return build(*args, input_items=input_items, **kwargs)
+
+    build_responses_state._nano_hermes = True  # type: ignore[attr-defined]
+    return build_responses_state
+
+
+def _patch_responses() -> None:
+    import importlib
+
+    try:
+        state_mod = importlib.import_module("nanobot.providers.openai_responses.state")
+    except ImportError:
+        return  # nanobot before the Responses path
+    if getattr(state_mod.convert_messages, "_nano_hermes", False):
+        return  # already patched
+    state_mod.convert_messages = _keep_injected_system(state_mod.convert_messages)
+    # The state module itself is a caller on HEAD (attach_responses_state);
+    # 0.3.5 providers import the function by name.
+    for name in (
+        "nanobot.providers.openai_responses.state",
+        "nanobot.providers.openai_compat_provider",
+        "nanobot.providers.openai_codex_provider",
+        "nanobot.providers.azure_openai_provider",
+        "nanobot.providers.openai_responses.parsing",
+    ):
+        try:
+            mod = importlib.import_module(name)
+        except ImportError:
+            continue
+        if hasattr(mod, "build_responses_state"):
+            mod.build_responses_state = _drop_injected_from_state(mod.build_responses_state)
+
+
 def _patch_agent_loop() -> None:
     """Idempotently patch ``AgentLoop.__init__`` and ``AgentRunner._request_model``."""
     global _PATCHED
@@ -89,6 +173,9 @@ def _patch_agent_loop() -> None:
             return await original_request_model(self, spec, messages, hook, context, *args, **kwargs)
 
         AgentRunner._request_model = patched_request_model  # type: ignore[method-assign]
+
+    # --- Patch 3: injections on the Responses API path (see helpers) ---
+    _patch_responses()
 
     _PATCHED = True
 
