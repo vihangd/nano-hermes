@@ -73,3 +73,39 @@ async def test_injection_reaches_model_exactly_once(tmp_path, restore_cli_patche
 
     assert rec.requests, "provider was never called"
     assert _count(rec.requests[0]) == 1
+
+
+class _SystemInjector(AgentHook):
+    def __init__(self, hermes) -> None:
+        super().__init__()
+        self._hermes = hermes
+
+    async def before_iteration(self, context) -> None:
+        if context.iteration == 0:
+            self._hermes._inject(
+                context.messages,
+                {"role": "system", "content": _MARK},
+                context.session_key or "",
+            )
+
+
+async def test_injections_are_not_saved_into_history(tmp_path, restore_cli_patches):
+    """nanobot persists the run's whole message list; an injection left in it
+    was replayed on every later turn, growing the prompt until the chat
+    compacted on every message."""
+    cli_mod._patch_agent_loop()
+    rec = _Recorder()
+    with contextlib.ExitStack() as stack:
+        sub = stack.enter_context(patch("nanobot.agent.loop.SubagentManager"))
+        sub.return_value.cancel_by_session = AsyncMock(return_value=0)
+        for sym in ("Dream", "CronService"):
+            if hasattr(_loop_mod, sym):
+                stack.enter_context(patch(f"nanobot.agent.loop.{sym}"))
+        loop = AgentLoop(bus=MessageBus(), provider=rec, workspace=tmp_path, model="test-model")
+    hermes = cli_mod._find_hermes_hook(CompositeHook(loop._extra_hooks))
+    loop._extra_hooks.append(_SystemInjector(hermes))
+
+    for i in range(3):
+        await loop.process_direct(f"hello {i}", session_key="cli:hist")
+
+    assert [_count(r) for r in rec.requests] == [1, 1, 1]
