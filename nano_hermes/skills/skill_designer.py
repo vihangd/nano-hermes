@@ -60,6 +60,13 @@ Output ONLY the SKILL.md content. Skill name must be unique and descriptive.
 """
 
 _NAME_RE = re.compile(r"^name:\s*([a-z0-9][a-z0-9_-]{0,63})\s*$", re.MULTILINE)
+_FENCE_RE = re.compile(r"^```[\w-]*\n(.*?)\n```$", re.DOTALL)
+
+
+def _unfence(text: str) -> str:
+    """The whole SKILL.md wrapped in one code fence → its contents."""
+    m = _FENCE_RE.match(text)
+    return m.group(1).strip() if m else text
 
 # ---------------------------------------------------------------------------
 # Clustering helper
@@ -186,7 +193,7 @@ async def run_skill_designer(hook: "NanoHermesHook") -> list[str]:
                 if err.should_abort:
                     raise EvolutionAbortError(err)
                 continue
-            body = (resp.content or "").strip()
+            body = _unfence((resp.content or "").replace("\r\n", "\n").strip())
         except EvolutionAbortError:
             raise
         except Exception:
@@ -217,7 +224,6 @@ async def run_skill_designer(hook: "NanoHermesHook") -> list[str]:
         fm = _FRONTMATTER_RE.match(body)
         if fm:
             body = body[fm.end():].strip()
-
 
         # Write-approval gate
         from ..governance import write_approval as wa  # noqa: PLC0415

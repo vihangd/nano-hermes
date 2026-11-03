@@ -165,13 +165,18 @@ class TestRunSkillDesignerClusterTooSmall:
 
 
 class TestRunSkillDesignerProposal:
-    def test_proposes_skill_for_eligible_cluster(self, tmp_path):
+    @pytest.mark.parametrize("wrap", [
+        lambda md: md,
+        lambda md: f"```markdown\n{md}\n```",  # fenced
+        lambda md: md.replace("\n", "\r\n"),  # CRLF
+    ])
+    def test_proposes_skill_for_eligible_cluster(self, tmp_path, wrap):
         hook = _hook(tmp_path, {"skill_designer_min_cluster_size": 2})
         e = _vec(0)
         _seed_trajectory(hook, task="task A", outcome="fail", embedding=e)
         _seed_trajectory(hook, task="task B", outcome="fail", embedding=e)
 
-        mock_resp = _make_resp(VALID_SKILL_MD)
+        mock_resp = _make_resp(wrap(VALID_SKILL_MD))
         with patch.object(
             hook._loop.provider, "chat_with_retry", AsyncMock(return_value=mock_resp)
         ):
