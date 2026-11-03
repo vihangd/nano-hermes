@@ -247,13 +247,13 @@ class ReflectionCoordinator:
         rows = self._db.execute(
             "SELECT id, content FROM reflections "
             "WHERE session_id = ? AND id > ? "
-            "ORDER BY id "
+            "ORDER BY id DESC "
             "LIMIT ?",
             (session_id, last_seen, limit),
         ).fetchall()
         if not rows:
             return []
-        rows = [(int(r[0]), r[1]) for r in rows]
+        rows = [(int(r[0]), r[1]) for r in reversed(rows)]  # newest N, oldest first
         self._last_injected_reflection_id[session_id] = max(r[0] for r in rows)
         for rid, content in rows:
             st.injected_reflection_ids.add(rid)
@@ -269,6 +269,17 @@ class ReflectionCoordinator:
     # ------------------------------------------------------------------
     # Session boundary
     # ------------------------------------------------------------------
+
+    def rewind_injections(self, session_id: int | None, key: str | None = None) -> None:
+        """Start a run's reflection delivery over.
+
+        Injections last one run (the hook keeps them out of saved history), so
+        the watermarks that stop re-delivery hold only within a run; reset at
+        each run's start, this session's reflections reach every turn.
+        """
+        if session_id is not None:
+            self._last_injected_reflection_id.pop(session_id, None)
+        self._conv(key).last_injected_global_reflection_id = 0
 
     def on_new_session(self, completed_session_id: int, key: str | None = None) -> None:
         """Handle a completed session: prune watermark dict and reset global watermark.

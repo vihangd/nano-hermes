@@ -116,6 +116,27 @@ class TestGetSessionInjections:
         coord.get_session_injections(session_id)  # sets watermark
         assert coord.get_session_injections(session_id) == []  # no new content
 
+    def test_rewind_redelivers_newest_on_next_run(
+        self, hook, coord: ReflectionCoordinator
+    ) -> None:
+        """Injections last one run, so each run re-delivers the newest N."""
+        session_id = hook.db.execute(
+            "INSERT INTO sessions (session_key, started_at) VALUES (?, ?)",
+            ("test:rw", time.time()),
+        ).lastrowid
+        limit = hook.config.reflection.recent_limit
+        for i in range(limit + 2):
+            hook.db.execute(
+                "INSERT INTO reflections (session_id, content, created_at) VALUES (?, ?, ?)",
+                (session_id, f"reflection-{i}", time.time()),
+            )
+        hook.db.commit()
+
+        coord.get_session_injections(session_id)
+        coord.rewind_injections(session_id)
+        content = coord.get_session_injections(session_id)[0]["content"]
+        assert "reflection-0" not in content and f"reflection-{limit + 1}" in content
+
     def test_returns_empty_for_none_session_id(
         self, coord: ReflectionCoordinator
     ) -> None:

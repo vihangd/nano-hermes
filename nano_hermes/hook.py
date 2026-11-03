@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextvars import ContextVar
 import sqlite3
 from typing import TYPE_CHECKING
 
@@ -46,6 +47,12 @@ log = logging.getLogger(__name__)
 
 # Meta-KV key tracking the last full VACUUM, for the purge cooldown gate.
 _META_LAST_VACUUM = "vacuum.last_run_at"
+# This run's live message list and what _inject added to it. A context
+# variable: nanobot awaits every hook of a run inline in the run's task, so it
+# is per-run with no session-key bookkeeping and dies with the task.
+_RUN_INJECTIONS: ContextVar[tuple[list, list[dict]] | None] = ContextVar(
+    "nano_hermes_run_injections", default=None
+)
 # Re-export for backward compatibility with any code that imports from here.
 from .coordinator.reflection import _NUDGE_TEXT  # noqa: F401, E402
 
@@ -119,8 +126,6 @@ class NanoHermesHook(AgentHook):
 
         # Injection timing: system messages queued for current iteration's model call.
         self._pending_injections: list[dict] = []
-        # session key → (the run's live message list, messages injected into it)
-        self._run_injections: dict[str, tuple[list, list[dict]]] = {}
 
         # Background purge task handle (retained so tests can await it).
         self._purge_task: asyncio.Task | None = None
@@ -302,30 +307,37 @@ class NanoHermesHook(AgentHook):
     # Injection timing mechanism (unchanged)
     # ------------------------------------------------------------------
 
-    def _inject(self, messages: list, msg: dict, key: str = "") -> None:
+    def _inject(self, messages: list, msg: dict) -> None:
         """Append msg to canonical messages and queue it for this iteration.
 
-        Remembered per conversation so the run's end can take it back out:
-        nanobot persists the run's whole message list, so an injection left in
-        it is replayed from history on every later turn — recall, nudges and
-        lessons piling up until the chat compacts on every message.
+        Remembered for the run's end: nanobot persists the run's whole message
+        list, so an injection left in it is replayed from history on every
+        later turn — recall, nudges and lessons piling up until the chat
+        compacts on every message.
         """
+        msg = dict(msg)  # blanked at run end: never a caller's shared dict
         messages.append(msg)
         self._pending_injections.append(msg)
-        live, injected = self._run_injections.get(key, (messages, []))
-        if live is not messages:  # a new run's list: the old one was released
-            injected = []
-        injected.append(msg)
-        self._run_injections[key] = (messages, injected)
+        run = _RUN_INJECTIONS.get()
+        if run is None or run[0] is not messages:
+            run = (messages, [])
+            _RUN_INJECTIONS.set(run)
+        run[1].append(msg)
 
-    def _release_injections(self, key: str) -> None:
-        """Remove this run's injections from its live message list before
-        nanobot saves the turn (on_finally / on_error run first)."""
-        live, injected = self._run_injections.pop(key, (None, []))
-        if live is None or not injected:
-            return
-        ids = {id(m) for m in injected}
-        live[:] = [m for m in live if id(m) not in ids]
+    def _release_injections(self) -> None:
+        """Keep this run's injections out of the saved turn (on_finally /
+        on_error run before nanobot saves it).
+
+        Blanked in place, not removed: nanobot holds raw indices into the list
+        (the compaction summary's transcript boundary), and ``_save_turn``
+        skips an assistant message with no content and no tool calls on
+        0.2.2..HEAD.
+        """
+        run = _RUN_INJECTIONS.get()
+        _RUN_INJECTIONS.set(None)
+        for msg in run[1] if run else ():
+            msg.clear()
+            msg.update(role="assistant", content="")
 
     def drain_injections(self) -> list[dict]:
         """Return and clear pending injections for the current iteration."""
@@ -420,10 +432,11 @@ class NanoHermesHook(AgentHook):
 
         # Inject matching principles on iteration 0 (pure FTS5, always fast).
         if context.iteration == 0:
+            self._reflection_coord.rewind_injections(session_id, key)
             for msg in self._reflection_coord.get_principle_injections(
                 context.messages, key=key
             ):
-                self._inject(context.messages, msg, key)
+                self._inject(context.messages, msg)
 
         self._count_user_turns(context)
 
@@ -433,7 +446,7 @@ class NanoHermesHook(AgentHook):
                 context.messages
             )
             if msg:
-                self._inject(context.messages, msg, key)
+                self._inject(context.messages, msg)
 
         # Inject cross-session reflections on iteration 0 when global scope is enabled.
         if (
@@ -444,31 +457,31 @@ class NanoHermesHook(AgentHook):
             for msg in await self._reflection_coord.get_global_injections(
                 context.messages, session_id, key=key
             ):
-                self._inject(context.messages, msg, key)
+                self._inject(context.messages, msg)
 
         # Inject new session-scoped reflections written since last iteration.
         for msg in self._reflection_coord.get_session_injections(session_id, key):
-            self._inject(context.messages, msg, key)
+            self._inject(context.messages, msg)
 
         # Deliver Reflexion nudge if salience crossed threshold last iteration.
         nudge = self._reflection_coord.take_nudge(key)
         if nudge:
-            self._inject(context.messages, nudge, key)
+            self._inject(context.messages, nudge)
 
         # Deliver this conversation's memory-save cadence nudge if armed.
         save_nudge = self._reflection_coord.take_save_nudge(key)
         if save_nudge:
-            self._inject(context.messages, save_nudge, key)
+            self._inject(context.messages, save_nudge)
 
         # Deliver goal-completion nudge if a /goal wrapped up last iteration.
         goal_nudge = self._reflection_coord.take_goal_completion(key)
         if goal_nudge:
-            self._inject(context.messages, goal_nudge, key)
+            self._inject(context.messages, goal_nudge)
 
         # Deliver queued skill-quality reflection suggestions.
         skill_suggestions = self._reflection_coord.take_skill_suggestions(key)
         if skill_suggestions:
-            self._inject(context.messages, skill_suggestions, key)
+            self._inject(context.messages, skill_suggestions)
 
         # Dynamic Cheatsheet: inject top-k relevant past lessons on iteration 0.
         if context.iteration == 0 and getattr(
@@ -490,7 +503,7 @@ class NanoHermesHook(AgentHook):
                         )
                     msg = build_injection_message([text for _, text, _ in lessons])
                     if msg:
-                        self._inject(context.messages, msg, key)
+                        self._inject(context.messages, msg)
             except Exception:
                 log.debug("cheatsheet: retrieval injection failed", exc_info=True)
 
@@ -512,7 +525,7 @@ class NanoHermesHook(AgentHook):
         comes from nanobot's request contextvar (still bound here).
         """
         key = request_session_key()
-        self._release_injections(key or "")
+        self._release_injections()
         self.archiver.release_window(key)
         if request_persists():
             self._outcomes.record_run(
@@ -522,7 +535,7 @@ class NanoHermesHook(AgentHook):
     async def on_error(self, context: AgentRunHookContext) -> None:
         """A failed run's stop reason; nanobot 0.2.2 skips ``on_finally`` when
         the run raised, so this is the only place it is seen there."""
-        self._release_injections(request_session_key() or "")
+        self._release_injections()
         if request_persists():
             self._outcomes.record_run(request_session_key() or "", context.stop_reason or "error", [])
 
