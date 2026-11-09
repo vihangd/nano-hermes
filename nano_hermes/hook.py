@@ -71,10 +71,15 @@ def _call_events(context: AgentHookContext) -> list[tuple[Any, dict]]:
     finished, so an interrupted batch would pair a call with another's event.
     """
     calls, events = context.tool_calls, context.tool_events
-    if len(calls) != len(events):
-        return []
-    return [(tc, ev) for tc, ev in zip(calls, events)
-            if ev.get("name", getattr(tc, "name", None)) == getattr(tc, "name", None)]
+    if len(calls) == len(events):
+        return [(tc, ev) for tc, ev in zip(calls, events)
+                if ev.get("name", getattr(tc, "name", None)) == getattr(tc, "name", None)]
+    # Interrupted batch: an event pairs with the one call of its name, if unique.
+    by_name: dict[str, list] = {}
+    for tc in calls:
+        by_name.setdefault(getattr(tc, "name", None), []).append(tc)
+    return [(by_name[ev["name"]][0], ev) for ev in events
+            if len(by_name.get(ev.get("name"), ())) == 1]
 
 
 class NanoHermesHook(AgentHook):
@@ -672,10 +677,16 @@ class NanoHermesHook(AgentHook):
                     continue  # this hook's own injections ride at the end
                 if role != "user":
                     break
-                fresh += 1
+                if not (_extract_text(m) or "").startswith(_GOAL_CONTINUE):
+                    fresh += 1
             if fresh:
+                # 0.4.1 saves in-run /goal continuations into history.
+                goal_turns = sum(
+                    1 for m in msgs if m.get("role") == "user"
+                    and (_extract_text(m) or "").startswith(_GOAL_CONTINUE)
+                )
                 self._reflection_coord.observe_user_turn(
-                    turn_key, window_user_turns=users, turns=fresh
+                    turn_key, window_user_turns=users - goal_turns, turns=fresh
                 )
                 self._outcomes.record_user_messages(turn_key, trailing_user_texts(msgs))
                 self._fresh_user_turn.add(turn_key)

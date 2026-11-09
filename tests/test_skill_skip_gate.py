@@ -11,7 +11,7 @@ import yaml
 import nano_hermes
 from conftest import _make_loop
 from nano_hermes.embedding.chain import AllProvidersFailed
-from nano_hermes.skills.indexer import SkillIndexer, _content_text, _split_skip
+from nano_hermes.skills.indexer import SkillIndexer, _split_skip
 
 _TOPICS = ("spreadsheet", "shell", "email")
 
@@ -64,6 +64,8 @@ def _indexer(tmp_path, skills: dict[str, str], seen: list, down=False):
     # Only the closing sentence: an earlier "not for" is description.
     ("Not for the faint of heart. Builds reports.", ("Not for the faint of heart. Builds reports.", None)),
     ("Does X. Not for Y. Triggers: foo.", ("Does X. Not for Y. Triggers: foo.", None)),
+    ("Build web apps. Not for Node.js or Python 2.7 projects.",
+     ("Build web apps.", "Node.js or Python 2.7 projects")),
 ])
 def test_split_skip(desc, split):
     assert _split_skip(desc) == split
@@ -78,7 +80,6 @@ def test_clause_is_valid_yaml_and_kept_by_nanobot(tmp_path):
     assert yaml.safe_load(f"description: {desc}") == {"description": desc}
     meta = SkillsLoader(tmp_path).get_skill_metadata("report")
     assert meta and meta["description"] == desc
-    assert _content_text("report", desc) == "report: Make spreadsheet reports."
 
 
 async def test_query_matching_the_exclusion_is_dropped(tmp_path):
@@ -108,3 +109,11 @@ async def test_unchanged_skill_is_not_reembedded(tmp_path):
     n = len(seen)
     await idx.refresh()
     assert len(seen) == n
+
+
+async def test_skip_vec_of_other_dims_is_ignored(tmp_path):
+    idx = _indexer(tmp_path, {"report": "Spreadsheets. Not for email."}, [])
+    await idx.search("email")
+    idx._db.execute("UPDATE skill_stats SET skip_vec = ?",
+                    (np.ones(8, dtype=np.float32).tobytes(),))
+    assert [h.name for h in await idx.search("email")] == ["report"]

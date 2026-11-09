@@ -66,7 +66,10 @@ class SkillHit:
 # "Not for: x" is invalid YAML and nanobot's loader drops the description).
 # (Skill-V, arXiv:2610.11781: correct-skill precision falls from 29.6% to 3.3%
 # as the pool grows from 5 to 100 skills, arXiv:2608.14036.)
-_SKIP_RE = re.compile(r"(?:^|(?<=[.!?])\s+)Not for\b:?\s*([^.!?\n]+)[.!?]?\s*$", re.IGNORECASE)
+_SKIP_START_RE = re.compile(r"(?:^|(?<=[.!?])\s+)Not for\b:?\s*", re.IGNORECASE)
+# A later sentence ends the clause before the end: "Not for Y. Triggers: foo."
+# ponytail: "e.g. Yaml" reads as a new sentence too; the prompts ask for one.
+_NEXT_SENTENCE_RE = re.compile(r"[.!?]\s+[A-Z]")
 # A hit is dropped when the query sits this much closer to its exclusion
 # than to its description (cosine similarity).
 # ponytail: fixed margin; tune against real skill_search logs.
@@ -75,15 +78,19 @@ _SKIP_MARGIN = 0.05
 
 def _split_skip(description: str) -> tuple[str, str | None]:
     """``(description without its "Not for" clause, the clause or None)``."""
-    m = _SKIP_RE.search(description)
-    if not m:
+    starts = list(_SKIP_START_RE.finditer(description))
+    if not starts:
         return description, None
-    return description[: m.start()].rstrip(), m.group(1).strip()
+    m = starts[-1]
+    clause = description[m.end():].strip().rstrip(".!?").strip()
+    if not clause or "\n" in clause or _NEXT_SENTENCE_RE.search(clause):
+        return description, None
+    return description[: m.start()].rstrip(), clause
 
 
 def _content_text(name: str, description: str) -> str:
-    # The exclusion stays out: its words would pull the excluded case closer.
-    description = _split_skip(description)[0]
+    """Embedded text; pass the description without its "Not for" clause,
+    whose words would pull the excluded case closer."""
     return f"{name}: {description}" if description else name
 
 
@@ -251,9 +258,8 @@ class SkillIndexer:
         skips: list[str | None] = []
         for entry in entries:
             name = entry["name"]
-            description = description_by_name.get(name, "")
+            description, skip = _split_skip(description_by_name.get(name, ""))
             text = _content_text(name, description)
-            skip = _split_skip(description)[1]
             digest = _hash_content(text if skip is None else f"{text}\0{skip}")
             if hash_by_name.get(name) == digest:
                 continue
@@ -400,8 +406,11 @@ class SkillIndexer:
 
         # Widen the candidate pool when re-ranking so the top-k after
         # adjustment isn't constrained by the pre-rerank ordering.
-        # Also widened for the skip gate, which drops hits after the fetch.
-        fetch_k = k * 3
+        # The skip gate drops hits after the fetch: widen so they backfill.
+        gated = self._db.execute(
+            "SELECT 1 FROM skill_stats WHERE skip_vec IS NOT NULL LIMIT 1"
+        ).fetchone() is not None
+        fetch_k = k * 3 if (ranking_mode != "off" or multi_view or gated) else k
         vec_blob = query_vec.astype(np.float32).tobytes()
         rows = self._db.execute(
             "SELECT skill_id, distance FROM skill_vec "
@@ -421,6 +430,7 @@ class SkillIndexer:
         id_to_stats = {r[0]: (r[2], r[3]) for r in stat_rows}  # id → (use_count, success_count)
         id_to_skip = {r[0]: np.frombuffer(r[4], dtype=np.float32) for r in stat_rows if r[4]}
         query_f32 = query_vec.astype(np.float32)
+        query_norm = float(np.linalg.norm(query_f32)) or 1.0
 
         # UCB1: fetch total pull count across all active skills once.
         total_uses: int = 0
@@ -437,8 +447,12 @@ class SkillIndexer:
             if not name:
                 continue
             skip = id_to_skip.get(skill_id)
-            # Unit vectors: dot = cosine similarity; vec0 distance = 1 - cosine.
-            if skip is not None and float(np.dot(query_f32, skip)) > 1.0 - distance + _SKIP_MARGIN:
+            # vec0 distance is 1 - cosine; a skip_vec from older target_dims is ignored.
+            if skip is not None and skip.shape == query_f32.shape and (
+                float(np.dot(query_f32, skip))
+                / (query_norm * (float(np.linalg.norm(skip)) or 1.0))
+                > 1.0 - distance + _SKIP_MARGIN
+            ):
                 log.debug("skill_search: %s skipped — query matches its 'Not for'", name)
                 continue
             effective_distance = float(distance)

@@ -241,6 +241,32 @@ async def test_in_run_goal_continuation_is_not_a_user_turn(tmp_path):
     assert hook._reflection_coord._conv("k").turns_since_save == 1
 
 
+async def test_interrupted_batch_keeps_a_uniquely_named_event(tmp_path):
+    hook = _hook(tmp_path)
+    msgs: list = []
+    await _turn(hook, msgs, _user("long task"), "k")
+    calls = [SimpleNamespace(name="update_goal", arguments={"action": "complete"}),
+             SimpleNamespace(name="web_fetch", arguments={})]
+    await hook.after_iteration(AgentHookContext(
+        iteration=0, messages=msgs, session_key="k",
+        tool_calls=calls, tool_events=[{"name": "update_goal", "status": "ok"}],
+    ))
+    assert hook._outcomes._state("k").goal == "complete"
+
+
+async def test_saved_goal_continuation_is_not_a_user_turn_next_run(tmp_path):
+    """0.4.1 saves the continuation into history; a stopped run leaves it
+    trailing before the user's next message."""
+    hook = _hook(tmp_path)
+    first = [_user("start the long task")]
+    await hook.before_iteration(AgentHookContext(iteration=0, messages=first, session_key="k"))
+    msgs = first + [{"role": "assistant", "content": "working"},
+                    {"role": "user", "content": "You have an active sustained goal:\n\nship it"},
+                    _user("status?")]
+    await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs, session_key="k"))
+    assert hook._reflection_coord._conv("k").turns_since_save == 2
+
+
 async def test_mid_turn_image_only_message_does_not_crash(tmp_path):
     hook = _hook(tmp_path)
     msgs = [_user("look at this")]

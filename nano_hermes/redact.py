@@ -61,12 +61,13 @@ _JSON_FIELD_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Authorization / Proxy-Authorization, any scheme (hermes f2a510b259). A
-# credential is 8+ chars with a digit or one of = _ - . / + — prose
-# ("Authorization: required", "... Basic auth") stays intact.
+# Authorization / Proxy-Authorization (hermes f2a510b259): after a known
+# scheme any 8+ char credential; bare, it needs a digit or one of = _ - . / +
+# so prose ("Authorization: required", "... Basic auth") stays intact.
 _AUTH_HEADER_RE = re.compile(
-    r"((?:Proxy-)?Authorization:\s*(?:[A-Za-z][\w.+-]*\s+)?)"
-    r"(?=[^\s\"']*[\d=_\-./+])([^\s\"']{8,})",
+    r"((?:Proxy-)?Authorization:\s*"
+    r"(?:(?:Bearer|Basic|Digest|Token|Bot|Negotiate|NTLM|ApiKey)\s+|(?=[^\s\"']*[\d=_\-./+])))"
+    r"([^\s\"']{8,})",
     re.IGNORECASE,
 )
 
@@ -77,13 +78,17 @@ _STRUCTURAL = [
     # Scheme bounded and not preceded by a scheme char: an unbounded scheme
     # restarted at every "-" of a long run — "a-" * 50_000 took 14 s.
     ("url_userinfo", re.compile(
-        r"((?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}://[^:\s/@]{0,256}:)([^@\s/]{1,256})(?=@)", re.I
+        # The password may hold "@": it runs to the last "@" before the host.
+        r"((?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}://[^:\s/@]{0,256}:)"
+        r"([^\s/]{1,256}?)(?=@[^@\s/]+(?:[/\s:?#]|$))", re.I
     )),
     ("cookie", re.compile(r"((?:Set-)?Cookie:[ \t]*)([^\s=;]+=[^\r\n]+)", re.I)),
     ("connection_string", re.compile(r"(;\s*(?:Password|Pwd)\s*=\s*)([^;\s\"']+)", re.I)),
 ]
+# A truncated block (``head -c 600 id_rsa``) has no END: mask its base64 body.
 _PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
+    r"-----BEGIN[A-Z ]*PRIVATE KEY-----"
+    r"(?:[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----|[A-Za-z0-9+/=\s]*)"
 )
 
 # Telegram bot token: optional 'bot' prefix + numeric id + ':' + 30+ char token.
@@ -158,6 +163,8 @@ def redact(text: str) -> RedactionResult:
     for kind, pattern in _STRUCTURAL:
         def _struct_sub(m: re.Match[str], _kind: str = kind) -> str:
             nonlocal count
+            if "█" in m.group(2):  # already masked by an earlier pass
+                return m.group(0)
             count += 1
             kinds.add(_kind)
             return f"{m.group(1)}{_mask(m.group(2))}"

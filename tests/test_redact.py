@@ -225,10 +225,16 @@ class TestRedactionResult:
     ("Server=db;Database=x;Password=Tr0ub4dor&3;", "Tr0ub4dor&3", "connection_string"),
     ("-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----",
      "MIIEow", "private_key"),
+    ("Authorization: Bearer abcdefghijklmnopqrstuvwxyz", "abcdefghijklmnop", "auth_header"),
+    ("head -c 600 id_rsa\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAx",
+     "MIIEpAIBAAKCAQEAx", "private_key"),
+    ("postgres://user:p@ss@host/db", "ss@host", "url_userinfo"),
 ])
 def test_structural_secret_is_masked(text, secret, kind):
     r = redact(text)
     assert secret not in r.text and kind in r.kinds and r.count == 1
+    if "p@ss" in text:  # the password runs to the last "@" before the host
+        assert r.text.endswith("@host/db") and "@ss" not in r.text
 
 
 @pytest.mark.parametrize("text", [
@@ -252,3 +258,13 @@ def test_no_false_positive_or_slow_scan(text):
     start = time.perf_counter()
     assert redact(text).text == text
     assert time.perf_counter() - start < 0.5
+
+
+@pytest.mark.parametrize("text", ["Cookie: TOKEN=abc123", "Server=x;PASSWORD=hunter2;"])
+def test_one_secret_counts_once(text):
+    assert redact(text).count == 1
+
+
+def test_scoped_npm_url_is_untouched():
+    text = "https://registry.npmjs.org:443/@scope/pkg"
+    assert redact(text).text == text
