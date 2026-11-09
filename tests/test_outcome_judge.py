@@ -26,8 +26,11 @@ def _jev_transport(responses: list, seen: list):
     """httpx transport answering with *responses* in order, recording requests."""
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        status, body = responses.pop(0)
-        return httpx.Response(status, json=body)
+        nxt = responses.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        status, body = nxt[:2]
+        return httpx.Response(status, json=body, headers=nxt[2] if len(nxt) > 2 else None)
     return httpx.MockTransport(handler)
 
 
@@ -204,3 +207,24 @@ async def test_refused_llm_judge_gives_no_verdict(tmp_path, monkeypatch):
         ))
     )
     assert await oj.judge(hook, [{"role": "user", "content": "x"}]) is None
+
+
+async def test_jev_timeouts_exhaust_retries_then_fall_back_to_llm(tmp_path, jev):
+    responses, seen = jev
+    responses.extend([httpx.ReadTimeout("slow")] * (oj._RETRIES + 1))
+    hook = _hook(tmp_path)
+    hook._loop.provider = SimpleNamespace(
+        chat_with_retry=AsyncMock(return_value=SimpleNamespace(
+            content="SUCCESS", finish_reason="stop", error=None
+        ))
+    )
+    result = await oj.judge(hook, [{"role": "user", "content": "x"}])
+    assert len(seen) == oj._RETRIES + 1 and result["backend"] == "llm"
+
+
+async def test_jev_honours_retry_after(tmp_path, jev):
+    responses, _ = jev
+    responses.extend([(429, {}, {"Retry-After": "7"}), (200, _answers(0.97, 0.02))])
+    result = await oj.judge(_hook(tmp_path), [{"role": "user", "content": "x"}])
+    assert result["verdict"] == "ok"
+    oj.asyncio.sleep.assert_awaited_once_with(7.0)

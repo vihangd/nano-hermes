@@ -477,3 +477,57 @@ class TestTrajectoryEmbedding:
         assert embedded == ["deploy the app"]
         rows = db.execute("SELECT trajectory_id FROM trajectories_vec").fetchall()
         assert rows == [(tid,)]
+
+
+# ---------------------------------------------------------------------------
+# Failure paths: the canonical row survives a failed embed; a failed insert
+# returns None instead of raising into the session boundary.
+# ---------------------------------------------------------------------------
+
+def _writer(tmp_path, factory):
+    from nano_hermes.session.db import open_db
+    from nano_hermes.session.trajectory import TrajectoryWriter
+
+    db = open_db(tmp_path, 512)
+    sid = db.execute("INSERT INTO sessions (session_key, started_at) VALUES ('k', 0)").lastrowid
+    return db, sid, TrajectoryWriter(db, factory)
+
+
+def _write(w, sid):
+    return w.write(session_id=sid, messages=[{"role": "user", "content": "task"}],
+                   skills_used=[], reflections=[], outcome="ok")
+
+
+class _Failing:
+    def __init__(self, exc):
+        self.exc = exc
+
+    async def __aenter__(self):
+        raise self.exc
+
+    async def __aexit__(self, *a):
+        return False
+
+
+@pytest.mark.parametrize("exc", ["providers", "crash"])
+async def test_failed_embed_keeps_the_row(tmp_path, exc):
+    from nano_hermes.embedding.chain import AllProvidersFailed
+
+    err = AllProvidersFailed([]) if exc == "providers" else RuntimeError("boom")
+    db, sid, w = _writer(tmp_path, lambda: _Failing(err))
+    tid = _write(w, sid)
+    await w.drain()
+    assert db.execute("SELECT id FROM trajectories").fetchall() == [(tid,)]
+    assert db.execute("SELECT COUNT(*) FROM trajectories_vec").fetchone()[0] == 0
+
+
+def test_write_without_event_loop_skips_the_embed(tmp_path):
+    db, sid, w = _writer(tmp_path, lambda: _Failing(RuntimeError("never called")))
+    assert _write(w, sid) is not None and not w._embed_tasks
+
+
+def test_failed_insert_returns_none(tmp_path):
+    db, sid, w = _writer(tmp_path, None)
+    db.execute("DROP TRIGGER IF EXISTS trajectories_ai")
+    db.execute("DROP TABLE trajectories")
+    assert _write(w, sid) is None

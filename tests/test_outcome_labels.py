@@ -1,6 +1,7 @@
 """Session outcome labels (session/outcome.py) and their boundary wiring."""
 from __future__ import annotations
 
+import asyncio
 import time
 from types import SimpleNamespace
 
@@ -343,3 +344,20 @@ async def test_a_recovered_model_error_does_not_fail_the_session(tmp_path):
     await _turn(hook, msgs, _user("thanks, that works"), "")
     await _turn(hook, [], _user("next"), "")
     assert _outcomes(hook) == ["ok"]
+
+
+@pytest.mark.parametrize("error, called", [("boom", True), (None, False)])
+async def test_boundary_runs_lesson_extraction_only_on_a_clean_label(tmp_path, error, called):
+    """fail → ExpeL + cheatsheet with that label; unknown → neither."""
+    from unittest.mock import AsyncMock, patch
+
+    hook = _hook(tmp_path, expel_enabled=True, skill_stats={"cheatsheet_enabled": True})
+    with patch("nano_hermes.memory.expel.extract_contrastive_insight", AsyncMock()) as expel, \
+            patch("nano_hermes.memory.cheatsheet.extract_cheatsheet_lesson", AsyncMock()) as cs:
+        await _turn(hook, [], _user("deploy the app"), "k", error=error)
+        await _turn(hook, [], _user("new task"), "k")
+        await asyncio.gather(*hook._lesson_tasks)
+    assert _outcomes(hook) == ["fail" if error else "unknown"]
+    assert expel.await_count == cs.await_count == int(called)
+    if called:
+        assert expel.await_args.args[2] == "fail" and cs.await_args.args[2] == "fail"
