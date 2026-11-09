@@ -130,10 +130,14 @@ async def test_injections_are_not_saved_into_history(tmp_path, restore_cli_patch
 async def test_injections_stay_out_of_runtime_checkpoints(tmp_path, restore_cli_patches):
     """nanobot 0.4.1 checkpoints the run's messages mid-run (restored on /stop
     or after a crash), before on_finally blanks the injections."""
-    if not hasattr(AgentLoop, "_set_runtime_checkpoint"):
-        import pytest
+    import inspect
 
-        pytest.skip("no runtime checkpoints on this nanobot")
+    import pytest
+
+    from nanobot.agent import runner
+
+    if "preceding_messages" not in inspect.getsource(runner):
+        pytest.skip("checkpoints carry no run messages before nanobot 0.4.1")
     cli_mod._patch_agent_loop()
     rec = _Recorder()
     first = True
