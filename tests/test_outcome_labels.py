@@ -241,6 +241,15 @@ async def test_in_run_goal_continuation_is_not_a_user_turn(tmp_path):
     assert hook._reflection_coord._conv("k").turns_since_save == 1
 
 
+async def test_mid_turn_image_only_message_does_not_crash(tmp_path):
+    hook = _hook(tmp_path)
+    msgs = [_user("look at this")]
+    await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs, session_key="k"))
+    msgs += [{"role": "assistant", "content": "step"},
+             {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}]
+    await hook.before_iteration(AgentHookContext(iteration=1, messages=msgs, session_key="k"))
+
+
 async def test_a_failed_skill_rating_makes_the_session_partial(tmp_path):
     hook = _hook(tmp_path)
     await _turn(hook, [], _user("use the skill"), "")

@@ -62,10 +62,11 @@ class SkillHit:
     lexical: bool = False  # ranked by BM25 because every embedder failed
 
 
-# A description's trailing exclusion, e.g. "... Not for: one-off shell commands."
+# A description's closing sentence "Not for <case>." (no colon: an unquoted
+# "Not for: x" is invalid YAML and nanobot's loader drops the description).
 # (Skill-V, arXiv:2610.11781: correct-skill precision falls from 29.6% to 3.3%
 # as the pool grows from 5 to 100 skills, arXiv:2608.14036.)
-_SKIP_RE = re.compile(r"\s*\bNot for:\s*(.+?)\.?\s*$", re.IGNORECASE | re.DOTALL)
+_SKIP_RE = re.compile(r"(?:^|(?<=[.!?])\s+)Not for\b:?\s*([^.!?\n]+)[.!?]?\s*$", re.IGNORECASE)
 # A hit is dropped when the query sits this much closer to its exclusion
 # than to its description (cosine similarity).
 # ponytail: fixed margin; tune against real skill_search logs.
@@ -73,7 +74,7 @@ _SKIP_MARGIN = 0.05
 
 
 def _split_skip(description: str) -> tuple[str, str | None]:
-    """``(description without its "Not for:" clause, the clause or None)``."""
+    """``(description without its "Not for" clause, the clause or None)``."""
     m = _SKIP_RE.search(description)
     if not m:
         return description, None
@@ -361,7 +362,9 @@ class SkillIndexer:
             mem.execute("CREATE VIRTUAL TABLE skills USING fts5(name, description)")
             mem.executemany(
                 "INSERT INTO skills VALUES (?, ?)",
-                [(n, d) for n, d in description_by_name.items() if n not in deprecated],
+                # Without its "Not for" clause: BM25 would match the exclusion.
+                [(n, _split_skip(d)[0]) for n, d in description_by_name.items()
+                 if n not in deprecated],
             )
             rows = _fts_rows(
                 mem,
@@ -397,7 +400,8 @@ class SkillIndexer:
 
         # Widen the candidate pool when re-ranking so the top-k after
         # adjustment isn't constrained by the pre-rerank ordering.
-        fetch_k = k * 3 if (ranking_mode != "off" or multi_view) else k
+        # Also widened for the skip gate, which drops hits after the fetch.
+        fetch_k = k * 3
         vec_blob = query_vec.astype(np.float32).tobytes()
         rows = self._db.execute(
             "SELECT skill_id, distance FROM skill_vec "
@@ -435,7 +439,7 @@ class SkillIndexer:
             skip = id_to_skip.get(skill_id)
             # Unit vectors: dot = cosine similarity; vec0 distance = 1 - cosine.
             if skip is not None and float(np.dot(query_f32, skip)) > 1.0 - distance + _SKIP_MARGIN:
-                log.debug("skill_search: %s skipped — query matches its 'Not for:'", name)
+                log.debug("skill_search: %s skipped — query matches its 'Not for'", name)
                 continue
             effective_distance = float(distance)
             use_count, success_count = id_to_stats.get(skill_id, (0, 0))

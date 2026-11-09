@@ -239,3 +239,16 @@ def test_structural_secret_is_masked(text, secret, kind):
 ])
 def test_structural_prose_is_untouched(text):
     assert redact(text).text == text
+
+
+@pytest.mark.parametrize("text", [
+    "Authorization: required for access",
+    "a-" * 50_000,  # an unbounded URL-scheme regex took 14 s here
+    "a." * 50_000,
+])
+def test_no_false_positive_or_slow_scan(text):
+    import time
+
+    start = time.perf_counter()
+    assert redact(text).text == text
+    assert time.perf_counter() - start < 0.5

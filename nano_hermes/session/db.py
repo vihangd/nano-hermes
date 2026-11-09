@@ -449,7 +449,7 @@ _MIGRATIONS = [
     "ALTER TABLE trajectories ADD COLUMN outcome_source TEXT",
     "ALTER TABLE trajectories ADD COLUMN outcome_signals TEXT",
     "ALTER TABLE trajectories ADD COLUMN human_outcome TEXT",
-    # Skill "Not for:" clause embedding (skip-when gate, skills/indexer.py).
+    # Skill "Not for" clause embedding (skip-when gate, skills/indexer.py).
     "ALTER TABLE skill_stats ADD COLUMN skip_vec BLOB",
     # The old label was "ok" unless the model call itself errored — no
     # evidence of success. Every statement here re-runs while the version is

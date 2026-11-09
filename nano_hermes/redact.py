@@ -61,17 +61,24 @@ _JSON_FIELD_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Authorization / Proxy-Authorization, any scheme (hermes f2a510b259). The
-# 8-char floor keeps prose ("Authorization: Basic auth") intact.
+# Authorization / Proxy-Authorization, any scheme (hermes f2a510b259). A
+# credential is 8+ chars with a digit or one of = _ - . / + — prose
+# ("Authorization: required", "... Basic auth") stays intact.
 _AUTH_HEADER_RE = re.compile(
-    r"((?:Proxy-)?Authorization:\s*(?:[A-Za-z][\w.+-]*\s+)?)([^\s\"']{8,})", re.IGNORECASE
+    r"((?:Proxy-)?Authorization:\s*(?:[A-Za-z][\w.+-]*\s+)?)"
+    r"(?=[^\s\"']*[\d=_\-./+])([^\s\"']{8,})",
+    re.IGNORECASE,
 )
 
 # Structural secrets masked in group 2 (hermes dc6149b22d, 2d54c978f7,
 # a9d55a3603): URL userinfo password (any scheme, never across whitespace),
 # a Cookie header's value (needs a name=value), an ADO-style "; Password=".
 _STRUCTURAL = [
-    ("url_userinfo", re.compile(r"(\b[a-z][a-z0-9+.-]*://[^:\s/@]*:)([^@\s/]+)(?=@)", re.I)),
+    # Scheme bounded and not preceded by a scheme char: an unbounded scheme
+    # restarted at every "-" of a long run — "a-" * 50_000 took 14 s.
+    ("url_userinfo", re.compile(
+        r"((?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}://[^:\s/@]{0,256}:)([^@\s/]{1,256})(?=@)", re.I
+    )),
     ("cookie", re.compile(r"((?:Set-)?Cookie:[ \t]*)([^\s=;]+=[^\r\n]+)", re.I)),
     ("connection_string", re.compile(r"(;\s*(?:Password|Pwd)\s*=\s*)([^;\s\"']+)", re.I)),
 ]

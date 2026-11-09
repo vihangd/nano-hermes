@@ -46,7 +46,7 @@ CONTEXT FROM FAILED SESSIONS (most recent first):
 Task: analyse why this skill fails on these tasks, then produce a
 rewritten SKILL.md that fixes the issues.  Keep the same markdown
 structure (# name, description block, ## Usage, ## Steps sections).
-Keep the description's closing "Not for: <case>." sentence; add one if
+Keep the description's closing "Not for <case>." sentence; add one if
 these failures show tasks the skill should not be used on.
 Output ONLY the new SKILL.md content — no preamble, no explanation.
 """

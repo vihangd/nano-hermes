@@ -684,7 +684,7 @@ class NanoHermesHook(AgentHook):
             if seen is not None and seen[0] == id(msgs) and users > seen[1]:
                 # nanobot 0.4.1 runs a /goal in one run, appending its
                 # continuation prompt as a user message: not the user's turn.
-                new = [_extract_text(m) for m in msgs if m.get("role") == "user"][seen[1]:]
+                new = [_extract_text(m) or "" for m in msgs if m.get("role") == "user"][seen[1]:]
                 new = [t for t in new if not t.startswith(_GOAL_CONTINUE)]
                 for _ in new:
                     self._reflection_coord.note_user_turn(turn_key)
