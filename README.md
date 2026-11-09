@@ -49,13 +49,13 @@ nano-hermes --help        # full nanobot help, unchanged
 
 The 1 GB / ARM Cortex-A53 / microSD profile is the bottom-end target. It works, but watch for:
 
-- **Use the 64-bit Raspberry Pi OS.** `sqlite-vec` and `tiktoken` (pulled in by nanobot) have spotty ARM32 wheels; on 32-bit you fall back to a from-source build that can OOM on 1 GB.
+- **Use the 64-bit Raspberry Pi OS.** `sqlite-vec` and `tiktoken` (pulled in by nanobot) have spotty ARM32 wheels; on 32-bit you fall back to a from-source build that can OOM on 1 GB. nanobot ≥ 0.4 ships no armv7 wheel at all: pip builds its sdist, whose build hook needs bun or npm.
 - **First install needs a build toolchain.** `readability-lxml` (nanobot dep) wants `libxml2-dev libxslt1-dev` plus `gcc`; install with `apt install build-essential libxml2-dev libxslt1-dev` before `uv tool install`.
 - **Prefer a UHS-II / U3 microSD card.** SQLite WAL plus FTS5 and vec0 do a lot of small writes; a slow card is the most common source of turn-to-turn jitter.
 - **RAM budget is tight.** Baseline (nanobot + nano-hermes hook + DB connection) is ~250-300 MB. Long `/goal` sessions with many tool calls can push past 500 MB — leave headroom for the OS. The Pi 4/5 is the better target for 24/7 use.
 - **Keep `distill_max_chunks ≤ 150`.** The hub-cluster pass is O(N²); the default cap is tuned for this hardware.
-- **Use nanobot ≥ 0.3.5.** 0.2.2's Telegram streaming can send a reply twice (once quoting an older message); fixed upstream in 0.3.5. Reinstalls must repeat `--with nanobot-ai==<ver>`, or nanobot is dropped from the tool env.
-- **Skill count is the main per-turn cost.** nanobot re-parses every SKILL.md's frontmatter while building each system prompt (≈26 ms/turn on desktop with the stock catalog, est. ~0.5 s on a 3B+); prune skills you don't use. nano-hermes' own hook adds ~0.5 ms/turn on desktop (≈3 ms with 8 tool calls).
+- **Use nanobot ≥ 0.3.5** (tested through 0.4.1). 0.2.2's Telegram streaming can send a reply twice (once quoting an older message); fixed upstream in 0.3.5. 0.4.x adds `cryptography`/`sigstore` (~11 MB on disk, ~2 MB RSS, +18% nanobot import time measured on desktop). Reinstalls must repeat `--with nanobot-ai==<ver>`, or nanobot is dropped from the tool env. Installing nanobot from git runs its WebUI build unless `NANOBOT_SKIP_WEBUI_BUILD=1` is set.
+- **Skill count is the main per-turn cost.** nanobot re-parses every SKILL.md's frontmatter while building each system prompt (≈26 ms/turn on desktop with the stock catalog, est. ~0.5 s on a 3B+); prune skills you don't use. nano-hermes' own hook adds ~0.5 ms/turn on desktop (≈2.5 ms with 8 tool calls); measure yours with `python -m evals.bench_hook --tool-calls 8`.
 - **Maintenance.** The retention purge runs on every session start and now also `VACUUM`s when rows were actually removed, so FTS5/vec0 fragmentation stays bounded without manual intervention.
 
 ### For developing nano-hermes itself
