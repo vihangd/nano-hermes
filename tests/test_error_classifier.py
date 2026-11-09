@@ -271,3 +271,13 @@ class TestClassifyHttpStatus:
     def test_message_passed_through(self):
         r = classify_http_status(401, "token expired")
         assert r.message == "token expired"
+
+
+@pytest.mark.parametrize("finish", ["content_filter", "refusal"])
+def test_refused_reply_is_not_success(finish):
+    """A filtered reply's text is a refusal, not the output (hermes 9c1799ed1a)."""
+    from types import SimpleNamespace
+
+    err = classify_llm_response(SimpleNamespace(finish_reason=finish, content="FAIL"))
+    assert err is not None and err.reason is FailoverReason.content_policy
+    assert not err.should_abort

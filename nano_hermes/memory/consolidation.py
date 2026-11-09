@@ -156,7 +156,9 @@ async def find_hub_clusters(
 _DISTILL_PROMPT = """\
 Below are {n} representative memory chunks from a recurring theme across {n_sess} sessions.
 Distill them into a single durable semantic fact and annotate it for an A-MEM-style
-note graph. Reply with ONLY a JSON object, no preamble, no code fence:
+note graph. State only what the chunks show: a guess or suspicion in them stays
+one, written as "UNVERIFIED: <claim> — <basis>", never as settled fact.
+Reply with ONLY a JSON object, no preamble, no code fence:
 
 {{
   "fact": "<=100 words, the durable lesson learned",

@@ -15,6 +15,18 @@ from nanobot.agent.tools.base import Tool, tool_parameters
 from ..coordinator.session import NOT_PERSISTED, request_persists
 from ..redact import format_redaction_note, redact
 
+# Without it the agent saved guesses as facts: "make that shorter" became
+# "User prefers concise responses" (hermes 4a8cc6f705 / b47fe6ecc6). Covers
+# every slot — scoped to USER.md, the same guess moved to MEMORY.md.
+GROUNDING_RULE = (
+    "Save only facts grounded in this conversation — a user message or tool result "
+    "you can point to. Never infer the user's traits, skill level, role, mood or "
+    "preferences from topic, tone or tools used, and never turn a one-off request "
+    "into a standing preference unless the user marked it general ('always', 'from "
+    "now on', 'remember') or stated a standing like/dislike ('I hate X', 'stop doing "
+    "Y'). If unsure, leave it out — a wrong fact misleads every future session."
+)
+
 
 
 if TYPE_CHECKING:
@@ -88,7 +100,7 @@ class MemoryPatchTool(Tool):
 
     @property
     def description(self) -> str:
-        return (type(self).__doc__ or "").strip()
+        return f"{(type(self).__doc__ or '').strip()}\n\n{GROUNDING_RULE}"
 
     async def execute(self, **kwargs: Any) -> str:
         if not request_persists():

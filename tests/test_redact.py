@@ -212,3 +212,30 @@ class TestRedactionResult:
         a = RedactionResult(text="x", count=0, kinds=())
         b = RedactionResult(text="x", count=0, kinds=())
         assert a == b
+
+
+# --- structural secrets (hermes dc6149b22d, f2a510b259, 2d54c978f7, a9d55a3603)
+
+@pytest.mark.parametrize("text, secret, kind", [
+    ("git remote add o https://bob:hunter2pass@github.com/x.git", "hunter2pass", "url_userinfo"),
+    ("DSN postgresql://app:s3cretPw9@db:5432/prod", "s3cretPw9", "url_userinfo"),
+    ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA==", "auth_header"),
+    ("Proxy-Authorization: Digest abcdef0123456789", "abcdef0123456789", "auth_header"),
+    ("Cookie: session=9f8e7d6c5b4a; theme=dark", "9f8e7d6c5b4a", "cookie"),
+    ("Server=db;Database=x;Password=Tr0ub4dor&3;", "Tr0ub4dor&3", "connection_string"),
+    ("-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----",
+     "MIIEow", "private_key"),
+])
+def test_structural_secret_is_masked(text, secret, kind):
+    r = redact(text)
+    assert secret not in r.text and kind in r.kinds and r.count == 1
+
+
+@pytest.mark.parametrize("text", [
+    "Send the Authorization: Basic auth header.",
+    "See https://example.com/a:b and user@example.com",
+    "the Cookie: header carries state",
+    "password = get_password()",
+])
+def test_structural_prose_is_untouched(text):
+    assert redact(text).text == text

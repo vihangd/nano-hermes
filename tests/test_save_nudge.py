@@ -33,6 +33,10 @@ class TestNoteUserTurnCadence:
         nudge = coord.take_save_nudge()
         assert nudge is not None
         assert "memory_patch" in nudge["content"].lower()
+        # hermes 4a8cc6f705: no inferred traits, no one-off request as a preference.
+        assert "grounded" in nudge["content"] and "one-off request" in nudge["content"]
+        tool = next(t for t in hook._loop.tools._tools.values() if t.name == "memory_patch")
+        assert "one-off request" in tool.description
 
     def test_resets_after_taken(self, tmp_path):
         hook = _make_hook(tmp_path, interval=2)

@@ -192,3 +192,15 @@ def test_fit_transcript_cuts_one_huge_message_by_tokens():
     huge = "字" * 20000  # ~1 char per token: a chars-per-token guess overshoots
     _, transcript = oj._fit_transcript([{"role": "user", "content": huge}], 2000)
     assert 0 < oj._count_tokens(transcript) <= 2000
+
+
+async def test_refused_llm_judge_gives_no_verdict(tmp_path, monkeypatch):
+    """A content-filtered "FAIL" must not become a fail label."""
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    hook = _hook(tmp_path)
+    hook._loop.provider = SimpleNamespace(
+        chat_with_retry=AsyncMock(return_value=SimpleNamespace(
+            content="FAIL", finish_reason="content_filter", error=None
+        ))
+    )
+    assert await oj.judge(hook, [{"role": "user", "content": "x"}]) is None

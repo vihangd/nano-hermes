@@ -19,6 +19,7 @@ class FailoverReason(enum.Enum):
     server_error = "server_error"         # 500/502 — internal server error
     timeout = "timeout"                   # network timeout
     context_overflow = "context_overflow" # context too large — skip this skill
+    content_policy = "content_policy"     # refused / filtered: the text is not an answer
     unknown = "unknown"                   # unclassified transient
 
 
@@ -78,6 +79,11 @@ def classify_llm_response(resp: Any) -> ClassifiedError | None:
         return ClassifiedError(reason=FailoverReason.unknown, message="null response")
 
     finish = getattr(resp, "finish_reason", "stop") or "stop"
+    # nanobot reports these as finish reasons (providers/fallback_provider.py);
+    # the content is a refusal, never the asked-for output (hermes 9c1799ed1a).
+    if finish in ("content_filter", "refusal"):
+        return ClassifiedError(reason=FailoverReason.content_policy,
+                               message=(getattr(resp, "content", None) or "")[:200])
     if finish != "error":
         return None  # success
 

@@ -61,8 +61,23 @@ _JSON_FIELD_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Authorization: Bearer <token>
-_AUTH_HEADER_RE = re.compile(r"(Authorization:\s*Bearer\s+)(\S+)", re.IGNORECASE)
+# Authorization / Proxy-Authorization, any scheme (hermes f2a510b259). The
+# 8-char floor keeps prose ("Authorization: Basic auth") intact.
+_AUTH_HEADER_RE = re.compile(
+    r"((?:Proxy-)?Authorization:\s*(?:[A-Za-z][\w.+-]*\s+)?)([^\s\"']{8,})", re.IGNORECASE
+)
+
+# Structural secrets masked in group 2 (hermes dc6149b22d, 2d54c978f7,
+# a9d55a3603): URL userinfo password (any scheme, never across whitespace),
+# a Cookie header's value (needs a name=value), an ADO-style "; Password=".
+_STRUCTURAL = [
+    ("url_userinfo", re.compile(r"(\b[a-z][a-z0-9+.-]*://[^:\s/@]*:)([^@\s/]+)(?=@)", re.I)),
+    ("cookie", re.compile(r"((?:Set-)?Cookie:[ \t]*)([^\s=;]+=[^\r\n]+)", re.I)),
+    ("connection_string", re.compile(r"(;\s*(?:Password|Pwd)\s*=\s*)([^;\s\"']+)", re.I)),
+]
+_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
+)
 
 # Telegram bot token: optional 'bot' prefix + numeric id + ':' + 30+ char token.
 _TELEGRAM_RE = re.compile(r"\b(?:bot)?\d{6,12}:[A-Za-z0-9_-]{30,}\b")
@@ -125,6 +140,21 @@ def redact(text: str) -> RedactionResult:
         kinds.add("auth_header")
         return f"{m.group(1)}{_mask(m.group(2))}"
     text = _AUTH_HEADER_RE.sub(_auth_sub, text)
+
+    # 3b. Private-key blocks, URL userinfo, cookies, connection strings.
+    def _pem_sub(m: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        kinds.add("private_key")
+        return "[REDACTED PRIVATE KEY]"
+    text = _PRIVATE_KEY_RE.sub(_pem_sub, text)
+    for kind, pattern in _STRUCTURAL:
+        def _struct_sub(m: re.Match[str], _kind: str = kind) -> str:
+            nonlocal count
+            count += 1
+            kinds.add(_kind)
+            return f"{m.group(1)}{_mask(m.group(2))}"
+        text = pattern.sub(_struct_sub, text)
 
     # 4. Telegram bot tokens.
     def _tg_sub(m: re.Match[str]) -> str:

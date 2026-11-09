@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Callable
 
 from ..decay import recency_decay
 from ..lru import touch
+from ..memory.tool import GROUNDING_RULE
 from .session import conversation_key
 
 from ..reflect.salience import (
@@ -374,7 +375,7 @@ class ReflectionCoordinator:
                 "Several user turns have passed since you last updated memory. "
                 "Anything worth saving with memory_patch — a preference, decision, "
                 "or a fact that should outlast this session? "
-                "Skip if nothing genuinely durable came up."
+                "Skip if nothing genuinely durable came up. " + GROUNDING_RULE
             ),
         }
 

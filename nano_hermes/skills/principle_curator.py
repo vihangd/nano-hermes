@@ -40,6 +40,8 @@ Rules:
 - Prefer editing/adding a few high-value principles over churn.
 - "prune" only principles that are wrong or chronically unhelpful, by id.
 - Keep condition/action terse and general (not task-specific trivia).
+- Ground each op in the failures shown; a suspected cause the sessions don't
+  confirm is not a principle.
 
 Respond with ONLY a JSON object, no prose:
 {{"ops": [
