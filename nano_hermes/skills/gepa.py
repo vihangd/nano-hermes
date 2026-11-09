@@ -81,6 +81,8 @@ EXAMPLES OF FAILURES (sessions where this skill was used but the task failed):
 
 Produce an improved SKILL.md that would handle these failures better.
 Keep the same markdown structure (# name, description block, ## sections).
+Keep the description's closing "Not for: <case>." sentence; add one if
+these failures show tasks the skill should not be used on.
 Output ONLY the new SKILL.md content — no preamble, no explanation.
 """
 

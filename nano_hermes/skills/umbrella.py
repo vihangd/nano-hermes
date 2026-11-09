@@ -39,7 +39,7 @@ Skills to merge:
 
 Produce a single merged skill. Respond with ONLY a JSON object, no prose:
 {{"name": "kebab-case-umbrella-name",
-  "description": "one line describing the broader class",
+  "description": "one line describing the broader class, ending 'Not for: <case>.'",
   "body": "the merged SKILL.md body (markdown, no frontmatter), with a
            subsection per absorbed specific",
   "absorbed": ["name1", "name2"]}}

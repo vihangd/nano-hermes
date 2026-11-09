@@ -62,7 +62,27 @@ class SkillHit:
     lexical: bool = False  # ranked by BM25 because every embedder failed
 
 
+# A description's trailing exclusion, e.g. "... Not for: one-off shell commands."
+# (Skill-V, arXiv:2610.11781: correct-skill precision falls from 29.6% to 3.3%
+# as the pool grows from 5 to 100 skills, arXiv:2608.14036.)
+_SKIP_RE = re.compile(r"\s*\bNot for:\s*(.+?)\.?\s*$", re.IGNORECASE | re.DOTALL)
+# A hit is dropped when the query sits this much closer to its exclusion
+# than to its description (cosine similarity).
+# ponytail: fixed margin; tune against real skill_search logs.
+_SKIP_MARGIN = 0.05
+
+
+def _split_skip(description: str) -> tuple[str, str | None]:
+    """``(description without its "Not for:" clause, the clause or None)``."""
+    m = _SKIP_RE.search(description)
+    if not m:
+        return description, None
+    return description[: m.start()].rstrip(), m.group(1).strip()
+
+
 def _content_text(name: str, description: str) -> str:
+    # The exclusion stays out: its words would pull the excluded case closer.
+    description = _split_skip(description)[0]
     return f"{name}: {description}" if description else name
 
 
@@ -227,17 +247,24 @@ class SkillIndexer:
         hash_by_name = {name: content_hash for _id, name, content_hash in existing}
 
         stale: list[tuple[str, str, str, str]] = []  # (name, text, digest, source)
+        skips: list[str | None] = []
         for entry in entries:
             name = entry["name"]
-            text = _content_text(name, description_by_name.get(name, ""))
-            digest = _hash_content(text)
+            description = description_by_name.get(name, "")
+            text = _content_text(name, description)
+            skip = _split_skip(description)[1]
+            digest = _hash_content(text if skip is None else f"{text}\0{skip}")
             if hash_by_name.get(name) == digest:
                 continue
             stale.append((name, text, digest, source_by_name[name]))
+            skips.append(skip)
 
         if stale:
-            vecs = await chain.embed([t[1] for t in stale])
-            self._write_vectors(stale, vecs)
+            skip_texts = [s for s in skips if s is not None]
+            vecs = await chain.embed([t[1] for t in stale] + skip_texts)
+            skip_iter = iter(vecs[len(stale):])
+            skip_vecs = [None if s is None else next(skip_iter) for s in skips]
+            self._write_vectors(stale, vecs[: len(stale)], skip_vecs)
 
         removed = self._cleanup_removed({e["name"] for e in entries}, existing=existing)
         return {
@@ -250,10 +277,12 @@ class SkillIndexer:
         self,
         stale: list[tuple[str, str, str, str]],
         vecs: list[np.ndarray],
+        skip_vecs: list[np.ndarray | None] | None = None,
     ) -> None:
         now = time.time()
+        skip_vecs = skip_vecs or [None] * len(stale)
         with self._db:
-            for (name, _text, digest, source), vec in zip(stale, vecs):
+            for (name, _text, digest, source), vec, skip_vec in zip(stale, vecs, skip_vecs):
                 # Builtin and external skills are trusted (config-curated)
                 # and start active. Workspace skills (including those created
                 # via shell scripts outside propose_skill) start as draft so
@@ -261,12 +290,14 @@ class SkillIndexer:
                 # ON CONFLICT preserves the existing status — only set it on INSERT.
                 status = "active" if source in ("builtin", "external") else "draft"
                 self._db.execute(
-                    "INSERT INTO skill_stats (name, status, content_hash, indexed_at) "
-                    "VALUES (?, ?, ?, ?) "
+                    "INSERT INTO skill_stats (name, status, content_hash, indexed_at, skip_vec) "
+                    "VALUES (?, ?, ?, ?, ?) "
                     "ON CONFLICT(name) DO UPDATE SET "
                     "content_hash = excluded.content_hash, "
-                    "indexed_at = excluded.indexed_at",
-                    (name, status, digest, now),
+                    "indexed_at = excluded.indexed_at, "
+                    "skip_vec = excluded.skip_vec",
+                    (name, status, digest, now,
+                     None if skip_vec is None else skip_vec.astype(np.float32).tobytes()),
                 )
                 # cursor.lastrowid is NOT the conflicting row's id on the
                 # ON CONFLICT DO UPDATE branch (it keeps the last real INSERT's
@@ -378,12 +409,14 @@ class SkillIndexer:
 
         placeholders = ",".join("?" * len(rows))
         stat_rows = self._db.execute(
-            f"SELECT id, name, use_count, success_count FROM skill_stats "
+            f"SELECT id, name, use_count, success_count, skip_vec FROM skill_stats "
             f"WHERE id IN ({placeholders}) AND status != 'deprecated'",
             [r[0] for r in rows],
         ).fetchall()
         id_to_name = {r[0]: r[1] for r in stat_rows}
         id_to_stats = {r[0]: (r[2], r[3]) for r in stat_rows}  # id → (use_count, success_count)
+        id_to_skip = {r[0]: np.frombuffer(r[4], dtype=np.float32) for r in stat_rows if r[4]}
+        query_f32 = query_vec.astype(np.float32)
 
         # UCB1: fetch total pull count across all active skills once.
         total_uses: int = 0
@@ -398,6 +431,11 @@ class SkillIndexer:
         for skill_id, distance in rows:
             name = id_to_name.get(skill_id)
             if not name:
+                continue
+            skip = id_to_skip.get(skill_id)
+            # Unit vectors: dot = cosine similarity; vec0 distance = 1 - cosine.
+            if skip is not None and float(np.dot(query_f32, skip)) > 1.0 - distance + _SKIP_MARGIN:
+                log.debug("skill_search: %s skipped — query matches its 'Not for:'", name)
                 continue
             effective_distance = float(distance)
             use_count, success_count = id_to_stats.get(skill_id, (0, 0))

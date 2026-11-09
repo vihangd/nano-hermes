@@ -44,7 +44,7 @@ Each step is a concrete action (not "be careful").
 Use this exact format:
 ---
 name: <skill_name_snake_case>
-description: <one-line description>
+description: <one-line description>. Not for: <tasks this skill must not be used on>.
 ---
 
 ## When to Use
