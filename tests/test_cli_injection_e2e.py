@@ -125,3 +125,51 @@ async def test_injections_are_not_saved_into_history(tmp_path, restore_cli_patch
     assert _count(saved) == 0
     assert [m["content"] for m in saved if m["role"] == "assistant" and not m.get("tool_calls")] \
         == ["done"] * 3
+
+
+async def test_injections_stay_out_of_runtime_checkpoints(tmp_path, restore_cli_patches):
+    """nanobot 0.4.1 checkpoints the run's messages mid-run (restored on /stop
+    or after a crash), before on_finally blanks the injections."""
+    if not hasattr(AgentLoop, "_set_runtime_checkpoint"):
+        import pytest
+
+        pytest.skip("no runtime checkpoints on this nanobot")
+    cli_mod._patch_agent_loop()
+    rec = _Recorder()
+    first = True
+
+    async def answer(*args, messages=None, **kwargs):
+        nonlocal first
+        rec.requests.append(deepcopy(messages or (args[0] if args else [])))
+        if first:
+            first = False
+            return LLMResponse(
+                content="", finish_reason="tool_calls",
+                tool_calls=[ToolCallRequest(id="c1", name="no_such_tool", arguments={})],
+            )
+        return LLMResponse(content="done", tool_calls=[], finish_reason="stop")
+
+    rec.chat_with_retry = rec.chat_stream_with_retry = answer
+    with contextlib.ExitStack() as stack:
+        sub = stack.enter_context(patch("nanobot.agent.loop.SubagentManager"))
+        sub.return_value.cancel_by_session = AsyncMock(return_value=0)
+        for sym in ("Dream", "CronService"):
+            if hasattr(_loop_mod, sym):
+                stack.enter_context(patch(f"nanobot.agent.loop.{sym}"))
+        loop = AgentLoop(bus=MessageBus(), provider=rec, workspace=tmp_path, model="test-model")
+    hermes = cli_mod._find_hermes_hook(CompositeHook(loop._extra_hooks))
+    loop._extra_hooks.append(_SystemInjector(hermes))
+    payloads: list[dict] = []
+    original = loop._set_runtime_checkpoint
+
+    async def spy(session, payload):
+        payloads.append(deepcopy(payload))
+        await original(session, payload)
+
+    loop._set_runtime_checkpoint = spy
+    await loop.process_direct("hello", session_key="cli:ckpt")
+
+    assert _count(rec.requests[0]) == 1  # still reached the model
+    preceding = [m for p in payloads for m in p.get("preceding_messages", [])]
+    assert preceding, "no checkpoint carried the run's messages"
+    assert _count(preceding) == 0

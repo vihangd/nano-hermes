@@ -72,3 +72,30 @@ def test_patch_wires_both_wrappers(monkeypatch):
         _MESSAGES, state=None, provider="deepseek", model="deepseek-v4-flash",
     )[0] == "NANOBOT PROMPT"
     assert conv.convert_messages._nano_hermes and ctl.finish._nano_hermes
+
+
+def test_replayed_state_keeps_the_system_prompt():
+    """nanobot 0.4.1 replays stored items and reads ``instructions`` off the
+    last system message: an injection there replaced the prompt."""
+    import sys
+
+    from nanobot.providers.base import ProviderConversationState
+
+    import nano_hermes.cli as cli_mod
+
+    backend = pytest.importorskip("nanobot.providers.openai_responses.backend")
+    if not hasattr(backend, "prepare_responses_input"):
+        pytest.skip("no Responses replay on this nanobot")
+    cli_mod._patch_responses()
+    st = ProviderConversationState(
+        kind="openai_responses", provider="deepseek", model="deepseek-v4-flash", version=1,
+        payload={"items": [{"type": "message", "role": "user",
+                            "content": [{"type": "input_text", "text": "earlier"}]}]},
+        pending_messages=[{"role": "user", "content": "hi"}],
+    )
+    instructions, items, replayed = backend.prepare_responses_input(
+        _MESSAGES, state=st, provider="deepseek", model="deepseek-v4-flash",
+    )
+    assert replayed and instructions == "NANOBOT PROMPT"
+    assert sys.modules["nanobot.providers.openai_responses"].prepare_responses_input \
+        is backend.prepare_responses_input

@@ -14,7 +14,7 @@ import asyncio
 import logging
 from contextvars import ContextVar
 import sqlite3
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext
 
@@ -37,6 +37,7 @@ from .session.archiver import SessionArchiver, _extract_text
 from .paths import state_db
 from .session.db import evict_low_value_facts, open_db, purge_older_than
 from .session.outcome import (
+    _GOAL_CONTINUE,
     OutcomeTracker,
     carries_history,
     is_hard_failure,
@@ -61,6 +62,19 @@ _RUN_INJECTIONS: ContextVar[tuple[list, list[dict]] | None] = ContextVar(
 )
 # Re-export for backward compatibility with any code that imports from here.
 from .coordinator.reflection import _NUDGE_TEXT  # noqa: F401, E402
+
+
+def _call_events(context: AgentHookContext) -> list[tuple[Any, dict]]:
+    """``(tool_call, event)`` pairs for this iteration.
+
+    Events carry no call id and nanobot 0.4.1 reports only the calls that
+    finished, so an interrupted batch would pair a call with another's event.
+    """
+    calls, events = context.tool_calls, context.tool_events
+    if len(calls) != len(events):
+        return []
+    return [(tc, ev) for tc, ev in zip(calls, events)
+            if ev.get("name", getattr(tc, "name", None)) == getattr(tc, "name", None)]
 
 
 class NanoHermesHook(AgentHook):
@@ -569,8 +583,7 @@ class NanoHermesHook(AgentHook):
 
         # Skills the agent actually loaded: read_file on a SKILL.md that
         # nanobot reports as status "ok" (a failed read loaded nothing).
-        # tool_events is indexed like tool_calls.
-        for i, (tc, ev) in enumerate(zip(context.tool_calls, context.tool_events)):
+        for i, (tc, ev) in enumerate(_call_events(context)):
             if getattr(tc, "name", None) != "read_file" or ev.get("status") != "ok":
                 continue
             args = getattr(tc, "arguments", None) or {}
@@ -608,7 +621,7 @@ class NanoHermesHook(AgentHook):
         self._outcomes.set_goal_active(key, self._goal_tracker(key).active)
         # nanobot >= 0.3: update_goal(action=complete|cancel|block|replace).
         # 0.2.2's complete_goal carries no action, so it gives no signal.
-        for tc, ev in zip(context.tool_calls, context.tool_events):
+        for tc, ev in _call_events(context):
             if getattr(tc, "name", None) == "update_goal" and ev.get("status") == "ok":
                 action = (getattr(tc, "arguments", None) or {}).get("action")
                 if action:
@@ -669,11 +682,15 @@ class NanoHermesHook(AgentHook):
         else:
             seen = self._turn_user_counts.get(turn_key)
             if seen is not None and seen[0] == id(msgs) and users > seen[1]:
-                for _ in range(users - seen[1]):
+                # nanobot 0.4.1 runs a /goal in one run, appending its
+                # continuation prompt as a user message: not the user's turn.
+                new = [_extract_text(m) for m in msgs if m.get("role") == "user"][seen[1]:]
+                new = [t for t in new if not t.startswith(_GOAL_CONTINUE)]
+                for _ in new:
                     self._reflection_coord.note_user_turn(turn_key)
-                new = [m for m in msgs if m.get("role") == "user"][seen[1]:]
-                self._outcomes.record_user_messages(turn_key, [_extract_text(m) for m in new])
-                self._fresh_user_turn.add(turn_key)
+                if new:
+                    self._outcomes.record_user_messages(turn_key, new)
+                    self._fresh_user_turn.add(turn_key)
         # id() is safe here: within a turn the runner holds the list alive, and
         # iteration 0 of the next turn overwrites the entry before it is read.
         self._turn_user_counts[turn_key] = (id(msgs), users)

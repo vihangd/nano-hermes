@@ -105,8 +105,35 @@ def _drop_injected_at_finish(finish: Any) -> Any:
     return wrapped
 
 
+def _first_system_on_replay(prepare: Any) -> Any:
+    """Wrap ``prepare_responses_input`` (nanobot 0.4.1+).
+
+    Replaying stored state, it reads ``instructions`` off the *last* system
+    message — an injection, after nanobot's leading prompt.
+    """
+    def prepare_responses_input(messages, *args, **kwargs):  # type: ignore[no-untyped-def]
+        instructions, items, replayed = prepare(messages, *args, **kwargs)
+        if replayed and messages and messages[0].get("role") == "system":
+            content = messages[0].get("content")
+            instructions = content if isinstance(content, str) else instructions
+        return instructions, items, replayed
+
+    prepare_responses_input._nano_hermes = True  # type: ignore[attr-defined]
+    return prepare_responses_input
+
+
+def _rebind(name: str, original: Any, wrapped: Any) -> None:
+    """Point every module that imported *name* by value at *wrapped*; one
+    imported later reads the patched defining module."""
+    import sys
+
+    for mod in list(sys.modules.values()):
+        if getattr(mod, "__dict__", {}).get(name) is original:
+            setattr(mod, name, wrapped)
+
+
 def _patch_responses() -> None:
-    """Install both wrappers once (no-op on nanobot without the Responses path)."""
+    """Install the wrappers once (no-op on nanobot without the Responses path)."""
     import importlib
     import sys
 
@@ -118,14 +145,41 @@ def _patch_responses() -> None:
     original = conv.convert_messages
     if getattr(original, "_nano_hermes", False):
         return
-    wrapped = _keep_injected_system(original)
-    # Every module that imported it by name (state, the package, xAI, ...);
-    # one imported later reads the patched converters module.
-    for mod in list(sys.modules.values()):
-        if getattr(mod, "__dict__", {}).get("convert_messages") is original:
-            mod.convert_messages = wrapped
+    # state, the package, xAI, ... import it by name.
+    _rebind("convert_messages", original, _keep_injected_system(original))
+    state = sys.modules.get("nanobot.providers.openai_responses.state")
+    prepare = getattr(state, "prepare_responses_input", None)
+    if prepare is not None:
+        _rebind("prepare_responses_input", prepare, _first_system_on_replay(prepare))
     ctl = cs.ProviderConversationStateController
     ctl.finish = _drop_injected_at_finish(ctl.finish)
+
+
+def _patch_save_turn() -> None:
+    """Keep this run's injections out of every ``AgentLoop._save_turn``.
+
+    nanobot 0.4.1 saves runtime checkpoints mid-run (restored on /stop or after
+    a crash) — before ``on_finally`` blanks the injections in place. Blanked in
+    a copy, so indices hold (see ``NanoHermesHook._release_injections``).
+    """
+    from nanobot.agent.loop import AgentLoop
+
+    original = getattr(AgentLoop, "_save_turn", None)
+    if original is None or getattr(original, "_nano_hermes", False):
+        return
+    from .hook import _RUN_INJECTIONS
+
+    def _save_turn(self, session, messages, *args, **kwargs):  # type: ignore[no-untyped-def]
+        run = _RUN_INJECTIONS.get()
+        if run and run[1]:
+            ids = {id(m) for m in run[1]}
+            messages = [
+                {"role": "assistant", "content": ""} if id(m) in ids else m for m in messages
+            ]
+        return original(self, session, messages, *args, **kwargs)
+
+    _save_turn._nano_hermes = True  # type: ignore[attr-defined]
+    AgentLoop._save_turn = _save_turn  # type: ignore[method-assign]
 
 
 def _patch_agent_loop() -> None:

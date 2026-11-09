@@ -134,9 +134,10 @@ def install(
 
     hook = NanoHermesHook(config=cfg, loop=loop)
     loop._extra_hooks.append(hook)
-    from .cli import _patch_responses  # noqa: PLC0415
+    from .cli import _patch_responses, _patch_save_turn  # noqa: PLC0415
 
     _patch_responses()  # injections on nanobot's Responses API path
+    _patch_save_turn()  # ... and in nanobot's runtime checkpoints
     if cfg.memory_loadtime_scan:
         from .memory.guard import install_loadtime_memory_scan  # noqa: PLC0415
         install_loadtime_memory_scan(loop.context.memory)

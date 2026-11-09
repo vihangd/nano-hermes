@@ -212,6 +212,34 @@ async def test_update_goal_complete_is_ok_and_block_is_fail(tmp_path):
     assert _outcomes(hook) == ["ok", "fail"]
 
 
+async def test_interrupted_batch_does_not_pair_a_call_with_anothers_event(tmp_path):
+    """nanobot 0.4.1 reports only finished calls: a cancelled update_goal must
+    not inherit the ok status of the read_file that finished."""
+    hook = _hook(tmp_path)
+    msgs: list = []
+    await _turn(hook, msgs, _user("long task"), "k")
+    calls = [SimpleNamespace(name="update_goal", arguments={"action": "complete"}),
+             SimpleNamespace(name="read_file", arguments={"path": "x"})]
+    await hook.after_iteration(AgentHookContext(
+        iteration=0, messages=msgs, session_key="k",
+        tool_calls=calls, tool_events=[{"name": "read_file", "status": "ok"}],
+    ))
+    assert hook._outcomes._state("k").goal is None
+
+
+async def test_in_run_goal_continuation_is_not_a_user_turn(tmp_path):
+    """nanobot 0.4.1 appends the /goal continuation as a user message mid-run."""
+    hook = _hook(tmp_path)
+    msgs = [_user("start the long task")]
+    await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs, session_key="k"))
+    msgs += [{"role": "assistant", "content": "step"},
+             {"role": "user", "content": "You have an active sustained goal:\n\nship it"}]
+    await hook.before_iteration(AgentHookContext(iteration=1, messages=msgs, session_key="k"))
+    st = hook._outcomes._state("k")
+    assert st.user_messages == 1 and list(st.reactions) == []
+    assert hook._reflection_coord._conv("k").turns_since_save == 1
+
+
 async def test_a_failed_skill_rating_makes_the_session_partial(tmp_path):
     hook = _hook(tmp_path)
     await _turn(hook, [], _user("use the skill"), "")
