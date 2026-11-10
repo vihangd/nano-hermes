@@ -16,6 +16,7 @@ import time
 from typing import TYPE_CHECKING
 
 from .principle_index import upsert_principle
+from ..utils.error_classifier import response_text
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -207,9 +208,11 @@ async def run_principle_curator(hook: "NanoHermesHook") -> dict[str, int]:
             model=hook.background_model,
             max_tokens=1024,
         )
-        text = (resp.content or "").strip()
+        text = response_text(resp, "principle curator")
     except Exception:
         log.exception("principle curator: LLM call failed")
+        return {}
+    if text is None:
         return {}
 
     ops = parse_ops(text)

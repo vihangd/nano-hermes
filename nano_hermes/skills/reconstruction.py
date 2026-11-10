@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
+from ..utils.error_classifier import response_text
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -74,7 +75,10 @@ async def check_reconstruction(
                 model=hook.background_model,
                 max_tokens=5,
             )
-            answer = (resp.content or "").strip().upper()
+            answer = response_text(resp, "reconstruction")
+            if answer is None:
+                continue
+            answer = answer.upper()
             if answer.startswith("YES"):
                 return True
             if answer.startswith("NO"):

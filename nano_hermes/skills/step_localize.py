@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
+from ..utils.error_classifier import response_text
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -74,7 +75,7 @@ async def localize_failure_step(
             model=model,
             max_tokens=max_tokens,
         )
-        text = (resp.content or "").strip()
+        text = response_text(resp, "step_localize")
     except Exception:
         log.debug("step_localize: provider call failed", exc_info=True)
         return None

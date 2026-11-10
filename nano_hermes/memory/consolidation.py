@@ -15,6 +15,7 @@ import sqlite3
 from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
+from ..utils.error_classifier import response_text
 
 if TYPE_CHECKING:
     from ..embedding.chain import EmbeddingChain
@@ -205,7 +206,7 @@ async def distill_hub_to_fact(hook: Any, hub: dict) -> dict | None:
             model=model,
             max_tokens=400,
         )
-        content = (resp.content or "").strip()
+        content = response_text(resp, "consolidation")
     except Exception:
         log.warning("consolidation: distillation LLM call failed", exc_info=True)
         return None

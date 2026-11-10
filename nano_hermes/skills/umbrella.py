@@ -23,6 +23,7 @@ import numpy as np
 from .._atomic import atomic_write_text
 from .curator import transition_skill
 from .propose_tool import _NAME_RE
+from ..utils.error_classifier import response_text
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -126,7 +127,8 @@ async def _ask_merge(hook: "NanoHermesHook", bodies: dict[str, str]) -> dict | N
     except Exception:
         log.exception("umbrella: LLM call failed")
         return None
-    return _parse_merge((resp.content or "").strip())
+    text = response_text(resp, "umbrella")
+    return None if text is None else _parse_merge(text)
 
 
 async def run_umbrella_merge(hook: "NanoHermesHook") -> list[str]:

@@ -24,6 +24,7 @@ import json as _json
 import logging
 import time
 from typing import TYPE_CHECKING
+from ..utils.error_classifier import response_text
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -233,7 +234,7 @@ async def _ask_superseded(
             model=model,
             max_tokens=60,
         )
-        content = (resp.content or "").strip()
+        content = response_text(resp, "bitemporal")
     except Exception:
         log.warning("bitemporal: supersession LLM call failed", exc_info=True)
         return []

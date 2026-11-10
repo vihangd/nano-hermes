@@ -7,8 +7,11 @@ billing exhaustion (abort cycle) from transient failures (skip skill).
 from __future__ import annotations
 
 import enum
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 class FailoverReason(enum.Enum):
@@ -120,6 +123,19 @@ def classify_llm_response(resp: Any) -> ClassifiedError | None:
 
     return ClassifiedError(reason=FailoverReason.unknown, status_code=status,
                            message=content[:200])
+
+
+def response_text(resp: Any, caller: str) -> str | None:
+    """The reply's stripped text, or None when it is an error or a refusal.
+
+    nanobot returns provider errors and refusals as ordinary responses whose
+    content is an error message or a refusal, never the asked-for answer.
+    """
+    err = classify_llm_response(resp)
+    if err is not None:
+        log.warning("%s: LLM call returned %s", caller, err.reason.value)
+        return None
+    return (resp.content or "").strip()
 
 
 def classify_http_status(status: int, message: str = "") -> ClassifiedError:

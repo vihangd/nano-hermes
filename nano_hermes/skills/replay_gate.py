@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from typing import TYPE_CHECKING
+from ..utils.error_classifier import response_text
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -173,7 +174,10 @@ async def replay_passes_gate(
         except Exception:
             log.debug("replay_gate: provider call failed", exc_info=True)
             continue
-        verdict = _parse_verdict(resp.content or "")
+        text = response_text(resp, "replay_gate")
+        if text is None:
+            continue
+        verdict = _parse_verdict(text)
         if verdict is None:
             continue
         judged += 1
