@@ -17,6 +17,7 @@ from .._atomic import atomic_write_text
 from ..redact import RedactionResult, format_redaction_note, redact
 from ..utils.fuzzy_patch import apply_patch as fuzzy_apply_patch
 from ..coordinator.session import NOT_PERSISTED, request_persists
+from ..governance.write_approval import render_skill
 from .guard import scan_skill_content, scan_skill_file
 
 if TYPE_CHECKING:
@@ -662,8 +663,9 @@ class ProposeSkillTool(Tool):
         # Resolve every companion path upfront so a path-traversal attempt
         # fails before any I/O, and so we know exactly which files to snapshot.
         skill_md = skill_dir / "SKILL.md"
-        skill_md_content = (
-            f"---\nname: {skill_name}\ndescription: {description}\n---\n\n{body}\n"
+        skill_md_content = render_skill(
+            skill_name, description, body,
+            skill_md.read_text(encoding="utf-8") if edit_mode and skill_md.exists() else None,
         )
         write_targets: list[tuple[Path, str]] = [(skill_md, skill_md_content)]
 

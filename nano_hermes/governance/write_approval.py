@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -77,8 +78,35 @@ def _skill_path(workspace: Path, skill_name: str) -> Path:
     return workspace / "skills" / skill_name / "SKILL.md"
 
 
-def _render_skill(skill_name: str, description: str, body: str) -> str:
-    # Must match ProposeSkillTool._write_skill (propose_tool.py) byte-for-byte.
+_FRONTMATTER_RE = re.compile(r"^---\n(.+?)\n---\n", re.DOTALL)
+# The description's raw value, folded/indented continuation lines included.
+_DESC_RE = re.compile(r"^description:[ \t]*(.*(?:\n[ \t]+.*)*)", re.MULTILINE)
+
+
+def _raw_description(md: str) -> str:
+    m = _FRONTMATTER_RE.match(md)
+    d = _DESC_RE.search(m.group(1)) if m else None
+    return d.group(1).strip() if d else ""
+
+
+def render_skill(
+    skill_name: str, description: str, body: str, existing: str | None = None
+) -> str:
+    """The SKILL.md for a write; every skill writer goes through this.
+
+    The rewriter and GEPA have the model rewrite the whole file and pass no
+    description: their body's own frontmatter supplies it (written as-is it
+    nested a second frontmatter under ``description:`` empty, which nanobot
+    reads as None, dropping the skill from its summary). With neither, the
+    file's current description stays. Raw values keep their quoting.
+    """
+    body = body.strip()
+    m = _FRONTMATTER_RE.match(body + "\n")
+    if m:
+        description = description or _raw_description(body + "\n")
+        body = body[m.end():].strip()
+    if not description and existing:
+        description = _raw_description(existing)
     return f"---\nname: {skill_name}\ndescription: {description}\n---\n\n{body}\n"
 
 
@@ -236,7 +264,10 @@ def diff_pending(db: sqlite3.Connection, workspace: Path, pid: int) -> str:
     data = json.loads(rec["payload"])
     cur_path = _skill_path(workspace, rec["skill_name"])
     cur = cur_path.read_text(encoding="utf-8") if cur_path.exists() else "(new skill)"
-    proposed = _render_skill(rec["skill_name"], data["description"], data["body"])
+    proposed = render_skill(
+        rec["skill_name"], data["description"], data["body"],
+        cur if cur_path.exists() else None,
+    )
     stale = current_skill_hash(workspace, rec["skill_name"]) != rec["base_hash"]
     flag = "  ⚠ STALE — skill changed since staging; approve will be refused\n" if stale else ""
     return (
@@ -282,9 +313,11 @@ def _replay_skill_to_disk(
 
     path = _skill_path(workspace, skill_name)
     path.parent.mkdir(parents=True, exist_ok=True)
+    existing = None
     if path.exists():
-        save_skill_version(db, skill_name, path.read_text(encoding="utf-8"), reason)
-    atomic_write_text(path, _render_skill(skill_name, description, body))
+        existing = path.read_text(encoding="utf-8")
+        save_skill_version(db, skill_name, existing, reason)
+    atomic_write_text(path, render_skill(skill_name, description, body, existing))
     # No commit here — approve_skill's final db.commit() flushes this hash-reset
     # together with _finish_umbrella's writes and the pending-row status update,
     # so the approve path doesn't leave a half-applied DB on a later failure.

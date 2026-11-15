@@ -202,6 +202,23 @@ class TestApproveSkill:
         from nano_hermes.skills.evolution_snapshot import latest_snapshot
         assert latest_snapshot(hook.workspace) is not None
 
+    def test_approved_rewrite_keeps_the_description(self, tmp_path):
+        from nanobot.agent.skills import SkillsLoader
+
+        hook = nano_hermes.install(
+            _make_loop(tmp_path),
+            config={"skill_stats": {"write_approval": "approve"}},
+        )
+        _seed_failing_skill(hook, "bad")
+        path = hook.workspace / "skills" / "bad" / "SKILL.md"
+        path.write_text("---\nname: bad\ndescription: Old desc.\n---\n\n# bad\n")
+        pid = wa.stage_skill_write(
+            hook, skill_name="bad", description="", body="# bad\n\nbetter",
+            reason="test", origin="rewriter",
+        )
+        assert wa.approve_skill(hook.db, hook.workspace, pid).startswith("approved")
+        assert SkillsLoader(hook.workspace).get_skill_metadata("bad")["description"] == "Old desc."
+
     def test_conflict_refuses_and_does_not_clobber(self, tmp_path):
         # Anti-clobber invariant (mutation target): stage, mutate underneath,
         # approve must refuse rather than overwrite the newer content.

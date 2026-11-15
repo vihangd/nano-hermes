@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+
+import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -408,6 +410,30 @@ class TestRunRewriter:
         assert skill_name in rewritten, "run_rewriter should return the rewritten skill name"
         skill_path = hook.workspace / "skills" / skill_name / "SKILL.md"
         assert "Improved skill" in skill_path.read_text()
+
+    @pytest.mark.parametrize("new_md, desc", [
+        # The model rewrote the whole file, frontmatter included.
+        ("---\nname: s\ndescription: Better reports. Not for shell.\n---\n\n## Steps\n1. y",
+         "Better reports. Not for shell."),
+        # Body only: the file's current description stays, quoting intact.
+        ("## Steps\n1. y", "Make reports: weekly. Not for shell."),
+    ])
+    def test_rewrite_keeps_one_frontmatter_with_a_description(self, tmp_path, new_md, desc):
+        """The rewriter passes no description; writing its body as-is nested a
+        second frontmatter under an empty one, which nanobot reads as None."""
+        from nanobot.agent.skills import SkillsLoader
+
+        hook = self._setup(tmp_path, "s")
+        (hook.workspace / "skills" / "s" / "SKILL.md").write_text(
+            '---\nname: s\ndescription: "Make reports: weekly. Not for shell."\n---\n\n# s\n'
+        )
+        hook._loop.provider = MagicMock()
+        hook._loop.provider.chat_with_retry = AsyncMock(return_value=MagicMock(content=new_md))
+        with _critic_approved():
+            assert asyncio.run(run_rewriter(hook)) == ["s"]
+        text = (hook.workspace / "skills" / "s" / "SKILL.md").read_text()
+        assert text.count("---\n") == 2 and "1. y" in text
+        assert SkillsLoader(hook.workspace).get_skill_metadata("s")["description"] == desc
 
     def test_run_rewriter_preserves_old_version(self, tmp_path):
         skill_name = "preserve-me"
