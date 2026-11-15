@@ -332,3 +332,40 @@ class TestExtractContrastiveInsight:
                 extract_contrastive_insight(hook, session_id=20, outcome="fail", messages=[])
             )
         assert result == insight
+
+
+def test_end_to_end_prompt_carries_both_sessions_real_chunks(tmp_path, monkeypatch):
+    """No stubs between the DB and the prompt: the contrast is chosen by
+    embedding (a zero-norm candidate is skipped) and both sessions' own first
+    chunks reach the LLM."""
+    _patch_embedding_distinct(monkeypatch)
+    hook = _hook(tmp_path)
+    near = [1.0] + [0.0] * 511
+    cur, match, blank = (_add_session(hook.db, k) for k in ("cur", "match", "blank"))
+    _add_chunk_emb(hook.db, cur, near, content="deploy the billing service")
+    _add_chunk_emb(hook.db, match, near, content="deploy the search service")
+    _add_chunk_emb(hook.db, blank, [0.0] * 512, content="zero vector session")
+    _add_trajectory(hook.db, match, "fail")
+    _add_trajectory(hook.db, blank, "fail")
+    chat = AsyncMock(return_value=MagicMock(
+        finish_reason="stop",
+        content=_marked("Run the migration check before deploying any service."),
+    ))
+    hook._loop.provider = MagicMock(chat_with_retry=chat)
+    out = asyncio.run(extract_contrastive_insight(hook, cur, "success", []))
+    assert out == "Run the migration check before deploying any service."
+    prompt = chat.call_args.kwargs["messages"][0]["content"]
+    assert "deploy the billing service" in prompt and "deploy the search service" in prompt
+    assert "zero vector session" not in prompt
+
+
+def test_an_error_response_stores_nothing(tmp_path):
+    hook = _hook(tmp_path)
+    near = [1.0] + [0.0] * 511
+    cur, match = _add_session(hook.db, "cur"), _add_session(hook.db, "match")
+    _add_chunk_emb(hook.db, cur, near)
+    _add_chunk_emb(hook.db, match, near)
+    _add_trajectory(hook.db, match, "fail")
+    resp = MagicMock(finish_reason="refusal", content="INSIGHT: no")
+    hook._loop.provider = MagicMock(chat_with_retry=AsyncMock(return_value=resp))
+    assert asyncio.run(extract_contrastive_insight(hook, cur, "success", [])) is None

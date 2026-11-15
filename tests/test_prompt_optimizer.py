@@ -268,3 +268,37 @@ class TestActivePromptRevalidatedOnRead:
         db.commit()
 
         assert get_active_prompt(db, "gepa_mutation", "BUILTIN") == good
+
+
+class TestRunOproProviderErrors:
+    def _ready(self, tmp_path, n=2):
+        hook = _hook(tmp_path, {"opro_cycle_interval": 1, "opro_candidates_per_round": n})
+        hook._evolution_cycle_count = 1
+        _seed_gepa_improvements(hook, 10)
+        record_gepa_rounds(hook.db, 15)
+        return hook
+
+    async def test_billing_aborts_the_cycle(self, tmp_path):
+        import pytest
+
+        from nano_hermes.utils.error_classifier import EvolutionAbortError
+
+        hook = self._ready(tmp_path)
+        billing = MagicMock(finish_reason="error", error_status_code=402, content="quota")
+        chat = AsyncMock(return_value=billing)
+        with patch.object(hook._loop.provider, "chat_with_retry", chat), \
+                pytest.raises(EvolutionAbortError):
+            await run_opro(hook)
+        assert chat.call_count == 1  # no further candidates tried
+
+    async def test_transient_error_skips_only_that_candidate(self, tmp_path):
+        hook = self._ready(tmp_path)
+        good = MagicMock(finish_reason="stop", content=(
+            "Improve {skill_name} round {round_n}/{max_rounds}. {lens} "
+            "Current: {current_body}. Failures: {failure_context}."
+        ))
+        down = MagicMock(finish_reason="error", error_status_code=503, content="overloaded")
+        chat = AsyncMock(side_effect=[down, good])
+        with patch.object(hook._loop.provider, "chat_with_retry", chat):
+            assert await run_opro(hook) is True
+        assert hook.db.execute("SELECT COUNT(*) FROM prompt_versions").fetchone()[0] == 1
