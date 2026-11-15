@@ -98,7 +98,11 @@ def _yaml_scalar(description: str) -> str:
     try:
         import yaml  # noqa: PLC0415 — nanobot's own dependency
 
-        if yaml.safe_load(f"d: {description}") == {"d": description}:
+        value = yaml.safe_load(f"d: {description}")["d"]
+        # As written, or already a quoted string the model wrote.
+        if value == description or (
+            isinstance(value, str) and description[0] in "'\"" and description[-1] == description[0]
+        ):
             return description
     except Exception:  # noqa: BLE001 — YAMLError, or yaml missing
         pass

@@ -65,15 +65,15 @@ _JSON_FIELD_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Authorization / Proxy-Authorization (hermes f2a510b259). Schemes match
-# case-sensitively so prose ("Authorization: token required") isn't a header:
-# after Bearer any credential; after another scheme 8+ chars; bare, 8+ with a
-# digit or one of = _ - . / + ("Authorization: required", "... Basic auth").
+# Authorization / Proxy-Authorization (hermes f2a510b259). The credential's
+# shape decides, not the scheme's case: it needs a digit or one of = _ - . / +,
+# or 16+ chars, so prose ("token required for this", "Basic auth") stays.
+# A placeholder ($API_TOKEN, {token}, <key>) is not a secret.
 _AUTH_HEADER_RE = re.compile(
-    r"((?i:(?:Proxy-)?Authorization):\s*"
-    r"(?:Bearer\s+|(?:Basic|Digest|Token|Bot|Negotiate|NTLM|ApiKey)\s+(?=[^\s\"']{8})"
-    r"|(?=[^\s\"']{8})(?=[^\s\"']*[\d=_\-./+])))"
-    r"([^\s\"']+)",
+    r"((?:Proxy-)?Authorization:\s*"
+    r"(?:(?:Bearer|Basic|Digest|Token|Bot|Negotiate|NTLM|ApiKey)\s+)?)"
+    r"(?![$%{<])(?=[^\s\"']*[\d=_\-./+]|[^\s\"']{16})([^\s\"']{6,})",
+    re.IGNORECASE,
 )
 
 # Structural secrets masked in group 2 (hermes dc6149b22d, 2d54c978f7,

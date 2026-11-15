@@ -230,6 +230,8 @@ class TestRedactionResult:
      "MIIEpAIBAAKCAQEAx", "private_key"),
     ("postgres://user:p@ss@host/db", "ss@host", "url_userinfo"),
     ("Authorization: Bearer abc123", "abc123", "auth_header"),
+    ("authorization: bearer 9f8e7d6c5b4a3210", "9f8e7d6c5b4a3210", "auth_header"),
+    ("Authorization: token abc123def456", "abc123def456", "auth_header"),
     # hermes 4c7af743b1, fb6f8bc91c
     ("mcp https://mcp.example.com/sse?page=2&userToken=Zq9xLm2Pt", "Zq9xLm2Pt", "url_query"),
     ("GET /v1/x?apikey=abc123def&y=1", "abc123def", "url_query"),
@@ -253,6 +255,7 @@ def test_structural_secret_is_masked(text, secret, kind):
 @pytest.mark.parametrize("text", [
     "Send the Authorization: Basic auth header.",
     "Authorization: token required for this endpoint",
+    'curl -H "Authorization: Bearer $API_TOKEN"',
     "See https://example.com/a:b and user@example.com",
     "the Cookie: header carries state",
     "password = get_password()",

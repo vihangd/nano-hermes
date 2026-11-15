@@ -71,10 +71,12 @@ def _goal_block_text(messages: list[dict[str, Any]]) -> str | None:
 
 
 def _latest_runtime_text(messages: list[dict[str, Any]]) -> str:
-    """The newest runtime block decides: an older one still in the window
-    may say active after the goal turned blocked or done."""
+    """The newest user-turn runtime block decides: an older one still in the
+    window may say active after the goal turned blocked or done. Tool output
+    or replies quoting the sentinel (a log, context.py) don't count."""
     return next(
-        (t for t in map(_extract_text, reversed(messages)) if t and _RUNTIME_SENTINEL in t),
+        (t for m in reversed(messages) if m.get("role") == "user"
+         and (t := _extract_text(m)) and _RUNTIME_SENTINEL in t),
         "",
     )
 

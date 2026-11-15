@@ -343,6 +343,7 @@ class TestApprovePrinciples:
     "[beta] Builds reports",
     "Runs jobs #nightly",
     "Plain text. Not for charts.",
+    '"a" and "b"',
 ])
 def test_render_skill_description_reads_back(desc):
     import yaml
@@ -350,3 +351,10 @@ def test_render_skill_description_reads_back(desc):
     md = wa.render_skill("s", desc, "## Steps\n1. go")
     front = md.split("---\n")[1]
     assert yaml.safe_load(front)["description"] == desc
+
+
+def test_render_skill_keeps_a_model_quoted_description():
+    import yaml
+
+    md = wa.render_skill("s", '"Does X: Y"', "b")
+    assert yaml.safe_load(md.split("---\n")[1])["description"] == "Does X: Y"

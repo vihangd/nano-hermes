@@ -199,9 +199,11 @@ async def test_provider_down_ends_the_pass_without_marking(tmp_path):
 async def test_a_yaml_hostile_reply_is_quoted_and_reads_back(tmp_path, reply):
     hook, _ = _setup(tmp_path, _PAIR)
     await _index(hook, _PAIR)
-    _reply(hook, reply)
+    chat = _reply(hook, reply)
     assert await run_differentiation(hook) == ["zorb-report"]
     assert _desc(hook, "zorb-report") == reply
+    await hook.skill_indexer.refresh()  # the quoted value hashes as marked
+    assert await run_differentiation(hook) == [] and chat.call_count == 1
 
 
 async def test_an_outage_reply_is_retried_next_cycle(tmp_path):
