@@ -139,6 +139,16 @@ class TestGoalTrackerTransitions:
         assert tracker.active is False
         assert tracker.last_objective == "finish"
 
+    def test_blocked_goal_is_not_a_completion(self):
+        """nanobot > 0.4.1 shows a blocked goal as "Goal (blocked):" (and the
+        agent blocks when the user asks to stop): no completion nudge."""
+        tracker = GoalTracker()
+        tracker.update([_user_goal("go", "finish")])
+        blocked = {"role": "user", "content": "hi\n\n" + _runtime_block("Goal (blocked):", "finish")}
+        # The previous turn's (stripped) user message sits before it.
+        assert tracker.update([_plain_user("go"), blocked]) == "blocked"
+        assert tracker.active is False
+
     def test_objective_updates_in_place(self):
         tracker = GoalTracker()
         tracker.update([_user_goal("go", "plan A")])

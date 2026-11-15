@@ -396,3 +396,56 @@ async def test_boundary_runs_lesson_extraction_only_on_a_clean_label(tmp_path, e
     assert expel.await_count == cs.await_count == int(called)
     if called:
         assert expel.await_args.args[2] == "fail" and cs.await_args.args[2] == "fail"
+
+
+async def _block_after(hook, user_text, key):
+    """Real shape: the user's turn, the agent's update_goal(block) call and its
+    result, then the hook's after_iteration for that step."""
+    msgs = [_user("start the long task")]
+    await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs, session_key=key))
+    msgs.append(_user(user_text))
+    await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs, session_key=key))
+    call = SimpleNamespace(name="update_goal", arguments={"action": "block"}, id="c1")
+    msgs += [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+         "function": {"name": "update_goal", "arguments": '{"action": "block"}'}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "update_goal", "content": "Goal blocked."},
+    ]
+    await hook.after_iteration(AgentHookContext(
+        iteration=0, messages=msgs, session_key=key,
+        tool_calls=[call], tool_events=[{"name": "update_goal", "status": "ok"}],
+    ))
+    return hook._outcomes._state(key).goal
+
+
+@pytest.mark.parametrize("text, goal", [
+    ("stop, never mind", "cancel"),
+    ("Never mind, forget it", "cancel"),
+    ("[Message Time: 2026-11-15 10:00]\nsummary of the work\n\nstop", "cancel"),
+    ("the API key expired and I can't get a new one", "block"),
+    ("don't stop until it builds", "block"),
+])
+async def test_user_stop_blocks_the_goal_without_failing_it(tmp_path, text, goal):
+    """Past nanobot 0.4.1 only the user can cancel; the agent blocks when asked
+    to stop, which must not label the session a failure."""
+    assert await _block_after(_hook(tmp_path), text, "k") == goal
+
+
+async def test_hidden_runner_continuation_is_not_a_user_turn(tmp_path):
+    """nanobot's length-recovery prompt is a marked user message, in-run and
+    when replayed from saved history."""
+    hook = _hook(tmp_path)
+    hidden = {"role": "user", "content": "Continue from where you stopped.",
+              "_hidden_history": {"kind": "internal_continuation"}}
+    msgs = [_user("write the report")]
+    await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs, session_key="k"))
+    msgs += [{"role": "assistant", "content": "part one"}, hidden]
+    await hook.before_iteration(AgentHookContext(iteration=1, messages=msgs, session_key="k"))
+    st = hook._outcomes._state("k")
+    assert st.user_messages == 1 and list(st.reactions) == []
+    assert hook._reflection_coord._conv("k").turns_since_save == 1
+    # Next run: replayed with the marker, trailing before the new message.
+    msgs = msgs + [{"role": "assistant", "content": "part two"}, dict(hidden), _user("thanks")]
+    await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs, session_key="k"))
+    assert hook._reflection_coord._conv("k").turns_since_save == 2
+    assert list(st.reactions) == ["positive"]

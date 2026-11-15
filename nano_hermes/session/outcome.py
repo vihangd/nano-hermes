@@ -28,6 +28,16 @@ _WINDOW = 3
 _FAIL_STOPS = frozenset({"error", "tool_error", "empty_final_response"})
 # nanobot's goal-continuation turn (loop.py; same prefix on 0.2.2..HEAD).
 _GOAL_CONTINUE = "You have an active sustained goal:"
+# nanobot's marker on runner-made user messages (length recovery), kept in
+# saved history too (session/history_visibility.py, nanobot > 0.4.1).
+_HIDDEN_HISTORY = "_hidden_history"
+# The user asking to stop. nanobot > 0.4.1 has the agent mark the goal
+# "block" for it (only the user can cancel), so it must not read as a failure.
+_STOP_RE = re.compile(
+    r"^\W*(?:stop|cancel|abort|never\s*mind|nvm|forget\s+(?:it|about\s+it)|"
+    r"that'?s\s+enough)\b",
+    re.IGNORECASE,
+)
 
 # Strict lists for labelling — the lenient salience list (reflect/salience.py)
 # stays for Reflexion nudges. Matched at the start of the user's message, on
@@ -61,18 +71,35 @@ _POSITIVE_RE = re.compile(
 )
 
 
+def is_internal_user(m: dict[str, Any]) -> bool:
+    """A user-role message nanobot wrote itself: a /goal continuation or a
+    marked runner continuation. Not the user's turn, not a reaction."""
+    return m.get("role") == "user" and (
+        _HIDDEN_HISTORY in m or (_extract_text(m) or "").startswith(_GOAL_CONTINUE)
+    )
+
+
 def trailing_user_texts(messages: list[dict[str, Any]]) -> list[str]:
     """Texts of the window's trailing run of user messages (this turn's new
-    ones), skipping this hook's own system injections at the end."""
+    ones), skipping this hook's own system injections at the end and
+    nanobot's own continuations."""
     out: list[str] = []
     for m in reversed(messages):
         role = m.get("role")
-        if role == "system":
+        if role == "system" or is_internal_user(m):
             continue
         if role != "user":
             break
         out.append(_extract_text(m))
     return out[::-1]
+
+
+def asked_to_stop(messages: list[dict[str, Any]]) -> bool:
+    """Whether the window's last real user message asks the agent to stop."""
+    for m in reversed(messages):
+        if m.get("role") == "user" and not is_internal_user(m):
+            return bool(_STOP_RE.search(_current_text(_extract_text(m) or "")))
+    return False
 
 
 def carries_history(messages: list[dict[str, Any]]) -> bool:

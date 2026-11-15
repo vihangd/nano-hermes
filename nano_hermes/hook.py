@@ -37,10 +37,11 @@ from .session.archiver import SessionArchiver, _extract_text
 from .paths import state_db
 from .session.db import evict_low_value_facts, open_db, purge_older_than
 from .session.outcome import (
-    _GOAL_CONTINUE,
     OutcomeTracker,
+    asked_to_stop,
     carries_history,
     is_hard_failure,
+    is_internal_user,
     label,
     trailing_user_texts,
 )
@@ -624,11 +625,14 @@ class NanoHermesHook(AgentHook):
         # the objective is still fresh in the conversation.
         transition = self._goal_tracker(key).update(context.messages)
         self._outcomes.set_goal_active(key, self._goal_tracker(key).active)
-        # nanobot >= 0.3: update_goal(action=complete|cancel|block|replace).
-        # 0.2.2's complete_goal carries no action, so it gives no signal.
+        # nanobot >= 0.3: update_goal(action=complete|cancel|block|replace);
+        # past 0.4.1 cancel is user-only and the agent blocks when asked to
+        # stop. 0.2.2's complete_goal carries no action, so it gives no signal.
         for tc, ev in _call_events(context):
             if getattr(tc, "name", None) == "update_goal" and ev.get("status") == "ok":
                 action = (getattr(tc, "arguments", None) or {}).get("action")
+                if action == "block" and asked_to_stop(context.messages):
+                    action = "cancel"
                 if action:
                     self._outcomes.record_goal(key, str(action))
         if transition == "completed":
@@ -677,16 +681,13 @@ class NanoHermesHook(AgentHook):
                     continue  # this hook's own injections ride at the end
                 if role != "user":
                     break
-                if not (_extract_text(m) or "").startswith(_GOAL_CONTINUE):
+                if not is_internal_user(m):
                     fresh += 1
             if fresh:
-                # 0.4.1 saves in-run /goal continuations into history.
-                goal_turns = sum(
-                    1 for m in msgs if m.get("role") == "user"
-                    and (_extract_text(m) or "").startswith(_GOAL_CONTINUE)
-                )
+                # 0.4.1+ saves nanobot's own continuations into history.
+                internal = sum(1 for m in msgs if is_internal_user(m))
                 self._reflection_coord.observe_user_turn(
-                    turn_key, window_user_turns=users - goal_turns, turns=fresh
+                    turn_key, window_user_turns=users - internal, turns=fresh
                 )
                 self._outcomes.record_user_messages(turn_key, trailing_user_texts(msgs))
                 self._fresh_user_turn.add(turn_key)
@@ -695,8 +696,8 @@ class NanoHermesHook(AgentHook):
             if seen is not None and seen[0] == id(msgs) and users > seen[1]:
                 # nanobot 0.4.1 runs a /goal in one run, appending its
                 # continuation prompt as a user message: not the user's turn.
-                new = [_extract_text(m) or "" for m in msgs if m.get("role") == "user"][seen[1]:]
-                new = [t for t in new if not t.startswith(_GOAL_CONTINUE)]
+                new = [m for m in msgs if m.get("role") == "user"][seen[1]:]
+                new = [_extract_text(m) or "" for m in new if not is_internal_user(m)]
                 for _ in new:
                     self._reflection_coord.note_user_turn(turn_key)
                 if new:

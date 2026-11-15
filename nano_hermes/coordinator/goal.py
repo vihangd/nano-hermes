@@ -39,6 +39,9 @@ _ACTIVE_MARKER = "Goal (active):"
 # (goal_state.py). Lets us still detect the active→completed transition even
 # though there's no objective to parse.
 _ACTIVE_MARKER_NOOBJ = "Goal: active"
+# nanobot > 0.4.1 keeps a blocked goal in the runtime context
+# (goal_state_runtime_lines); the agent blocks when the user asks to stop.
+_BLOCKED_MARKER = "Goal (blocked):"
 _RUNTIME_SENTINEL = "[Runtime Context"
 _RUNTIME_END = "[/Runtime Context"  # closes the block; ']' omitted for safety
 _OBJECTIVE_MAX_CHARS = 240  # cap for the snapshot stored on transition
@@ -63,19 +66,20 @@ def _goal_block_text(messages: list[dict[str, Any]]) -> str | None:
     or a few messages instead of the whole transcript every iteration.
     """
     for m in reversed(messages):
-        content = m.get("content")
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            text = "\n".join(
-                str(block.get("text") or "")
-                for block in content
-                if isinstance(block, dict)
-            )
-        else:
-            continue
-        if _RUNTIME_SENTINEL in text and _has_active_marker(text):
+        text = _message_text(m)
+        if text and _RUNTIME_SENTINEL in text and _has_active_marker(text):
             return text
+    return None
+
+
+def _message_text(m: dict[str, Any]) -> str | None:
+    content = m.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(block.get("text") or "") for block in content if isinstance(block, dict)
+        )
     return None
 
 
@@ -130,6 +134,7 @@ class GoalTracker:
       - ``None`` if no transition this iteration
       - ``"started"`` if a goal became active
       - ``"completed"`` if the goal disappeared from the runtime context
+      - ``"blocked"`` if it turned blocked instead (not a completion)
 
     The last-seen objective text is preserved on transition so callers
     can include it in a reflection prompt.
@@ -152,7 +157,12 @@ class GoalTracker:
             self.active = False
             # last_objective is intentionally NOT cleared so the caller
             # can quote it in the reflection prompt; cleared on next start.
-            return "completed"
+            latest = next(
+                (t for t in map(_message_text, reversed(messages))
+                 if t and _RUNTIME_SENTINEL in t),
+                "",
+            )
+            return "blocked" if _BLOCKED_MARKER in latest else "completed"
         if now_active:
             # Keep last_objective current — the objective text can be
             # edited in-place via /goal update commands.
