@@ -46,6 +46,19 @@ _EXFIL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         re.IGNORECASE,
     )),
     ("netcat reverse shell", re.compile(r"\bnc\s+-e\b", re.IGNORECASE)),
+    # A rendered link/image whose URL carries a secret (hermes 47f42ac8e2);
+    # the bracket text excludes "[" so minified JSON stays linear.
+    ("markdown link exfiltration", re.compile(
+        r"\[[^\[\]\n]{0,200}\]\([^)\s]{0,500}\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)",
+        re.IGNORECASE,
+    )),
+]
+
+# Code pushed past the visible edge by a run of whitespace (hermes
+# bca51750cc). Scripts only: Markdown legitimately holds long blank runs.
+# The lookbehind anchors a run's start, keeping a long blank line linear.
+_HIDDEN_CODE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("hidden padded code", re.compile(r"(?<![ \t])[ \t]{200,}\S[^\n]{39}")),
 ]
 
 # --- Code obfuscation / dynamic execution ---------------------------------
@@ -72,6 +85,7 @@ _SCRIPT_CATEGORIES: list[tuple[str, list[tuple[str, re.Pattern[str]]]]] = [
     ("destructive shell command", _DESTRUCTIVE_PATTERNS),
     ("persistence mechanism", _PERSISTENCE_PATTERNS),
     ("exfiltration command", _EXFIL_PATTERNS),
+    ("hidden code", _HIDDEN_CODE_PATTERNS),
 ]
 
 # Minimal categories for assets — only injection and destructive patterns.

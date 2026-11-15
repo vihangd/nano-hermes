@@ -22,6 +22,7 @@ import numpy as np
 
 from .._atomic import atomic_write_text
 from .curator import transition_skill
+from .guard import scan_skill_content
 from .propose_tool import _NAME_RE
 from ..utils.error_classifier import response_text
 
@@ -158,6 +159,13 @@ async def run_umbrella_merge(hook: "NanoHermesHook") -> list[str]:
         absorbed = [s for s in result.get("absorbed", []) if s in bodies]
         if not (_NAME_RE.match(name) and description and body) or len(absorbed) < 2:
             log.warning("umbrella: rejecting malformed/empty merge for %s", cluster)
+            continue
+
+        # Every autonomous write is scanned (hermes 2087cbe469); only the
+        # approval-gated path did, so an unattended merge skipped it.
+        scan_err = scan_skill_content(f"{description}\n{body}")
+        if scan_err:
+            log.warning("umbrella: security scan blocked merge %s — %s", cluster, scan_err)
             continue
 
         # Refuse to hijack a skill outside this cluster: if the chosen name

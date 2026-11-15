@@ -229,6 +229,17 @@ class TestRedactionResult:
     ("head -c 600 id_rsa\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAx",
      "MIIEpAIBAAKCAQEAx", "private_key"),
     ("postgres://user:p@ss@host/db", "ss@host", "url_userinfo"),
+    # hermes 4c7af743b1, fb6f8bc91c
+    ("mcp https://mcp.example.com/sse?page=2&userToken=Zq9xLm2Pt", "Zq9xLm2Pt", "url_query"),
+    ("GET /v1/x?apikey=abc123def&y=1", "abc123def", "url_query"),
+    ("https://hooks.slack.com/services/T0001/B0001/XyZ123abcDEF456ghi", "XyZ123abcDEF456ghi",
+     "webhook_url"),
+    ("https://discord.com/api/webhooks/123456789/AbCdEfGh-IjKlMn", "AbCdEfGh-IjKlMn",
+     "webhook_url"),
+    ("https://acme.webhook.office.com/webhookb2/a1b2c3d4@e5f6/IncomingWebhook/9z8y",
+     "a1b2c3d4@e5f6", "webhook_url"),
+    ("token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dozjgNryP4J3jVmNHl0w5N_X", "eyJzdWIi",
+     "jwt"),
 ])
 def test_structural_secret_is_masked(text, secret, kind):
     r = redact(text)
@@ -242,6 +253,9 @@ def test_structural_secret_is_masked(text, secret, kind):
     "See https://example.com/a:b and user@example.com",
     "the Cookie: header carries state",
     "password = get_password()",
+    "https://example.com/search?q=token&sort=asc&keyword=api",
+    "https://discord.com/channels/123/456",
+    "REDACT_SECRETS=false GITHUB_TOKEN=none AUTH_ENABLED='on' API_KEY=null",
 ])
 def test_structural_prose_is_untouched(text):
     assert redact(text).text == text
@@ -251,6 +265,9 @@ def test_structural_prose_is_untouched(text):
     "Authorization: required for access",
     "a-" * 50_000,  # an unbounded URL-scheme regex took 14 s here
     "a." * 50_000,
+    "?token" * 10_000,
+    "https://hooks.slack.com/services/" * 2_000,
+    "eyJ." * 20_000,
 ])
 def test_no_false_positive_or_slow_scan(text):
     import time
@@ -268,3 +285,7 @@ def test_one_secret_counts_once(text):
 def test_scoped_npm_url_is_untouched():
     text = "https://registry.npmjs.org:443/@scope/pkg"
     assert redact(text).text == text
+
+
+def test_a_boolean_lookalike_secret_is_still_masked():
+    assert "falsehood9" not in redact("API_KEY=falsehood9").text

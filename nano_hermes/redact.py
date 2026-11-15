@@ -43,12 +43,16 @@ _PREFIX_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("browserbase",         re.compile(r"bb_live_[A-Za-z0-9_-]{10,}")),
     ("fal_ai",              re.compile(r"fal_[A-Za-z0-9_-]{10,}")),
     ("matrix",              re.compile(r"syt_[A-Za-z0-9]{10,}")),
+    ("jwt",                 re.compile(r"eyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_=-]{4,}){0,2}")),
 ]
 
 # KEY=value with secret-like name, optionally quoted.
 _SECRET_NAMES = r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)"
+# A boolean/null value is config, not a secret (hermes 4f8bb8eb00): masking
+# REDACT_SECRETS=false taught skills a corrupted line.
 _ENV_ASSIGN_RE = re.compile(
-    rf"([A-Z0-9_]{{0,50}}{_SECRET_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)([^\s'\"]+)\2",
+    rf"([A-Z0-9_]{{0,50}}{_SECRET_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)"
+    r"(?!(?i:true|false|yes|no|on|off|none|null)\2(?![^\s'\"]))([^\s'\"]+)\2",
 )
 
 # JSON {"api_key": "value"} (and variants).
@@ -84,6 +88,19 @@ _STRUCTURAL = [
     )),
     ("cookie", re.compile(r"((?:Set-)?Cookie:[ \t]*)([^\s=;]+=[^\r\n]+)", re.I)),
     ("connection_string", re.compile(r"(;\s*(?:Password|Pwd)\s*=\s*)([^;\s\"']+)", re.I)),
+    # Credential-named query params (hermes 4c7af743b1): ?token=, &sig=, …
+    ("url_query", re.compile(
+        r"([?&](?:access_token|refresh_token|id_token|token|api_?key|apikey|client_secret|"
+        r"password|auth|jwt|secret|key|signature|sig|x-amz-signature|x-goog-signature|"
+        r"usertoken)=)([^&#\s\"'<>]{1,512})", re.I
+    )),
+    # Webhook URLs whose path is the credential (hermes fb6f8bc91c).
+    ("webhook_url", re.compile(
+        r"(https?://(?:hooks\.slack(?:-gov)?\.com/(?:services|workflows|triggers)/"
+        r"|(?:canary\.|ptb\.|www\.)?discord(?:app)?\.com/api/(?:v\d+/)?webhooks/"
+        r"|[A-Za-z0-9-]{1,63}\.webhook\.office\.com/webhookb2/))"
+        r"([\w@/%+=-]{8,512})"
+    )),
 ]
 # A truncated block (``head -c 600 id_rsa``) has no END: mask its base64 body.
 _PRIVATE_KEY_RE = re.compile(

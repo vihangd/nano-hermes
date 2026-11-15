@@ -77,6 +77,13 @@ class TestClassifyLlmResponseStatusCodes:
         r = classify_llm_response(_err_resp(error_status_code=403))
         assert r.reason == FailoverReason.auth
 
+    def test_403_guardrail_is_content_policy_not_auth(self):
+        r = classify_llm_response(_err_resp(
+            error_status_code=403,
+            content="Error: prompt injection patterns detected in input",
+        ))
+        assert r.reason == FailoverReason.content_policy and not r.should_abort
+
     def test_402_maps_to_billing(self):
         r = classify_llm_response(_err_resp(error_status_code=402))
         assert r.reason == FailoverReason.billing

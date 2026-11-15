@@ -66,6 +66,8 @@ _BILLING_TOKENS = frozenset({
     "insufficient_credits", "out of credits",
 })
 
+_GUARDRAIL_TOKENS = ("prompt injection", "guardrail", "content policy", "moderation")
+
 _CONTEXT_TOKENS = frozenset({
     "context_length_exceeded", "context window", "too many tokens",
     "maximum context", "context limit", "input too long",
@@ -96,6 +98,12 @@ def classify_llm_response(resp: Any) -> ClassifiedError | None:
     content = (getattr(resp, "content", None) or "").lower()
     combined = f"{error_type} {error_code} {content}"
 
+    # A provider guardrail answers 403 (OpenRouter: "prompt injection patterns
+    # detected"); transcripts and skill bodies trip it. It refuses this item
+    # only — read as auth it aborted the whole cycle (hermes 68f4cce2b7).
+    if any(t in combined for t in _GUARDRAIL_TOKENS):
+        return ClassifiedError(reason=FailoverReason.content_policy, status_code=status,
+                               message=content[:200])
     # Status-code takes priority over text signals.
     if status == 401 or status == 403:
         return ClassifiedError(reason=FailoverReason.auth, status_code=status,
