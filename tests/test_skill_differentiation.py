@@ -166,3 +166,27 @@ def test_migration_is_idempotent(tmp_path):
     _apply_migrations(hook.db)
     cols = {r[1] for r in hook.db.execute("PRAGMA table_info(skill_stats)")}
     assert "differentiated_hash" in cols
+
+
+async def test_a_rejected_reply_does_not_hog_later_cycles(tmp_path):
+    skills = {f"zorb-{i}": (f"Build zorblax thing {i}", "agent") for i in range(3)}
+    hook, _ = _setup(tmp_path, skills, differentiation_max_per_cycle=1)
+    await _index(hook, skills)
+    chat = _reply(hook, "no exclusion here")
+    for _ in range(3):
+        await run_differentiation(hook)
+    prompts = [c.kwargs["messages"][0]["content"] for c in chat.call_args_list]
+    assert len({p.split("FIRST SKILL: ")[1].split("\n")[0] for p in prompts}) == 3
+
+
+async def test_provider_down_ends_the_pass_without_marking(tmp_path):
+    skills = {f"zorb-{i}": (f"Build zorblax thing {i}", "agent") for i in range(3)}
+    hook, _ = _setup(tmp_path, skills)
+    await _index(hook, skills)
+    hook._loop.provider.chat_with_retry = AsyncMock(side_effect=RuntimeError("down"))
+    await run_differentiation(hook)
+    assert hook._loop.provider.chat_with_retry.call_count == 1
+    marked = hook.db.execute(
+        "SELECT COUNT(*) FROM skill_stats WHERE differentiated_hash IS NOT NULL"
+    ).fetchone()[0]
+    assert marked == 0

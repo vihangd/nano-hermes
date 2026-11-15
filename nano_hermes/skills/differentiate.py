@@ -166,11 +166,14 @@ async def run_differentiation(hook: "NanoHermesHook") -> list[str]:
                 max_tokens=160,
             )
         except Exception:
+            # Provider down: retry next cycle, don't spend the rest now.
             log.warning("differentiate: LLM call failed for %s", name, exc_info=True)
-            continue
+            break
         new = response_text(resp, "differentiate")
         if not new or not _valid(new) or not _split_skip(new)[1]:
+            # Marked done, else the same few skills take every cycle's calls.
             log.info("differentiate: rejected reply for %s: %r", name, (new or "")[:120])
+            _mark(hook, name, content_hash)
             continue
         if new == description:
             _mark(hook, name, content_hash)
@@ -190,6 +193,7 @@ async def run_differentiation(hook: "NanoHermesHook") -> list[str]:
         )
         if result.startswith("Error"):
             log.warning("differentiate: edit failed for %s — %s", name, result)
+            _mark(hook, name, content_hash)
             continue
         # The indexer stores this digest once it re-embeds the file as written.
         written = _read(hook, name)

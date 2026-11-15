@@ -417,6 +417,8 @@ class TestRunRewriter:
          "Better reports. Not for shell."),
         # Body only: the file's current description stays, quoting intact.
         ("## Steps\n1. y", "Make reports: weekly. Not for shell."),
+        # A leading horizontal rule is body, not frontmatter.
+        ("---\n\n## Steps\n\n---\n\n1. y", "Make reports: weekly. Not for shell."),
     ])
     def test_rewrite_keeps_one_frontmatter_with_a_description(self, tmp_path, new_md, desc):
         """The rewriter passes no description; writing its body as-is nested a
@@ -432,7 +434,7 @@ class TestRunRewriter:
         with _critic_approved():
             assert asyncio.run(run_rewriter(hook)) == ["s"]
         text = (hook.workspace / "skills" / "s" / "SKILL.md").read_text()
-        assert text.count("---\n") == 2 and "1. y" in text
+        assert "## Steps" in text and "1. y" in text
         assert SkillsLoader(hook.workspace).get_skill_metadata("s")["description"] == desc
 
     def test_run_rewriter_preserves_old_version(self, tmp_path):

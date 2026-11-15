@@ -102,7 +102,9 @@ def render_skill(
     """
     body = body.strip()
     m = _FRONTMATTER_RE.match(body + "\n")
-    if m:
+    # A leading "---" may be a horizontal rule: only a block with a
+    # name/description key is the model's frontmatter.
+    if m and re.search(r"^(?:name|description):", m.group(1), re.MULTILINE):
         description = description or _raw_description(body + "\n")
         body = body[m.end():].strip()
     if not description and existing:

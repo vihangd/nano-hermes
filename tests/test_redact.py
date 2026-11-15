@@ -232,6 +232,7 @@ class TestRedactionResult:
     # hermes 4c7af743b1, fb6f8bc91c
     ("mcp https://mcp.example.com/sse?page=2&userToken=Zq9xLm2Pt", "Zq9xLm2Pt", "url_query"),
     ("GET /v1/x?apikey=abc123def&y=1", "abc123def", "url_query"),
+    ("GET /v1/x?token=ABCDEF123&y=1", "ABCDEF123", "url_query"),  # caps with digits
     ("https://hooks.slack.com/services/T0001/B0001/XyZ123abcDEF456ghi", "XyZ123abcDEF456ghi",
      "webhook_url"),
     ("https://discord.com/api/webhooks/123456789/AbCdEfGh-IjKlMn", "AbCdEfGh-IjKlMn",
@@ -255,6 +256,10 @@ def test_structural_secret_is_masked(text, secret, kind):
     "password = get_password()",
     "https://example.com/search?q=token&sort=asc&keyword=api",
     "https://discord.com/channels/123/456",
+    # Template placeholders in skills are not secrets.
+    'curl "https://api.x.io/v1?api_key=$API_KEY&q=1"',
+    "https://api.x.io/v1?token=${TOKEN}&key={key}&sig=<signature>&auth=%s",
+    "https://api.x.io/v1?api_key=YOUR_API_KEY",
     "REDACT_SECRETS=false GITHUB_TOKEN=none AUTH_ENABLED='on' API_KEY=null",
 ])
 def test_structural_prose_is_untouched(text):

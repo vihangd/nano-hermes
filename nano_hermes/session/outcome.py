@@ -33,9 +33,12 @@ _GOAL_CONTINUE = "You have an active sustained goal:"
 _HIDDEN_HISTORY = "_hidden_history"
 # The user asking to stop. nanobot > 0.4.1 has the agent mark the goal
 # "block" for it (only the user can cancel), so it must not read as a failure.
+# The stop word must end the request ("stop", "stop, never mind", "please
+# cancel it") — not open one ("stop using semicolons", "stop-loss calc").
 _STOP_RE = re.compile(
-    r"^\W*(?:stop|cancel|abort|never\s*mind|nvm|forget\s+(?:it|about\s+it)|"
-    r"that'?s\s+enough)\b",
+    r"^\W*(?:please\s+)?(?:stop|cancel|abort|halt|never\s*mind|nvm|"
+    r"forget\s+(?:it|about\s+it)|that'?s\s+enough)"
+    r"(?:\s+(?:it|that|this|now|please|the\s+goal|working))*\s*(?:[.!,;]|$)",
     re.IGNORECASE,
 )
 

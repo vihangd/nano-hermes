@@ -92,7 +92,10 @@ _STRUCTURAL = [
     ("url_query", re.compile(
         r"([?&](?:access_token|refresh_token|id_token|token|api_?key|apikey|client_secret|"
         r"password|auth|jwt|secret|key|signature|sig|x-amz-signature|x-goog-signature|"
-        r"usertoken)=)([^&#\s\"'<>]{1,512})", re.I
+        r"usertoken)=)"
+        # A template placeholder ($API_KEY, {key}, %s, <token>, YOUR_KEY) is
+        # not a secret; masking it breaks the skill that carries it.
+        r"(?![$%{<])(?!(?-i:[A-Z][A-Z_]*)(?:[&#\s\"'<>]|$))([^&#\s\"'<>]{1,512})", re.I
     )),
     # Webhook URLs whose path is the credential (hermes fb6f8bc91c).
     ("webhook_url", re.compile(
