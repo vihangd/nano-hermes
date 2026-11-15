@@ -149,6 +149,12 @@ class TestGoalTrackerTransitions:
         assert tracker.update([_plain_user("go"), blocked]) == "blocked"
         assert tracker.active is False
 
+    def test_an_older_active_block_does_not_hide_the_block(self):
+        tracker = GoalTracker()
+        tracker.update([_user_goal("go", "finish")])
+        blocked = {"role": "user", "content": "hi\n\n" + _runtime_block("Goal (blocked):", "finish")}
+        assert tracker.update([_user_goal("go", "finish"), blocked]) == "blocked"
+
     def test_objective_updates_in_place(self):
         tracker = GoalTracker()
         tracker.update([_user_goal("go", "plan A")])

@@ -114,6 +114,13 @@ def _hash_content(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
+def description_digest(name: str, description: str) -> str:
+    """The ``content_hash`` stored for a skill with this description."""
+    desc, skip = _split_skip(description)
+    text = _content_text(name, desc)
+    return _hash_content(text if skip is None else f"{text}\0{skip}")
+
+
 class SkillIndexer:
     def __init__(
         self,
@@ -258,9 +265,10 @@ class SkillIndexer:
         skips: list[str | None] = []
         for entry in entries:
             name = entry["name"]
-            description, skip = _split_skip(description_by_name.get(name, ""))
+            raw = description_by_name.get(name, "")
+            description, skip = _split_skip(raw)
             text = _content_text(name, description)
-            digest = _hash_content(text if skip is None else f"{text}\0{skip}")
+            digest = description_digest(name, raw)
             if hash_by_name.get(name) == digest:
                 continue
             stale.append((name, text, digest, source_by_name[name]))

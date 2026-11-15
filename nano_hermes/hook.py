@@ -800,6 +800,9 @@ class NanoHermesHook(AgentHook):
             distinct = await run_differentiation(self)
             if distinct:
                 log.info("evolution cycle: differentiated %s", distinct)
+        except EvolutionAbortError as _ea:
+            log.error("evolution cycle: differentiation aborted (%s) — skipping remainder", _ea.classified.reason.value)
+            return
         except Exception:
             log.exception("evolution cycle: differentiation failed")
 

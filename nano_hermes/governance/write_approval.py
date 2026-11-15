@@ -89,6 +89,22 @@ def _raw_description(md: str) -> str:
     return d.group(1).strip() if d else ""
 
 
+def _yaml_scalar(description: str) -> str:
+    """*description* as a YAML value that reads back as written: plain when
+    it already does, else double-quoted (an unquoted ": " or " #" would change
+    or drop it, and the skill leaves nanobot's summary)."""
+    if not description:
+        return description
+    try:
+        import yaml  # noqa: PLC0415 — nanobot's own dependency
+
+        if yaml.safe_load(f"d: {description}") == {"d": description}:
+            return description
+    except Exception:  # noqa: BLE001 — YAMLError, or yaml missing
+        pass
+    return json.dumps(description, ensure_ascii=False)
+
+
 def render_skill(
     skill_name: str, description: str, body: str, existing: str | None = None
 ) -> str:
@@ -98,8 +114,10 @@ def render_skill(
     description: their body's own frontmatter supplies it (written as-is it
     nested a second frontmatter under ``description:`` empty, which nanobot
     reads as None, dropping the skill from its summary). With neither, the
-    file's current description stays. Raw values keep their quoting.
+    file's current description stays. Raw values keep their quoting; a
+    caller's description is quoted when YAML would misread it.
     """
+    description = _yaml_scalar(description.strip())
     body = body.strip()
     m = _FRONTMATTER_RE.match(body + "\n")
     # A leading "---" may be a horizontal rule: only a block with a
@@ -309,7 +327,7 @@ def _replay_skill_to_disk(
     from ..skills.guard import scan_skill_content  # noqa: PLC0415
     from ..skills.rewriter import save_skill_version  # noqa: PLC0415
 
-    err = scan_skill_content(body)
+    err = scan_skill_content(f"{description}\n{body}")
     if err:
         return f"Error: {err}"
 

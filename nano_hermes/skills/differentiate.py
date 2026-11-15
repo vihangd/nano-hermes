@@ -18,9 +18,13 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from ..governance import write_approval as wa
-from ..utils.error_classifier import response_text
-from .external import _FRONTMATTER_RE, _parse_frontmatter
-from .indexer import _content_text, _hash_content, _split_skip
+from ..utils.error_classifier import (
+    EvolutionAbortError,
+    FailoverReason,
+    classify_llm_response,
+)
+from .external import _FRONTMATTER_RE
+from .indexer import _split_skip, description_digest
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
@@ -48,34 +52,13 @@ body; how it differs from {neighbour}; then end with the sentence
 description already has. Use no colons and no quotes. Output only the line.
 """
 
-_BLOCKING = ("---", "\n", ": ", " #")
-
-
 def _valid(description: str) -> bool:
-    """One plain YAML scalar that reads back exactly as written.
-
-    nanobot parses the frontmatter as YAML: an unquoted ": " or " #" would
-    change or drop the description (the skill then leaves its summary).
-    """
-    if not description or len(description) > 400 or any(b in description for b in _BLOCKING):
-        return False
-    if description[0] in "'\"" or description[-1] in "'\"":
-        return False  # the indexer's regex parse strips edge quotes
-    try:
-        import yaml  # noqa: PLC0415 — nanobot's own dependency
-    except ImportError:
-        return False
-    try:
-        return yaml.safe_load(f"description: {description}") == {"description": description}
-    except yaml.YAMLError:
-        return False
-
-
-def _digest(name: str, description: str) -> str:
-    """The content hash the indexer will store for this description."""
-    desc, skip = _split_skip(description)
-    text = _content_text(name, desc)
-    return _hash_content(text if skip is None else f"{text}\0{skip}")
+    """One line, no quotes or backslashes: render_skill quotes it when YAML
+    would misread it, and the indexer's read then gives back the same text."""
+    return (
+        bool(description) and len(description) <= 400
+        and not any(c in description for c in "\n\"\\")
+    )
 
 
 def _candidates(hook: "NanoHermesHook") -> tuple[list[tuple], list[tuple]]:
@@ -109,7 +92,9 @@ def _read(hook: "NanoHermesHook", name: str) -> tuple[str, str] | None:
     m = _FRONTMATTER_RE.match(text)
     if not m:
         return None
-    return _parse_frontmatter(text).get("description", ""), text[m.end():].strip()
+    # The indexer's read: handles folded/block scalars the regex parse misses.
+    description = hook.skill_indexer._description_for({"name": name, "path": str(path)})
+    return description, text[m.end():].strip()
 
 
 def _mark(hook: "NanoHermesHook", name: str, digest: str) -> None:
@@ -169,7 +154,15 @@ async def run_differentiation(hook: "NanoHermesHook") -> list[str]:
             # Provider down: retry next cycle, don't spend the rest now.
             log.warning("differentiate: LLM call failed for %s", name, exc_info=True)
             break
-        new = response_text(resp, "differentiate")
+        err = classify_llm_response(resp)
+        if err is not None:
+            if err.should_abort:
+                raise EvolutionAbortError(err)
+            if err.reason not in (FailoverReason.content_policy, FailoverReason.context_overflow):
+                # Outage or rate limit: retry next cycle, unmarked.
+                log.warning("differentiate: %s for %s", err.reason.value, name)
+                break
+        new = None if err else (resp.content or "").strip()
         if not new or not _valid(new) or not _split_skip(new)[1]:
             # Marked done, else the same few skills take every cycle's calls.
             log.info("differentiate: rejected reply for %s: %r", name, (new or "")[:120])
@@ -184,7 +177,7 @@ async def run_differentiation(hook: "NanoHermesHook") -> list[str]:
                 reason=f"differentiate from {neighbour}", origin="differentiate",
             )
             # Approved and re-indexed, the skill's hash becomes this digest.
-            _mark(hook, name, _digest(name, new))
+            _mark(hook, name, description_digest(name, new))
             done.append(name)
             continue
         result = await tool._edit(
@@ -197,7 +190,7 @@ async def run_differentiation(hook: "NanoHermesHook") -> list[str]:
             continue
         # The indexer stores this digest once it re-embeds the file as written.
         written = _read(hook, name)
-        _mark(hook, name, _digest(name, written[0] if written else new))
+        _mark(hook, name, description_digest(name, written[0] if written else new))
         log.info("differentiate: %s now distinct from %s", name, neighbour)
         done.append(name)
     return done

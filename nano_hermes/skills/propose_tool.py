@@ -626,8 +626,9 @@ class ProposeSkillTool(Tool):
         success_msg: str,
         edit_mode: bool = False,
     ) -> str:
-        # Security scan the body before touching the filesystem.
-        err = scan_skill_content(body)
+        # Security scan before touching the filesystem. The description too:
+        # nanobot puts it in every system prompt.
+        err = scan_skill_content(f"{description}\n{body}")
         if err:
             return f"Error: {err}"
 

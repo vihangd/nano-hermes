@@ -26,6 +26,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ..session.archiver import _extract_text
+
 log = logging.getLogger(__name__)
 
 
@@ -61,26 +63,20 @@ def _goal_block_text(messages: list[dict[str, Any]]) -> str | None:
     the runtime sentinel makes detection robust wherever nanobot places it and
     rejects a user who merely types the marker.
 
-    Scanned tail-first and returns on the first match: the runtime block lives
-    in the latest user message, so in a long ``/goal`` session this touches one
-    or a few messages instead of the whole transcript every iteration.
+    Only the newest runtime block counts, found tail-first: in a long
+    ``/goal`` session this touches one or a few messages, not the transcript.
     """
-    for m in reversed(messages):
-        text = _message_text(m)
-        if text and _RUNTIME_SENTINEL in text and _has_active_marker(text):
-            return text
-    return None
+    text = _latest_runtime_text(messages)
+    return text if _has_active_marker(text) else None
 
 
-def _message_text(m: dict[str, Any]) -> str | None:
-    content = m.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(
-            str(block.get("text") or "") for block in content if isinstance(block, dict)
-        )
-    return None
+def _latest_runtime_text(messages: list[dict[str, Any]]) -> str:
+    """The newest runtime block decides: an older one still in the window
+    may say active after the goal turned blocked or done."""
+    return next(
+        (t for t in map(_extract_text, reversed(messages)) if t and _RUNTIME_SENTINEL in t),
+        "",
+    )
 
 
 def _parse_objective(text: str) -> str | None:
@@ -157,12 +153,8 @@ class GoalTracker:
             self.active = False
             # last_objective is intentionally NOT cleared so the caller
             # can quote it in the reflection prompt; cleared on next start.
-            latest = next(
-                (t for t in map(_message_text, reversed(messages))
-                 if t and _RUNTIME_SENTINEL in t),
-                "",
-            )
-            return "blocked" if _BLOCKED_MARKER in latest else "completed"
+            blocked = _BLOCKED_MARKER in _latest_runtime_text(messages)
+            return "blocked" if blocked else "completed"
         if now_active:
             # Keep last_objective current — the objective text can be
             # edited in-place via /goal update commands.

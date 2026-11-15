@@ -12,6 +12,7 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
+import pytest
 
 import nano_hermes
 from conftest import _make_loop
@@ -335,3 +336,17 @@ class TestApprovePrinciples:
         assert f"#{pid} principles" in out and "2 op(s)" in out
         assert "  add: when X" in out
         assert "  remove: 7" in out
+
+
+@pytest.mark.parametrize("desc", [
+    "Deploys: k8s and ECS. Not for local dev.",
+    "[beta] Builds reports",
+    "Runs jobs #nightly",
+    "Plain text. Not for charts.",
+])
+def test_render_skill_description_reads_back(desc):
+    import yaml
+
+    md = wa.render_skill("s", desc, "## Steps\n1. go")
+    front = md.split("---\n")[1]
+    assert yaml.safe_load(front)["description"] == desc

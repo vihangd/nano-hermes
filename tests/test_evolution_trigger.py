@@ -122,6 +122,24 @@ class TestRunEvolutionCycle:
 
         assert rewriter_ran  # rewriter runs even if GEPA fails
 
+    async def test_differentiation_billing_abort_ends_the_cycle(self, tmp_path):
+        from nano_hermes.utils.error_classifier import (
+            ClassifiedError,
+            EvolutionAbortError,
+            FailoverReason,
+        )
+
+        hook = _make_hook(tmp_path, interval=1)
+        abort = EvolutionAbortError(ClassifiedError(reason=FailoverReason.billing))
+        ratchet = AsyncMock()
+        with patch("nano_hermes.skills.gepa.run_gepa", new=AsyncMock(return_value=[])), \
+             patch("nano_hermes.skills.rewriter.run_rewriter", new=AsyncMock(return_value=[])), \
+             patch("nano_hermes.skills.differentiate.run_differentiation",
+                   new=AsyncMock(side_effect=abort)), \
+             patch("nano_hermes.skills.skill_retirement.run_ratchet", new=ratchet):
+            await hook._run_evolution_cycle()
+        ratchet.assert_not_called()
+
 
 class TestSessionBoundaryIntegration:
     def test_counter_increments_at_session_boundary(self, tmp_path):

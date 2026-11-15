@@ -65,14 +65,15 @@ _JSON_FIELD_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Authorization / Proxy-Authorization (hermes f2a510b259): after a known
-# scheme any 8+ char credential; bare, it needs a digit or one of = _ - . / +
-# so prose ("Authorization: required", "... Basic auth") stays intact.
+# Authorization / Proxy-Authorization (hermes f2a510b259). Schemes match
+# case-sensitively so prose ("Authorization: token required") isn't a header:
+# after Bearer any credential; after another scheme 8+ chars; bare, 8+ with a
+# digit or one of = _ - . / + ("Authorization: required", "... Basic auth").
 _AUTH_HEADER_RE = re.compile(
-    r"((?:Proxy-)?Authorization:\s*"
-    r"(?:(?:Bearer|Basic|Digest|Token|Bot|Negotiate|NTLM|ApiKey)\s+|(?=[^\s\"']*[\d=_\-./+])))"
-    r"([^\s\"']{8,})",
-    re.IGNORECASE,
+    r"((?i:(?:Proxy-)?Authorization):\s*"
+    r"(?:Bearer\s+|(?:Basic|Digest|Token|Bot|Negotiate|NTLM|ApiKey)\s+(?=[^\s\"']{8})"
+    r"|(?=[^\s\"']{8})(?=[^\s\"']*[\d=_\-./+])))"
+    r"([^\s\"']+)",
 )
 
 # Structural secrets masked in group 2 (hermes dc6149b22d, 2d54c978f7,
@@ -105,10 +106,11 @@ _STRUCTURAL = [
         r"([\w@/%+=-]{8,512})"
     )),
 ]
-# A truncated block (``head -c 600 id_rsa``) has no END: mask its base64 body.
+# A truncated block (``head -c 600 id_rsa``) has no END: mask its base64
+# lines only, so prose after it survives.
 _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN[A-Z ]*PRIVATE KEY-----"
-    r"(?:[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----|[A-Za-z0-9+/=\s]*)"
+    r"(?:[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----|(?:\r?\n[A-Za-z0-9+/=]+(?=\r?\n|\Z))*)"
 )
 
 # Telegram bot token: optional 'bot' prefix + numeric id + ':' + 30+ char token.

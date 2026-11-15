@@ -229,6 +229,7 @@ class TestRedactionResult:
     ("head -c 600 id_rsa\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAx",
      "MIIEpAIBAAKCAQEAx", "private_key"),
     ("postgres://user:p@ss@host/db", "ss@host", "url_userinfo"),
+    ("Authorization: Bearer abc123", "abc123", "auth_header"),
     # hermes 4c7af743b1, fb6f8bc91c
     ("mcp https://mcp.example.com/sse?page=2&userToken=Zq9xLm2Pt", "Zq9xLm2Pt", "url_query"),
     ("GET /v1/x?apikey=abc123def&y=1", "abc123def", "url_query"),
@@ -251,6 +252,7 @@ def test_structural_secret_is_masked(text, secret, kind):
 
 @pytest.mark.parametrize("text", [
     "Send the Authorization: Basic auth header.",
+    "Authorization: token required for this endpoint",
     "See https://example.com/a:b and user@example.com",
     "the Cookie: header carries state",
     "password = get_password()",
@@ -294,3 +296,8 @@ def test_scoped_npm_url_is_untouched():
 
 def test_a_boolean_lookalike_secret_is_still_masked():
     assert "falsehood9" not in redact("API_KEY=falsehood9").text
+
+
+def test_truncated_private_key_keeps_the_prose_after_it():
+    r = redact("-----BEGIN RSA PRIVATE KEY-----\nMIIEabc\n\nThe deploy key lives in vault")
+    assert "MIIEabc" not in r.text and r.text.endswith("\n\nThe deploy key lives in vault")
