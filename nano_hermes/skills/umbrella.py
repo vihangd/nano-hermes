@@ -100,8 +100,8 @@ def _read_body(hook: "NanoHermesHook", name: str) -> str | None:
 def _write_umbrella(hook: "NanoHermesHook", name: str, description: str, body: str) -> None:
     path = hook.workspace / "skills" / name / "SKILL.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    content = f"---\nname: {name}\ndescription: {description}\n---\n\n{body.strip()}\n"
-    atomic_write_text(path, content)
+    from ..governance.write_approval import render_skill  # noqa: PLC0415
+    atomic_write_text(path, render_skill(name, description, body))
 
 
 def _parse_merge(text: str) -> dict | None:
