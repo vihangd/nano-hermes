@@ -796,6 +796,14 @@ class NanoHermesHook(AgentHook):
             log.exception("evolution cycle: umbrella merge failed")
 
         try:
+            from .skills.differentiate import run_differentiation  # noqa: PLC0415
+            distinct = await run_differentiation(self)
+            if distinct:
+                log.info("evolution cycle: differentiated %s", distinct)
+        except Exception:
+            log.exception("evolution cycle: differentiation failed")
+
+        try:
             from .skills.skill_retirement import run_ratchet  # noqa: PLC0415
             result = run_ratchet(self)
             if result["retired"]:

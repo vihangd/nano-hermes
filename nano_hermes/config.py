@@ -180,6 +180,12 @@ class SkillStatsConfig(BaseModel):
     umbrella_min_cluster: int = 2
     umbrella_max_cluster: int = 5
     umbrella_max_merges_per_run: int = 2
+    # Skill++ (arXiv 2611.00544): rewrite an agent skill's description to say
+    # how it differs from its nearest neighbour, ending "Not for <case>." for
+    # the skip gate. One LLM call per close pair, in the evolution cycle.
+    differentiation_enabled: bool = False
+    differentiation_min_sim: float = 0.75
+    differentiation_max_per_cycle: int = 3
     rewrite_context_chunks: int = 5         # how many failed-session chunks to send the LLM
     # Auto-evolution trigger: run GEPA (if enabled) then rewriter every N completed sessions.
     # 0 = disabled (off by default). Recommended starting value: 5–10.

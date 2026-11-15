@@ -456,6 +456,8 @@ _MIGRATIONS = [
     # unstamped, so the source guard keeps this from touching new labels.
     "UPDATE trajectories SET outcome = 'unknown' "
     "WHERE outcome = 'ok' AND outcome_source IS NULL",
+    # Skill++ differentiation: the content hash a skill was last checked at.
+    "ALTER TABLE skill_stats ADD COLUMN differentiated_hash TEXT",
 ]
 
 
