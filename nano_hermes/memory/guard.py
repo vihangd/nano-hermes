@@ -18,7 +18,17 @@ log = logging.getLogger(__name__)
 
 _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("ignore instructions", re.compile(
-        r"ignore\s+(?:all\s+)?(?:the\s+)?(previous|prior|all|above)\s+instructions",
+        r"ignore\s+(?:(?:all|any|your|the)\s+){0,2}(previous|prior|all|above|earlier)\s+"
+        r"(?:\w+\s+){0,2}instructions",
+        re.IGNORECASE
+    )),
+    # hermes e25161a074: "forget your instructions". A negated forget ("don't
+    # forget your instructions", "**Don't** forget", over a line break) is a
+    # reminder, not an attack.
+    ("forget instructions", re.compile(
+        r"(?<!n't\s)(?<!n’t\s)(?<!not\s)(?<!never\s)(?<!n't\*\*\s)(?<!n’t\*\*\s)"
+        r"\bforget\s+(?:about\s+)?(?:your|all|any|previous|prior|above|earlier)\s+"
+        r"(?:\w+\s+){0,3}(?:instructions|rules|guidelines)",
         re.IGNORECASE
     )),
     ("role hijack", re.compile(r"you\s+are\s+now\s+", re.IGNORECASE)),
@@ -28,8 +38,12 @@ _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("system prompt override", re.compile(
         r"system\s+prompt\s+override", re.IGNORECASE
     )),
+    # "disregard any linting rules for scripts/" is a user preference, so only
+    # instructions/guidelines widen to any/all/previous; rules need "your".
     ("disregard rules", re.compile(
-        r"disregard\s+your\s+(instructions|rules|guidelines)", re.IGNORECASE
+        r"disregard\s+(?:your\s+(?:\w+\s+){0,2}(?:instructions|rules|guidelines)|"
+        r"(?:all|any|previous|prior|above|earlier)\s+(?:\w+\s+){0,2}(?:instructions|guidelines))",
+        re.IGNORECASE
     )),
     ("no restrictions", re.compile(
         r"act\s+as\s+if\s+you\s+have\s+no\s+(restrictions|limits)", re.IGNORECASE
