@@ -181,6 +181,7 @@ async def run_differentiation(hook: "NanoHermesHook") -> list[str]:
             )
             # Approved and re-indexed, the skill's hash becomes this digest.
             _mark(hook, name, description_digest(name, new))
+            descriptions[name] = new
             done.append(name)
             continue
         result = await tool._edit(
@@ -194,6 +195,7 @@ async def run_differentiation(hook: "NanoHermesHook") -> list[str]:
         # The indexer stores this digest once it re-embeds the file as written.
         written = _read(hook, name)
         _mark(hook, name, description_digest(name, written[0] if written else new))
+        descriptions[name] = written[0] if written else new
         log.info("differentiate: %s now distinct from %s", name, neighbour)
         done.append(name)
     return done

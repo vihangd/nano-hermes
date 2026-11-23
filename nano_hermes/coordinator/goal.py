@@ -44,6 +44,7 @@ _ACTIVE_MARKER_NOOBJ = "Goal: active"
 # nanobot > 0.4.1 keeps a blocked goal in the runtime context
 # (goal_state_runtime_lines); the agent blocks when the user asks to stop.
 _BLOCKED_MARKER = "Goal (blocked):"
+_BLOCKED_MARKER_NOOBJ = "Goal: blocked"  # no objective text stored
 _RUNTIME_SENTINEL = "[Runtime Context"
 _RUNTIME_END = "[/Runtime Context"  # closes the block; ']' omitted for safety
 _OBJECTIVE_MAX_CHARS = 240  # cap for the snapshot stored on transition
@@ -58,10 +59,9 @@ def _goal_block_text(messages: list[dict[str, Any]]) -> str | None:
     Runtime Context block, or ``None``.
 
     Single pass — both ``goal_active`` and the objective parse derive from this
-    so the per-iteration tracker scans the message list once. We don't filter
-    by role: the block rides in the current user message today, but requiring
-    the runtime sentinel makes detection robust wherever nanobot places it and
-    rejects a user who merely types the marker.
+    so the per-iteration tracker scans the message list once. Only user-role
+    messages with the runtime sentinel count: tool output can't fake the
+    block, and a user who merely types the marker isn't read as a goal.
 
     Only the newest runtime block counts, found tail-first: in a long
     ``/goal`` session this touches one or a few messages, not the transcript.
@@ -155,7 +155,8 @@ class GoalTracker:
             self.active = False
             # last_objective is intentionally NOT cleared so the caller
             # can quote it in the reflection prompt; cleared on next start.
-            blocked = _BLOCKED_MARKER in _latest_runtime_text(messages)
+            latest = _latest_runtime_text(messages)
+            blocked = _BLOCKED_MARKER in latest or _BLOCKED_MARKER_NOOBJ in latest
             return "blocked" if blocked else "completed"
         if now_active:
             # Keep last_objective current — the objective text can be

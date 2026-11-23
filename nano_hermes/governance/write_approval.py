@@ -128,7 +128,10 @@ def render_skill(
     # A leading "---" may be a horizontal rule: only a block with a
     # name/description key is the model's frontmatter.
     if m and re.search(r"^(?:name|description):", m.group(1), re.MULTILINE):
-        description = description or _raw_description(body + "\n")
+        raw = _raw_description(body + "\n")
+        # The model's own line is checked like a caller's ("Not for: b." is
+        # invalid YAML); a block scalar indicator stays as written.
+        description = description or (raw if raw[:1] in (">", "|") else _yaml_scalar(raw))
         body = body[m.end():].strip()
     if existing:
         description = description or _raw_description(existing)

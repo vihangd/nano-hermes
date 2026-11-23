@@ -9,7 +9,6 @@ its tests while never firing for real.
 """
 from __future__ import annotations
 
-import pytest
 from nanobot.agent.hook import AgentHookContext
 
 import nano_hermes
@@ -148,6 +147,13 @@ class TestGoalTrackerTransitions:
         # The previous turn's (stripped) user message sits before it.
         assert tracker.update([_plain_user("go"), blocked]) == "blocked"
         assert tracker.active is False
+
+    def test_blocked_goal_without_objective_is_not_a_completion(self):
+        tracker = GoalTracker()
+        active = {"role": "user", "content": "hi\n\n" + _runtime_block("Goal: active (no objective text stored).")}
+        assert tracker.update([active]) == "started"
+        blocked = {"role": "user", "content": "hi\n\n" + _runtime_block("Goal: blocked (no objective text stored).")}
+        assert tracker.update([_plain_user("go"), blocked]) == "blocked"
 
     def test_an_older_active_block_does_not_hide_the_block(self):
         tracker = GoalTracker()

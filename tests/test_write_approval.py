@@ -372,6 +372,13 @@ def test_render_skill_keeps_other_frontmatter_keys():
         assert "old" not in md.split("---\n")[2]
 
 
+def test_render_skill_quotes_the_models_own_description():
+    import yaml
+
+    md = wa.render_skill("s", "", "---\nname: s\ndescription: Does a. Not for: b.\n---\nbody", None)
+    assert yaml.safe_load(md.split("---\n")[1])["description"] == "Does a. Not for: b."
+
+
 def test_render_skill_ignores_keys_the_model_adds():
     md = wa.render_skill("s", "", "---\nname: s\ndescription: d\nalways: true\n---\nbody", None)
     assert "always" not in md

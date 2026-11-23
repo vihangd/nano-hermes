@@ -75,8 +75,8 @@ _JSON_FIELD_RE = re.compile(
 # or 16+ chars, so prose ("token required for this", "Basic auth") stays.
 # A placeholder ($API_TOKEN, {token}, <key>) is not a secret.
 _AUTH_HEADER_RE = re.compile(
-    r"((?:Proxy-)?Authorization:\s*"
-    r"(?:(?:Bearer|Basic|Digest|Token|Bot|Negotiate|NTLM|ApiKey)\s+)?)"
+    r"((?:Proxy-)?Authorization:[ \t]*"
+    r"(?:(?:Bearer|Basic|Digest|Token|Bot|Negotiate|NTLM|ApiKey)[ \t]+)?)"
     r"(?![$%{<])(?=[^\s\"']*[\d=_\-./+]|[^\s\"']{16})([^\s\"']{6,})",
     re.IGNORECASE,
 )
@@ -109,7 +109,8 @@ _STRUCTURAL = [
     # lowercase "token = ..." is Python in a skill body.
     ("aws_credentials", re.compile(
         r"(\baws_(?:secret_access_key|session_token)[ \t]*=[ \t]*)"
-        r"(?![$%{<])(?!(?-i:[A-Z][A-Z_]*)(?:\s|$))([^\s\"']+)", re.I
+        r"(?![$%{<])(?!(?-i:[A-Z][A-Z_]*)(?:\s|$))"
+        r"(?!(?:true|false|yes|no|on|off|none|null)(?![^\s\"']))([^\s\"']+)", re.I
     )),
     # Credential-named query params (hermes 4c7af743b1): ?token=, &sig=, …
     ("url_query", re.compile(
@@ -152,11 +153,42 @@ _PEM_FIRST_RE = re.compile(r"[ \t]*(?:MII|b3BlbnNzaC1rZXk)[A-Za-z0-9+/=]*[ \t\r]
 # An encrypted PEM's headers and the blank line after them precede the body.
 _PEM_HEADER_RE = re.compile(r"[ \t]*(?:Proc-Type|DEK-Info|Comment):[^\n]*$|[ \t\r]*$")
 # Inside a JSON string the newlines are literal "\n": a lone armor plus its
-# base64 runs. Bounded starts keep the tail scan linear.
-_PEM_ESCAPED_RE = re.compile(
-    r"-----BEGIN[A-Z ]*PRIVATE KEY-----(?:\\n[A-Za-z0-9+/=]{4,})+(?:\\n)?"
-    r"|(?<![A-Za-z0-9+/=])(?:[A-Za-z0-9+/=]{4,}\\n)+-----END[A-Z ]*PRIVATE KEY-----"
+# base64 chunks. A chunk needs a digit, "+" or "/" ("\nDone" is prose); the
+# escape after the key stays, so the JSON still parses.
+_PEM_ESC_BEGIN_RE = re.compile(
+    r"-----BEGIN[A-Z ]*PRIVATE KEY-----"
+    r"(?:\\n(?:MII|(?=[A-Za-z=]*[0-9+/]))[A-Za-z0-9+/=]{4,})+"
 )
+_PEM_ESC_END_RE = re.compile(r"\\n-----END[A-Z ]*PRIVATE KEY-----")
+# The last chunk before *endpos*, starting at a whole "\n" or after prose.
+_PEM_ESC_CHUNK_RE = re.compile(
+    r"(?:(?<=\\n)|(?<![A-Za-z0-9+/=\\]))(?=[A-Za-z=]*[0-9+/])[A-Za-z0-9+/=]{4,}\Z"
+)
+
+
+def _escaped_tails(text: str) -> tuple[str, int]:
+    """Mask base64 chunks before each escaped lone END, walking back from
+    it (a regex scan restarted at every chunk: quadratic)."""
+    out: list[str] = []
+    pos = found = 0
+    for m in _PEM_ESC_END_RE.finditer(text):
+        start = cut = m.start()
+        while cut > pos:
+            prev = text.rfind("\\n", pos, cut)
+            c = _PEM_ESC_CHUNK_RE.search(text, prev + 2 if prev >= pos else pos, cut)
+            if not c:
+                break
+            start = c.start()
+            if prev < pos or c.start() != prev + 2:
+                break  # prose before the chunk: the run starts here
+            cut = prev
+        if start == m.start():
+            continue  # no body: the line walker handles the lone armor
+        out.append(text[pos:start] + "[REDACTED PRIVATE KEY]")
+        pos = m.end()
+        found += 1
+    out.append(text[pos:])
+    return "".join(out), found
 
 
 def _partial_keys(text: str) -> tuple[str, int]:
@@ -170,7 +202,9 @@ def _partial_keys(text: str) -> tuple[str, int]:
         nonlocal found
         found += 1
         return "[REDACTED PRIVATE KEY]"
-    text = _PEM_ESCAPED_RE.sub(_esc, text)
+    text = _PEM_ESC_BEGIN_RE.sub(_esc, text)
+    text, n = _escaped_tails(text)
+    found += n
     lines = text.split("\n")
     out: list[str] = []
     i = 0

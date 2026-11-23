@@ -133,6 +133,17 @@ async def test_a_close_skill_added_later_is_noticed(tmp_path):
     assert await run_differentiation(hook) == ["zorb-report"]
 
 
+async def test_mutual_neighbours_see_the_fresh_description(tmp_path):
+    pair = {"zorb-report": ("Build zorblax reports", "agent"),
+            "zorb-chart": ("Build zorblax charts", "agent")}
+    hook, _ = _setup(tmp_path, pair)
+    await _index(hook, pair)
+    chat = _reply(hook, _NEW)
+    assert len(await run_differentiation(hook)) == 2
+    second = chat.call_args_list[1].kwargs["messages"][0]["content"]
+    assert "Its description: " + _NEW in second
+
+
 @pytest.mark.parametrize("reply, finish", [
     ("Builds zorblax reports\nNot for charts.", "stop"),
     ('Builds "zorblax" reports. Not for charts.', "stop"),  # quotes

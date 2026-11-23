@@ -394,6 +394,28 @@ def test_partial_key_body_never_leaks(text):
     assert "MIIEvQ" not in redact(text).text
 
 
+@pytest.mark.parametrize("text, kept", [
+    ('{"out": "$ tail -3 key\\nAbCdEfGh12345678AbCdEfGh\\nXyZ0==\\n-----END RSA PRIVATE KEY-----\\n"}',
+     "$ tail -3 key\\n"),
+    ('{"k": "-----BEGIN PRIVATE KEY-----\\n%s\\nDone"}' % _B64, "\\nDone"),
+])
+def test_escaped_partial_key_keeps_valid_json(text, kept):
+    import json
+
+    out = redact(text).text
+    json.loads(out)
+    assert kept in out and "AbCdEf" not in out and "MIIEvQ" not in out
+
+
+@pytest.mark.parametrize("text", [
+    "Authorization: Bearer\n\nX-Request-Id: abc-123-def",
+    "AWS_SECRET_ACCESS_KEY=False",
+    "aws_session_token = none",
+])
+def test_empty_or_boolean_credentials_are_untouched(text):
+    assert redact(text).text == text
+
+
 def test_multi_line_netrc_password_is_masked():
     r = redact("machine example.com\n  login bob\n  password s3cretZq\n")
     assert "s3cretZq" not in r.text and "netrc" in r.kinds
@@ -401,3 +423,11 @@ def test_multi_line_netrc_password_is_masked():
 
 def test_netrc_lookalike_prose_is_untouched():
     assert redact("machine learning password reset").text == "machine learning password reset"
+
+
+def test_escaped_tail_scan_is_linear():
+    import time
+
+    start = time.perf_counter()
+    redact("-----BEGIN PRIVATE KEY----- x " + "AAA1\\n" * 20_000)
+    assert time.perf_counter() - start < 0.5
