@@ -432,6 +432,8 @@ async def _block_after(hook, user_text, key):
     ("you can stop now", "cancel"),
     ("please stop working on this", "cancel"),
     ("can you stop?", "cancel"),
+    ("stop, use the other API instead", "block"),
+    ("that's enough, now implement Y", "block"),
 ])
 async def test_user_stop_blocks_the_goal_without_failing_it(tmp_path, text, goal):
     """Past nanobot 0.4.1 only the user can cancel; the agent blocks when asked

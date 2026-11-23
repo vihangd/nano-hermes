@@ -36,13 +36,17 @@ _HIDDEN_HISTORY = "_hidden_history"
 # The stop word must end the request ("ok stop", "you can stop now", "please
 # stop working on this") — not open one ("stop using semicolons", "stop-loss
 # calc"). Only softeners may precede it, so "don't stop" never matches.
-_STOP_RE = re.compile(
-    r"^\W*(?:(?:ok(?:ay)?|no|nah|hey|alright|just|please|pls|you\s+can|can\s+you|"
+_STOP_PHRASE = (
+    r"(?:(?:ok(?:ay)?|no|nah|hey|alright|just|please|pls|you\s+can|can\s+you|"
     r"could\s+you)\b[,.!]?\s*)*"
     r"(?:stop|cancel|abort|halt|never\s*mind|nvm|forget\s+(?:it|about\s+it)|"
     r"that'?s\s+enough)"
     r"(?:\s+(?:it|that|this|now|please|the\s+goal|working(?:\s+on)?|for\s+now))*"
-    r"\s*(?:[.!?,;]|$)",
+)
+# Only stop phrases may follow a comma: "stop, never mind" stops, but
+# "stop, use the other API instead" redirects.
+_STOP_RE = re.compile(
+    rf"^\W*{_STOP_PHRASE}(?:\s*[,;.!]\s*{_STOP_PHRASE})*\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
 

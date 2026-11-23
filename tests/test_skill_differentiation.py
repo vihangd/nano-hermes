@@ -121,6 +121,8 @@ async def test_far_neighbour_needs_no_call(tmp_path):
 @pytest.mark.parametrize("reply, finish", [
     ("Builds zorblax reports\nNot for charts.", "stop"),
     ('Builds "zorblax" reports. Not for charts.', "stop"),  # quotes
+    ("Builds zorblax reports\tfast. Not for charts.", "stop"),  # tab: escaped, never read back
+    ("Builds reports: zorblax. Not for 'charts'", "stop"),  # edge quote: stripped on read
     ("Builds zorblax reports and nothing else.", "stop"),  # no exclusion
     ("I can't help with that. Not for this.", "refusal"),
 ])

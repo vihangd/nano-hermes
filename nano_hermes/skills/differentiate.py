@@ -53,11 +53,15 @@ description already has. Use no colons and no quotes. Output only the line.
 """
 
 def _valid(description: str) -> bool:
-    """One line, no quotes or backslashes: render_skill quotes it when YAML
-    would misread it, and the indexer's read then gives back the same text."""
+    """One line, no double quotes, backslashes or control characters, no
+    edge apostrophe: render_skill quotes it when YAML would misread it, and
+    the indexer's regex read (which strips edge quotes and never unescapes)
+    then gives back the same text."""
     return (
         bool(description) and len(description) <= 400
-        and not any(c in description for c in "\n\"\\")
+        and description.isprintable()
+        and not any(c in description for c in "\"\\")
+        and "'" not in (description[0], description[-1])
     )
 
 
