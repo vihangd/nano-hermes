@@ -98,9 +98,11 @@ _STRUCTURAL = [
     # ("enter login and password then click") stays.
     # netrc is key/value pairs: "default" counts only with a login before the
     # password ("default password is changeme" is prose).
+    # Tokens may sit one per line; a login/account token is required, so
+    # "machine learning password reset" is prose.
     ("netrc", re.compile(
-        r"(^[ \t]*(?:machine[ \t]+\S+(?:[ \t]+(?:login|account|port)[ \t]+\S+)*"
-        r"|default(?:[ \t]+(?:login|account)[ \t]+\S+)+)[ \t]+password[ \t]+)(\S+)", re.M
+        r"(^[ \t]*(?:machine[ \t]+\S+|default)(?:\s+(?:login|account|port)[ \t]+\S+)+"
+        r"\s+password[ \t]+)(\S+)", re.M
     )),
     # AWS credentials INI (hermes fd0655ab84). Named keys only: a generic
     # lowercase "token = ..." is Python in a skill body.
@@ -141,6 +143,14 @@ _PEM_BODY_RE = re.compile(
     r"|[A-Za-z0-9+/]{1,15}=+)[ \t\r]*$"
 )
 _PEM_FIRST_RE = re.compile(r"[ \t]*(?:MII|b3BlbnNzaC1rZXk)[A-Za-z0-9+/=]*[ \t\r]*$")
+# An encrypted PEM's headers and the blank line after them precede the body.
+_PEM_HEADER_RE = re.compile(r"[ \t]*(?:Proc-Type|DEK-Info|Comment):[^\n]*$|[ \t\r]*$")
+# Inside a JSON string the newlines are literal "\n": a lone armor plus its
+# base64 runs. Bounded starts keep the tail scan linear.
+_PEM_ESCAPED_RE = re.compile(
+    r"-----BEGIN[A-Z ]*PRIVATE KEY-----(?:\\n[A-Za-z0-9+/=]{4,})+(?:\\n)?"
+    r"|(?<![A-Za-z0-9+/=])(?:[A-Za-z0-9+/=]{4,}\\n)+-----END[A-Z ]*PRIVATE KEY-----"
+)
 
 
 def _partial_keys(text: str) -> tuple[str, int]:
@@ -148,9 +158,15 @@ def _partial_keys(text: str) -> tuple[str, int]:
     One pass over the lines: linear."""
     if "PRIVATE KEY-----" not in text:
         return text, 0
+    found = 0
+
+    def _esc(m: re.Match[str]) -> str:
+        nonlocal found
+        found += 1
+        return "[REDACTED PRIVATE KEY]"
+    text = _PEM_ESCAPED_RE.sub(_esc, text)
     lines = text.split("\n")
     out: list[str] = []
-    found = 0
     i = 0
     while i < len(lines):
         m = _PEM_ARMOR_RE.search(lines[i])
@@ -162,6 +178,13 @@ def _partial_keys(text: str) -> tuple[str, int]:
         prefix, suffix = lines[i][: m.start()], lines[i][m.end():]
         if m.group(1) == "BEGIN":
             i += 1
+            head = i
+            while i < len(lines) and _PEM_HEADER_RE.match(lines[i]) and lines[i].strip():
+                i += 1
+            if i > head and i < len(lines) and not lines[i].strip():
+                i += 1  # the blank line after encrypted-PEM headers
+            if i > head and not (i < len(lines) and _PEM_BODY_RE.match(lines[i])):
+                i = head  # headers without a body: leave them
             # The first body line may be short ("MIIEabc" from head -c).
             if i < len(lines) and (_PEM_FIRST_RE.match(lines[i]) or _PEM_BODY_RE.match(lines[i])):
                 i += 1

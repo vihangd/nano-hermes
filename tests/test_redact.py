@@ -369,3 +369,27 @@ def test_crlf_partial_key_body_is_masked():
 ])
 def test_credential_file_lookalikes_are_untouched(text):
     assert redact(text).text == text
+
+
+_B64 = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7"
+
+
+@pytest.mark.parametrize("text", [
+    # JSON string: the newlines are literal "\n" escapes
+    '{"private_key": "-----BEGIN PRIVATE KEY-----\\n%s\\n%s\\n"}' % (_B64, _B64),
+    '{"k": "%s\\n%s\\n-----END PRIVATE KEY-----\\n"}' % (_B64, _B64),
+    # encrypted PEM: headers and a blank line before the body
+    "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n"
+    "DEK-Info: AES-128-CBC,ABCDEF0123456789\n\n%s\n%s\ndone" % (_B64, _B64),
+])
+def test_partial_key_body_never_leaks(text):
+    assert "MIIEvQ" not in redact(text).text
+
+
+def test_multi_line_netrc_password_is_masked():
+    r = redact("machine example.com\n  login bob\n  password s3cretZq\n")
+    assert "s3cretZq" not in r.text and "netrc" in r.kinds
+
+
+def test_netrc_lookalike_prose_is_untouched():
+    assert redact("machine learning password reset").text == "machine learning password reset"

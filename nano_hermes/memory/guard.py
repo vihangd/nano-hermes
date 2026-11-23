@@ -18,8 +18,12 @@ log = logging.getLogger(__name__)
 
 _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("ignore instructions", re.compile(
-        r"ignore\s+(?:(?:all|any|the)\s+){0,2}(?:your|previous|prior|all|above|earlier)\s+"
-        r"(?:\w+\s+){0,2}instructions|ignore\s+(?:all\s+)?the\s+instructions\s+above",
+        r"ignore\s+(?:(?:all|any|the)\s+){0,2}(?:previous|prior|all|above|earlier)\s+"
+        r"(?:\w+\s+){0,2}instructions"
+        # "your" only right before instructions: "ignore your setup instructions
+        # if docker is installed" is a note.
+        r"|ignore\s+(?:all\s+)?your\s+(?:(?:previous|prior|earlier|original|system)\s+)?instructions"
+        r"|ignore\s+(?:all\s+)?the\s+instructions\s+above",
         re.IGNORECASE
     )),
     # hermes e25161a074: "forget your instructions". A negated forget ("don't
