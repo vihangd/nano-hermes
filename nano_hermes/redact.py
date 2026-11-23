@@ -44,6 +44,11 @@ _PREFIX_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("fal_ai",              re.compile(r"fal_[A-Za-z0-9_-]{10,}")),
     ("matrix",              re.compile(r"syt_[A-Za-z0-9]{10,}")),
     ("jwt",                 re.compile(r"eyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_=-]{4,}){0,2}")),
+    # Google OAuth (hermes 68e81e4f8d): access, client secret, refresh, AQ. token.
+    ("google_oauth",        re.compile(r"ya29\.(?:[a-z]\.)?[A-Za-z0-9_-]{20,}")),
+    ("google_client_secret", re.compile(r"GOCSPX-[A-Za-z0-9_-]{8,}")),
+    ("google_refresh",      re.compile(r"1//0[A-Za-z0-9_-]{20,}")),
+    ("google_aq_token",     re.compile(r"AQ\.[A-Za-z0-9_-]{40,}")),
 ]
 
 # KEY=value with secret-like name, optionally quoted.
@@ -89,10 +94,21 @@ _STRUCTURAL = [
     )),
     ("cookie", re.compile(r"((?:Set-)?Cookie:[ \t]*)([^\s=;]+=[^\r\n]+)", re.I)),
     ("connection_string", re.compile(r"(;\s*(?:Password|Pwd)\s*=\s*)([^;\s\"']+)", re.I)),
+    # netrc (hermes 03593a3538): only on a machine/default line, so prose
+    # ("enter login and password then click") stays.
+    ("netrc", re.compile(
+        r"(^[ \t]*(?:machine[ \t]+\S+|default)\b[^\n]*?\bpassword[ \t]+)(\S+)", re.M
+    )),
+    # AWS credentials INI (hermes fd0655ab84). Named keys only: a generic
+    # lowercase "token = ..." is Python in a skill body.
+    ("aws_credentials", re.compile(
+        r"(\baws_(?:secret_access_key|session_token)[ \t]*=[ \t]*)([^\s\"']+)", re.I
+    )),
     # Credential-named query params (hermes 4c7af743b1): ?token=, &sig=, …
     ("url_query", re.compile(
         r"([?&](?:access_token|refresh_token|id_token|token|api_?key|apikey|client_secret|"
-        r"password|auth|jwt|secret|key|signature|sig|x-amz-signature|x-goog-signature|"
+        r"password|passwd|pwd|sslpassword|auth|jwt|secret|key|signature|sig|"
+        r"x-amz-signature|x-goog-signature|"
         r"usertoken)=)"
         # A template placeholder ($API_KEY, {key}, %s, <token>, YOUR_KEY) is
         # not a secret; masking it breaks the skill that carries it.
@@ -106,12 +122,50 @@ _STRUCTURAL = [
         r"([\w@/%+=-]{8,512})"
     )),
 ]
-# A truncated block (``head -c 600 id_rsa``) has no END: mask its base64
-# lines only, so prose after it survives.
+# The body never crosses another BEGIN: a lazy scan per BEGIN to a missing
+# END was quadratic (3000 lone BEGINs took 1.3 s).
 _PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN[A-Z ]*PRIVATE KEY-----"
-    r"(?:[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----|(?:\r?\n[A-Za-z0-9+/=]+(?=\r?\n|\Z))*)"
+    r"-----BEGIN[A-Z ]*PRIVATE KEY-----(?:(?!-----BEGIN)[\s\S])*?-----END[A-Z ]*PRIVATE KEY-----"
 )
+# A partial print (``head``/``tail`` of a key file) has one armor line.
+# Body lines are 16+ base64 chars, not pure hex (hermes 4ab322fc4f, 3cefb336df);
+# a key's short last line ends in "=".
+_PEM_ARMOR_RE = re.compile(r"-----(BEGIN|END)[A-Z ]*PRIVATE KEY-----")
+_PEM_BODY_RE = re.compile(
+    r"[ \t]*(?:(?![0-9A-Fa-f]+[ \t]*$)[A-Za-z0-9+/=]{16,}|[A-Za-z0-9+/]{1,15}=+)[ \t]*$"
+)
+
+
+def _partial_keys(text: str) -> tuple[str, int]:
+    """Mask lone BEGIN/END armor lines and the base64 lines beside them.
+    One pass over the lines: linear."""
+    if "PRIVATE KEY-----" not in text:
+        return text, 0
+    lines = text.split("\n")
+    out: list[str] = []
+    found = 0
+    i = 0
+    while i < len(lines):
+        m = _PEM_ARMOR_RE.search(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+        found += 1
+        prefix = lines[i][: m.start()]
+        if m.group(1) == "BEGIN":
+            i += 1
+            # The first line after BEGIN is body even when short.
+            if i < len(lines) and re.fullmatch(r"[ \t]*[A-Za-z0-9+/=]+[ \t]*", lines[i]):
+                i += 1
+                while i < len(lines) and _PEM_BODY_RE.match(lines[i]):
+                    i += 1
+        else:
+            while out and _PEM_BODY_RE.match(out[-1]):
+                out.pop()
+            i += 1
+        out.append(prefix + "[REDACTED PRIVATE KEY]")
+    return "\n".join(out), found
 
 # Telegram bot token: optional 'bot' prefix + numeric id + ':' + 30+ char token.
 _TELEGRAM_RE = re.compile(r"\b(?:bot)?\d{6,12}:[A-Za-z0-9_-]{30,}\b")
@@ -182,6 +236,10 @@ def redact(text: str) -> RedactionResult:
         kinds.add("private_key")
         return "[REDACTED PRIVATE KEY]"
     text = _PRIVATE_KEY_RE.sub(_pem_sub, text)
+    text, partial = _partial_keys(text)
+    if partial:
+        count += partial
+        kinds.add("private_key")
     for kind, pattern in _STRUCTURAL:
         def _struct_sub(m: re.Match[str], _kind: str = kind) -> str:
             nonlocal count

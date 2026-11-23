@@ -242,6 +242,14 @@ class TestRedactionResult:
      "webhook_url"),
     ("https://acme.webhook.office.com/webhookb2/a1b2c3d4@e5f6/IncomingWebhook/9z8y",
      "a1b2c3d4@e5f6", "webhook_url"),
+    # hermes 5b3168ea01, 68e81e4f8d, 03593a3538, fd0655ab84
+    ("postgresql://db/app?user=app&pwd=Zq7xS3cr3t", "Zq7xS3cr3t", "url_query"),
+    ("redis://h/0?sslpassword=Zq7xS3cr3t", "Zq7xS3cr3t", "url_query"),
+    ("auth ya29.a0AfH6SMBc1d2e3f4g5h6i7j8k9l0", "SMBc1d2e3f4g5h6", "google_oauth"),
+    ("client GOCSPX-abcdefghijk1", "GOCSPX-abcdefghijk1", "google_client_secret"),
+    ("refresh 1//0gAbCdEfGhIjKlMnOpQrStUv", "AbCdEfGhIjKlMnOp", "google_refresh"),
+    ("machine api.x.io login bob password hunter2Zq", "hunter2Zq", "netrc"),
+    ("aws_secret_access_key = wJalrXUtnFEMI/K7MDENG", "XUtnFEMI/K7M", "aws_credentials"),
     ("token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dozjgNryP4J3jVmNHl0w5N_X", "eyJzdWIi",
      "jwt"),
 ])
@@ -266,6 +274,10 @@ def test_structural_secret_is_masked(text, secret, kind):
     "https://api.x.io/v1?token=${TOKEN}&key={key}&sig=<signature>&auth=%s",
     "https://api.x.io/v1?api_key=YOUR_API_KEY",
     "REDACT_SECRETS=false GITHUB_TOKEN=none AUTH_ENABLED='on' API_KEY=null",
+    "enter login and password then click",
+    "credential_process = /usr/local/bin/aws-vault exec prod",
+    "token = os.environ['GITHUB_TOKEN']",
+    "postgresql://db/app?pwd=${PG_PASSWORD}",
 ])
 def test_structural_prose_is_untouched(text):
     assert redact(text).text == text
@@ -278,6 +290,8 @@ def test_structural_prose_is_untouched(text):
     "?token" * 10_000,
     "https://hooks.slack.com/services/" * 2_000,
     "eyJ." * 20_000,
+    "machine x " * 10_000,
+    "aws_secret_access_key " * 5_000,
 ])
 def test_no_false_positive_or_slow_scan(text):
     import time
@@ -304,3 +318,28 @@ def test_a_boolean_lookalike_secret_is_still_masked():
 def test_truncated_private_key_keeps_the_prose_after_it():
     r = redact("-----BEGIN RSA PRIVATE KEY-----\nMIIEabc\n\nThe deploy key lives in vault")
     assert "MIIEabc" not in r.text and r.text.endswith("\n\nThe deploy key lives in vault")
+
+
+@pytest.mark.parametrize("text, kept", [
+    # head of a key file: the base64 lines go, the command output after stays
+    ("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAxyz12abcd\nAAAAB3NzaC1yc2EAAAabcd\n"
+     "done\nnext step", "\ndone\nnext step"),
+    # tail of a key file: walks back from the lone END, short "=" line included
+    ("tail id\nMIIEpAIBAAKCAQEAxyz12abcd\nAAAAB3NzaC1yc2EAAAabcd\nQFBgc=\n"
+     "-----END OPENSSH PRIVATE KEY-----\nok", "tail id\n"),
+    # a hex digest is not key body
+    ("sha deadbeefdeadbeefdeadbeef0123\n-----END RSA PRIVATE KEY-----",
+     "sha deadbeefdeadbeefdeadbeef0123\n"),
+])
+def test_partial_private_key_prints(text, kept):
+    r = redact(text)
+    assert kept in r.text and "AAAAB3Nz" not in r.text and "QFBgc" not in r.text
+    assert r.kinds == ("private_key",) and r.count == 1
+
+
+def test_many_lone_begins_are_linear():
+    import time
+
+    start = time.perf_counter()
+    redact("-----BEGIN RSA PRIVATE KEY-----\n" * 3000)
+    assert time.perf_counter() - start < 0.5
