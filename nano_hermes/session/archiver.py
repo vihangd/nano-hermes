@@ -33,10 +33,13 @@ matched block. ``overlap == 0`` against a non-empty list *is* the
 new-conversation signal — there is no length rule left.
 
 Fingerprints are taken from the window, i.e. from messages that have already
-been through ``get_history`` and nanobot's replay sanitizer. Fingerprinting the
-raw mid-turn form instead is what made every window re-archive from zero when a
-reply held a line the sanitizer drops (an image breadcrumb or a tool-call echo:
-12 messages emitted, 27 chunks, growing quadratically). The
+been through ``get_history`` and, on nanobot <= 0.4.1, its replay sanitizer.
+Fingerprinting the raw mid-turn form instead is what made every window
+re-archive from zero when a reply held a line the sanitizer drops (an image
+breadcrumb or a tool-call echo: 12 messages emitted, 27 chunks, growing
+quadratically). nanobot 0.4.2 replays assistant text literally (f9052884b) and
+user images as image blocks (3025a01cf), so the live and replayed forms agree;
+an image-only user turn has no text and is not archived. The
 ``[Message Time: ...]`` prefix is deliberately *kept* in the fingerprint — it is
 the only per-message identity nanobot offers, and stripping it made two
 identical prompts on different days compare equal, so a daily cron job archived

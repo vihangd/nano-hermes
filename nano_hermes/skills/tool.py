@@ -1,15 +1,19 @@
 """The ``skill_search`` agent-facing Tool."""
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.tools.base import Tool, tool_parameters
 
+from ..coordinator.session import request_persists
 from ..embedding.chain import AllProvidersFailed
 from .composition import get_compositions
 
 if TYPE_CHECKING:
     from ..hook import NanoHermesHook
+
+log = logging.getLogger(__name__)
 
 
 _SCHEMA: dict[str, Any] = {
@@ -66,6 +70,21 @@ class SkillSearchTool(Tool):
     def read_only(self) -> bool:
         return True
 
+    def _hidden_skills(self) -> set[str]:
+        """Skills nanobot keeps out of this turn's prompt (nanobot > 0.4.1:
+        ``cron`` without the cron tool, ``memory`` in a session it won't
+        keep). Filtered here, not at index refresh, whose cleanup would drop
+        their stats rows."""
+        loop = self._hook._loop
+        excluded = getattr(type(loop.context), "_excluded_skills", None)
+        if excluded is None:
+            return set()
+        try:
+            return set(excluded(include_memory=request_persists(), has_cron=loop.tools.has("cron")))
+        except Exception:  # noqa: BLE001 — a changed signature must not break search
+            log.debug("skill_search: nanobot exclusions unavailable", exc_info=True)
+            return set()
+
     async def execute(self, **kwargs: Any) -> str:
         query: str = kwargs["query"]
         if not query.strip():
@@ -79,6 +98,8 @@ class SkillSearchTool(Tool):
                 f"failed ({e}). Fall back to nanobot's static skill list "
                 f"in your system prompt."
             )
+        hidden = self._hidden_skills()
+        hits = [h for h in hits if h.name not in hidden]
         if not hits:
             return "no indexed skills (none have a description?)"
         self._hook.record_skill_candidates([h.name for h in hits])
