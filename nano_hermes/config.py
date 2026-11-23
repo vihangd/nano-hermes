@@ -189,7 +189,8 @@ class SkillStatsConfig(BaseModel):
     # Paired skill utility (SkillApt arXiv 2609.26863): rank by success when a
     # skill was loaded minus success on similar sessions that didn't load it,
     # instead of success_count/use_count. Computed in the evolution cycle (needs
-    # rewrite_session_interval > 0); off by default (changes ranking).
+    # rewrite_session_interval > 0); off by default (changes ranking). Only
+    # ranking_mode="ucb1" reads it; skills without pairs rank neutral.
     paired_utility_enabled: bool = False
     paired_min_sim: float = 0.6
     paired_min_pairs: int = 5
