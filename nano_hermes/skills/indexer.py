@@ -83,7 +83,8 @@ def _split_skip(description: str) -> tuple[str, str | None]:
         return description, None
     m = starts[-1]
     clause = description[m.end():].strip().rstrip(".!?").strip()
-    if not clause or "\n" in clause or _NEXT_SENTENCE_RE.search(clause):
+    # All exclusion ("Not for X.") would leave nothing to embed: keep it whole.
+    if not clause or "\n" in clause or _NEXT_SENTENCE_RE.search(clause) or not description[: m.start()].strip():
         return description, None
     return description[: m.start()].rstrip(), clause
 

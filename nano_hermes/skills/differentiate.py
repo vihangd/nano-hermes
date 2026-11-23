@@ -136,8 +136,7 @@ async def run_differentiation(hook: "NanoHermesHook") -> list[str]:
         sims[i] = -1.0
         j = int(np.argmax(sims))
         if sims[j] < cfg.differentiation_min_sim:
-            _mark(hook, name, content_hash)  # nothing close enough to confuse
-            continue
+            continue  # unmarked: a close skill added later is checked next cycle
         current = _read(hook, name)
         if current is None:
             continue

@@ -66,6 +66,8 @@ def _indexer(tmp_path, skills: dict[str, str], seen: list, down=False):
     ("Does X. Not for Y. Triggers: foo.", ("Does X. Not for Y. Triggers: foo.", None)),
     ("Build web apps. Not for Node.js or Python 2.7 projects.",
      ("Build web apps.", "Node.js or Python 2.7 projects")),
+    # All exclusion: nothing would be left to embed or match.
+    ("Not for production use.", ("Not for production use.", None)),
 ])
 def test_split_skip(desc, split):
     assert _split_skip(desc) == split

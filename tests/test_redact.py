@@ -278,6 +278,8 @@ def test_structural_secret_is_masked(text, secret, kind):
     "credential_process = /usr/local/bin/aws-vault exec prod",
     "token = os.environ['GITHUB_TOKEN']",
     "postgresql://db/app?pwd=${PG_PASSWORD}",
+    "http://localhost:3000?email=foo@bar.com",
+    "http://localhost:3000#user@example.com",
 ])
 def test_structural_prose_is_untouched(text):
     assert redact(text).text == text
@@ -327,6 +329,10 @@ def test_truncated_private_key_keeps_the_prose_after_it():
     # tail of a key file: walks back from the lone END, short "=" line included
     ("tail id\nMIIEpAIBAAKCAQEAxyz12abcd\nAAAAB3NzaC1yc2EAAAabcd\nQFBgc=\n"
      "-----END OPENSSH PRIVATE KEY-----\nok", "tail id\n"),
+    # truncated last line with no digit/+/ after a full 64-char line
+    ("-----BEGIN PRIVATE KEY-----\n"
+     "AAAAB3NzaC1yc2EAAAADAQABAAABAQC7xyz0123456789abcdefghijklmnopqrstu\n"
+     "QFBgcWxyzAbcdEfgh\nDone", "\nDone"),
     # a hex digest is not key body
     ("sha deadbeefdeadbeefdeadbeef0123\n-----END RSA PRIVATE KEY-----",
      "sha deadbeefdeadbeefdeadbeef0123\n"),

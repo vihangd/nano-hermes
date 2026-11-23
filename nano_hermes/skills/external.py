@@ -151,5 +151,20 @@ def _parse_frontmatter(content: str) -> dict[str, str]:
         return {}
     out: dict[str, str] = {}
     for km in _KEY_VAL_RE.finditer(m.group(1)):
-        out[km.group(1).strip()] = km.group(2).strip().strip("'\"")
+        out[km.group(1).strip()] = _unquote(km.group(2).strip())
     return out
+
+
+def _unquote(v: str) -> str:
+    """A quoted scalar read as YAML would ("\\"" → '"', "''" → "'"), so a
+    description render_skill quoted reads back as written."""
+    if len(v) >= 2 and v[0] in "'\"" and v[-1] == v[0]:
+        try:
+            import yaml  # noqa: PLC0415 — nanobot's own dependency
+
+            value = yaml.safe_load(f"d: {v}")["d"]
+            if isinstance(value, str):
+                return value
+        except Exception:  # noqa: BLE001 — YAMLError, or yaml missing
+            pass
+    return v.strip("'\"")

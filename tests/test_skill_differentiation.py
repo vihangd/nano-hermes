@@ -115,7 +115,22 @@ async def test_far_neighbour_needs_no_call(tmp_path):
     chat = _reply(hook, _NEW)
     assert await run_differentiation(hook) == []
     assert chat.call_count == 0
-    assert await run_differentiation(hook) == [] and chat.call_count == 0  # marked done
+    assert await run_differentiation(hook) == [] and chat.call_count == 0
+
+
+async def test_a_close_skill_added_later_is_noticed(tmp_path):
+    """No neighbour today is not "done": the mark would stick forever."""
+    skills = {"zorb-report": ("Build zorblax reports", "agent"), "quux": ("Run quuxify jobs", "user")}
+    hook, loader = _setup(tmp_path, skills)
+    await _index(hook, skills)
+    chat = _reply(hook, _NEW)
+    assert await run_differentiation(hook) == [] and chat.call_count == 0
+    p = hook.workspace / "skills" / "zorb-chart" / "SKILL.md"
+    p.parent.mkdir(parents=True)
+    p.write_text("---\nname: zorb-chart\ndescription: Build zorblax charts\n---\n\n## Steps\n1. go\n")
+    loader.list_skills.return_value.append({"name": "zorb-chart", "path": str(p), "source": "workspace"})
+    await _index(hook, {**skills, "zorb-chart": ("Build zorblax charts", "user")})
+    assert await run_differentiation(hook) == ["zorb-report"]
 
 
 @pytest.mark.parametrize("reply, finish", [

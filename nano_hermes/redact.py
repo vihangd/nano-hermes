@@ -90,7 +90,8 @@ _STRUCTURAL = [
     ("url_userinfo", re.compile(
         # The password may hold "@": it runs to the last "@" before the host.
         r"((?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}://[^:\s/@]{0,256}:)"
-        r"([^\s/]{1,256}?)(?=@[^@\s/]+(?:[/\s:?#]|$))", re.I
+        # Never past "?"/"#": "localhost:3000?email=a@b.c" is a port and query.
+        r"([^\s/?#]{1,256}?)(?=@[^@\s/]+(?:[/\s:?#]|$))", re.I
     )),
     ("cookie", re.compile(r"((?:Set-)?Cookie:[ \t]*)([^\s=;]+=[^\r\n]+)", re.I)),
     ("connection_string", re.compile(r"(;\s*(?:Password|Pwd)\s*=\s*)([^;\s\"']+)", re.I)),
@@ -142,6 +143,11 @@ _PEM_BODY_RE = re.compile(
     r"[ \t]*(?:(?![0-9A-Fa-f]+[ \t\r]*$)(?=[A-Za-z=]*[0-9+/])[A-Za-z0-9+/=]{16,}"
     r"|[A-Za-z0-9+/]{1,15}=+)[ \t\r]*$"
 )
+# A truncated last line after a full 64-char one may lack a digit, "+" or
+# "/": mixed case, not a plain word ("Done" stays).
+_PEM_TAIL_RE = re.compile(
+    r"[ \t]*(?![A-Z]?[a-z]+[ \t\r]*$)(?=[^\n]*[a-z])(?=[^\n]*[A-Z])[A-Za-z0-9+/=]{4,}[ \t\r]*$"
+)
 _PEM_FIRST_RE = re.compile(r"[ \t]*(?:MII|b3BlbnNzaC1rZXk)[A-Za-z0-9+/=]*[ \t\r]*$")
 # An encrypted PEM's headers and the blank line after them precede the body.
 _PEM_HEADER_RE = re.compile(r"[ \t]*(?:Proc-Type|DEK-Info|Comment):[^\n]*$|[ \t\r]*$")
@@ -189,6 +195,9 @@ def _partial_keys(text: str) -> tuple[str, int]:
             if i < len(lines) and (_PEM_FIRST_RE.match(lines[i]) or _PEM_BODY_RE.match(lines[i])):
                 i += 1
                 while i < len(lines) and _PEM_BODY_RE.match(lines[i]):
+                    i += 1
+                if (i < len(lines) and len(lines[i - 1].strip()) >= 64
+                        and _PEM_TAIL_RE.match(lines[i])):
                     i += 1
                 # The key's own line ending stays.
                 suffix = "\r" if lines[i - 1].endswith("\r") and not suffix else suffix

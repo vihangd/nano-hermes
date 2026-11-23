@@ -434,11 +434,31 @@ async def _block_after(hook, user_text, key):
     ("can you stop?", "cancel"),
     ("stop, use the other API instead", "block"),
     ("that's enough, now implement Y", "block"),
+    ("you can stop here", "cancel"),
+    ("let's stop", "cancel"),
+    ("thanks, that's enough", "cancel"),
+    ("let's stop using X", "block"),
 ])
 async def test_user_stop_blocks_the_goal_without_failing_it(tmp_path, text, goal):
     """Past nanobot 0.4.1 only the user can cancel; the agent blocks when asked
     to stop, which must not label the session a failure."""
     assert await _block_after(_hook(tmp_path), text, "k") == goal
+
+
+@pytest.mark.parametrize("extra, internal", [
+    ({"_hidden_history": False}, False),
+    ({"_hidden_history": True}, True),
+    ({"_automation_turn": True}, True),
+])
+def test_internal_user_matches_nanobot(extra, internal):
+    from nano_hermes.session.outcome import is_internal_user
+
+    try:
+        import nanobot.session.history_visibility  # noqa: F401
+    except ImportError:
+        if "_automation_turn" in extra:
+            pytest.skip("nanobot without automation history")
+    assert is_internal_user({"role": "user", "content": "hi", **extra}) is internal
 
 
 async def test_hidden_runner_continuation_is_not_a_user_turn(tmp_path):

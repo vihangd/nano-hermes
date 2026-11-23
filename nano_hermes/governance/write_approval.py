@@ -123,15 +123,34 @@ def render_skill(
     """
     description = _yaml_scalar(description.strip())
     body = body.strip()
+    extra = ""
     m = _FRONTMATTER_RE.match(body + "\n")
     # A leading "---" may be a horizontal rule: only a block with a
     # name/description key is the model's frontmatter.
     if m and re.search(r"^(?:name|description):", m.group(1), re.MULTILINE):
         description = description or _raw_description(body + "\n")
         body = body[m.end():].strip()
-    if not description and existing:
-        description = _raw_description(existing)
-    return f"---\nname: {skill_name}\ndescription: {description}\n---\n\n{body}\n"
+    if existing:
+        description = description or _raw_description(existing)
+        # Other keys (metadata's requires gate, always) survive a rewrite —
+        # from the file on disk only: a model's frontmatter can't add them.
+        em = _FRONTMATTER_RE.match(existing)
+        extra = _extra_keys(em.group(1)) if em else ""
+    return f"---\nname: {skill_name}\ndescription: {description}\n{extra}---\n\n{body}\n"
+
+
+def _extra_keys(frontmatter: str) -> str:
+    """The frontmatter minus ``name``/``description`` (and their indented
+    continuation lines), newline-terminated."""
+    out: list[str] = []
+    skip = False
+    for line in frontmatter.splitlines():
+        if re.match(r"(?:name|description):", line):
+            skip = True
+        elif not (skip and (not line.strip() or line[:1] in " \t")):
+            skip = False
+            out.append(line + "\n")
+    return "".join(out)
 
 
 def current_skill_hash(workspace: Path, skill_name: str) -> str | None:

@@ -16,10 +16,17 @@ log = logging.getLogger(__name__)
 
 # --- Prompt injection patterns -------------------------------------------
 
+# Words allowed between "previous" and "instructions". Not any word: "ignore
+# the earlier install instructions" is a note.
+_FILLER = (
+    r"(?:(?:all|any|the|your|my|of|previous|prior|above|earlier|original|initial|"
+    r"system|safety|given|preceding|existing|current|default|developer|operator)\s+)"
+)
+
 _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("ignore instructions", re.compile(
         r"ignore\s+(?:(?:all|any|the)\s+){0,2}(?:previous|prior|all|above|earlier)\s+"
-        r"(?:\w+\s+){0,2}instructions"
+        rf"{_FILLER}{{0,2}}instructions"
         # "your" only right before instructions: "ignore your setup instructions
         # if docker is installed" is a note.
         r"|ignore\s+(?:all\s+)?your\s+(?:(?:previous|prior|earlier|original|system)\s+)?instructions"
@@ -32,7 +39,7 @@ _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("forget instructions", re.compile(
         r"(?<!n't\s)(?<!n’t\s)(?<!not\s)(?<!never\s)(?<!n't\*\*\s)(?<!n’t\*\*\s)"
         r"\bforget\s+(?:about\s+)?(?:the\s+)?(?:your|all|any|previous|prior|above|earlier)\s+"
-        r"(?:\w+\s+){0,3}(?:instructions|rules|guidelines)",
+        rf"{_FILLER}{{0,3}}(?:instructions|rules|guidelines)",
         re.IGNORECASE
     )),
     ("role hijack", re.compile(r"you\s+are\s+now\s+", re.IGNORECASE)),
@@ -45,8 +52,8 @@ _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # "disregard any linting rules for scripts/" is a user preference, so only
     # instructions/guidelines widen to any/all/previous; rules need "your".
     ("disregard rules", re.compile(
-        r"disregard\s+(?:your\s+(?:\w+\s+){0,2}(?:instructions|rules|guidelines)|"
-        r"(?:the\s+)?(?:all|any|previous|prior|above|earlier)\s+(?:\w+\s+){0,2}"
+        rf"disregard\s+(?:your\s+{_FILLER}{{0,2}}(?:instructions|rules|guidelines)|"
+        rf"(?:the\s+)?(?:all|any|previous|prior|above|earlier)\s+{_FILLER}{{0,2}}"
         r"(?:instructions|guidelines))",
         re.IGNORECASE
     )),

@@ -44,6 +44,29 @@ async def test_memory_hidden_in_a_session_nanobot_wont_keep(tmp_path, monkeypatc
     assert "memory" not in out and "cron" in out
 
 
+async def test_hidden_skills_do_not_eat_the_top_k(tmp_path, monkeypatch):
+    loop = _make_loop(tmp_path)
+    hook = nano_hermes.install(loop)
+    search = AsyncMock(return_value=_hits("cron", "memory", "weather", "maps"))
+    hook.skill_indexer.search = search
+    monkeypatch.setattr(loop, "context", _Context(), raising=False)
+    monkeypatch.setattr(loop.tools, "has", lambda name: False, raising=False)
+    monkeypatch.setattr("nano_hermes.skills.tool.request_persists", lambda: False)
+    out = await SkillSearchTool(hook=hook).execute(query="anything", k=2)
+    assert search.call_args.kwargs["k"] == 4
+    assert "weather" in out and "maps" in out and "cron" not in out
+
+
+async def test_all_hidden_says_no_match(tmp_path, monkeypatch):
+    loop = _make_loop(tmp_path)
+    hook = nano_hermes.install(loop)
+    hook.skill_indexer.search = AsyncMock(return_value=_hits("cron"))
+    monkeypatch.setattr(loop, "context", _Context(), raising=False)
+    monkeypatch.setattr(loop.tools, "has", lambda name: False, raising=False)
+    out = await SkillSearchTool(hook=hook).execute(query="anything")
+    assert out == "no matching skills"
+
+
 async def test_older_nanobot_hides_nothing(tmp_path, monkeypatch):
     out = await _search(tmp_path, has_cron=False, persists=False, monkeypatch=monkeypatch,
                         context=object())

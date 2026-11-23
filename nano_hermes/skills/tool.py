@@ -90,18 +90,20 @@ class SkillSearchTool(Tool):
         if not query.strip():
             return "Error: query must not be empty."
         k = int(kwargs.get("k") or 5)
+        hidden = self._hidden_skills()
         try:
-            hits = await self._hook.skill_indexer.search(query, k=k)
+            # Over-fetch so hidden skills don't eat the top k.
+            hits = await self._hook.skill_indexer.search(query, k=k + len(hidden))
         except AllProvidersFailed as e:
             return (
                 f"Error: cannot search skills — every embedding provider "
                 f"failed ({e}). Fall back to nanobot's static skill list "
                 f"in your system prompt."
             )
-        hidden = self._hidden_skills()
-        hits = [h for h in hits if h.name not in hidden]
-        if not hits:
-            return "no indexed skills (none have a description?)"
+        shown = [h for h in hits if h.name not in hidden][:k]
+        if not shown:
+            return "no matching skills" if hits else "no indexed skills (none have a description?)"
+        hits = shown
         self._hook.record_skill_candidates([h.name for h in hits])
         lines = []
         if hits[0].lexical:

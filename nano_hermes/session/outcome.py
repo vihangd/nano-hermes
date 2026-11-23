@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,11 +38,11 @@ _HIDDEN_HISTORY = "_hidden_history"
 # stop working on this") — not open one ("stop using semicolons", "stop-loss
 # calc"). Only softeners may precede it, so "don't stop" never matches.
 _STOP_PHRASE = (
-    r"(?:(?:ok(?:ay)?|no|nah|hey|alright|just|please|pls|you\s+can|can\s+you|"
-    r"could\s+you)\b[,.!]?\s*)*"
+    r"(?:(?:ok(?:ay)?|no|nah|hey|alright|just|please|pls|thanks?|thank\s+you|thx|"
+    r"let'?s|we\s+can|you\s+can|can\s+you|could\s+you)\b[,.!]?\s*)*"
     r"(?:stop|cancel|abort|halt|never\s*mind|nvm|forget\s+(?:it|about\s+it)|"
     r"that'?s\s+enough)"
-    r"(?:\s+(?:it|that|this|now|please|the\s+goal|working(?:\s+on)?|for\s+now))*"
+    r"(?:\s+(?:it|that|this|here|there|now|please|the\s+goal|working(?:\s+on)?|for\s+now))*"
 )
 # Only stop phrases may follow a comma: "stop, never mind" stops, but
 # "stop, use the other API instead" redirects.
@@ -82,11 +83,20 @@ _POSITIVE_RE = re.compile(
 )
 
 
+try:  # nanobot > 0.4.1: hidden runner turns and automation (cron/trigger) records
+    from nanobot.session.history_visibility import is_hidden_history_message as _hidden
+except ImportError:
+    def _hidden(m: dict[str, Any]) -> bool:
+        marker = m.get(_HIDDEN_HISTORY)
+        return marker is True or isinstance(marker, Mapping)
+
+
 def is_internal_user(m: dict[str, Any]) -> bool:
-    """A user-role message nanobot wrote itself: a /goal continuation or a
-    marked runner continuation. Not the user's turn, not a reaction."""
+    """A user-role message nanobot wrote itself: a /goal continuation, a
+    marked runner continuation or an automation record. Not the user's turn,
+    not a reaction."""
     return m.get("role") == "user" and (
-        _HIDDEN_HISTORY in m or (_extract_text(m) or "").startswith(_GOAL_CONTINUE)
+        _hidden(m) or (_extract_text(m) or "").startswith(_GOAL_CONTINUE)
     )
 
 

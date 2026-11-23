@@ -353,6 +353,30 @@ def test_render_skill_description_reads_back(desc):
     assert yaml.safe_load(front)["description"] == desc
 
 
+@pytest.mark.parametrize("desc", ['Uses "jq": filters', "it's: fine", "C:\\tmp: paths"])
+def test_render_skill_description_reads_back_through_the_indexer(desc):
+    from nano_hermes.skills.external import _parse_frontmatter
+
+    assert _parse_frontmatter(wa.render_skill("s", desc, "b"))["description"] == desc
+
+
+def test_render_skill_keeps_other_frontmatter_keys():
+    existing = ("---\nname: s\ndescription: >\n  old\n  text\n"
+                'metadata: {"nanobot": {"requires": {"bins": ["gh"]}}}\nalways: true\n---\n\nold\n')
+    import yaml
+
+    for md in (wa.render_skill("s", "new", "body", existing),
+               wa.render_skill("s", "", "---\nname: s\ndescription: d\n---\nbody", existing)):
+        front = yaml.safe_load(md.split("---\n")[1])
+        assert front["always"] is True and front["metadata"]["nanobot"]["requires"]["bins"] == ["gh"]
+        assert "old" not in md.split("---\n")[2]
+
+
+def test_render_skill_ignores_keys_the_model_adds():
+    md = wa.render_skill("s", "", "---\nname: s\ndescription: d\nalways: true\n---\nbody", None)
+    assert "always" not in md
+
+
 def test_render_skill_keeps_a_model_quoted_description():
     import yaml
 
