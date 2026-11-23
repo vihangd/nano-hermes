@@ -90,8 +90,8 @@ _STRUCTURAL = [
     ("url_userinfo", re.compile(
         # The password may hold "@": it runs to the last "@" before the host.
         r"((?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}://[^:\s/@]{0,256}:)"
-        # Never past "?"/"#": "localhost:3000?email=a@b.c" is a port and query.
-        r"([^\s/?#]{1,256}?)(?=@[^@\s/]+(?:[/\s:?#]|$))", re.I
+        # "localhost:3000?email=a@b.c" is a port and query, not a password.
+        r"(?!\d{1,5}[?#])([^\s/]{1,256}?)(?=@[^@\s/]+(?:[/\s:?#]|$))", re.I
     )),
     ("cookie", re.compile(r"((?:Set-)?Cookie:[ \t]*)([^\s=;]+=[^\r\n]+)", re.I)),
     ("connection_string", re.compile(r"(;\s*(?:Password|Pwd)\s*=\s*)([^;\s\"']+)", re.I)),

@@ -158,7 +158,8 @@ def _parse_frontmatter(content: str) -> dict[str, str]:
 def _unquote(v: str) -> str:
     """A quoted scalar read as YAML would ("\\"" → '"', "''" → "'"), so a
     description render_skill quoted reads back as written."""
-    if len(v) >= 2 and v[0] in "'\"" and v[-1] == v[0]:
+    # Only escapes need YAML (pure Python, slow on a Pi): strip does the rest.
+    if len(v) >= 2 and v[0] in "'\"" and v[-1] == v[0] and ("\\" if v[0] == '"' else "''") in v:
         try:
             import yaml  # noqa: PLC0415 — nanobot's own dependency
 

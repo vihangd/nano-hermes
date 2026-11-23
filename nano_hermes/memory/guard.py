@@ -20,7 +20,8 @@ log = logging.getLogger(__name__)
 # the earlier install instructions" is a note.
 _FILLER = (
     r"(?:(?:all|any|the|your|my|of|previous|prior|above|earlier|original|initial|"
-    r"system|safety|given|preceding|existing|current|default|developer|operator)\s+)"
+    r"system|safety|given|preceding|existing|current|default|developer|operator|"
+    r"user|prompt|assistant|important|security)\s+)"
 )
 
 _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [

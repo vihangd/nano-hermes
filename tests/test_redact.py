@@ -229,6 +229,8 @@ class TestRedactionResult:
     ("head -c 600 id_rsa\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAx",
      "MIIEpAIBAAKCAQEAx", "private_key"),
     ("postgres://user:p@ss@host/db", "ss@host", "url_userinfo"),
+    ("redis://:my#pass@host", "my#pass", "url_userinfo"),
+    ("postgres://admin:Pa?ss@db:5432/x", "Pa?ss", "url_userinfo"),
     ("Authorization: Bearer abc123", "abc123", "auth_header"),
     ("authorization: bearer 9f8e7d6c5b4a3210", "9f8e7d6c5b4a3210", "auth_header"),
     ("Authorization: token abc123def456", "abc123def456", "auth_header"),
