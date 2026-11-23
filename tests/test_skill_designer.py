@@ -300,3 +300,41 @@ class TestRunSkillDesignerGovernance:
         assert not (hook.workspace / "skills").exists() or not any(
             (hook.workspace / "skills").iterdir()
         )
+
+
+def _billing():
+    r = MagicMock(content="insufficient_quota", finish_reason="error", error_status_code=402,
+                  error_type=None, error_code=None, error_kind=None)
+    return r
+
+
+class TestDesignerProviderErrors:
+    def _two_clusters(self, tmp_path):
+        hook = _hook(tmp_path, {"skill_designer_min_cluster_size": 2})
+        for seed in (0, 7):
+            _seed_trajectory(hook, task=f"task {seed}a", outcome="fail", embedding=_vec(seed))
+            _seed_trajectory(hook, task=f"task {seed}b", outcome="fail", embedding=_vec(seed))
+        return hook
+
+    def test_billing_aborts_the_cycle(self, tmp_path):
+        from nano_hermes.utils.error_classifier import EvolutionAbortError
+
+        hook = self._two_clusters(tmp_path)
+        with patch.object(hook._loop.provider, "chat_with_retry", AsyncMock(return_value=_billing())):
+            with pytest.raises(EvolutionAbortError):
+                asyncio.run(run_skill_designer(hook))
+
+    def test_a_transient_error_skips_to_the_next_cluster(self, tmp_path):
+        hook = self._two_clusters(tmp_path)
+        err = MagicMock(content="", finish_reason="error", error_status_code=503,
+                        error_type=None, error_code=None, error_kind=None)
+        chat = AsyncMock(side_effect=[err, _make_resp(VALID_SKILL_MD)])
+        with patch.object(hook._loop.provider, "chat_with_retry", chat):
+            result = asyncio.run(run_skill_designer(hook))
+        assert chat.call_count == 2 and result == ["new_coverage_skill"]
+
+    def test_an_empty_reply_proposes_nothing(self, tmp_path):
+        hook = self._two_clusters(tmp_path)
+        with patch.object(hook._loop.provider, "chat_with_retry",
+                          AsyncMock(return_value=_make_resp("   "))):
+            assert asyncio.run(run_skill_designer(hook)) == []

@@ -369,3 +369,44 @@ def test_an_error_response_stores_nothing(tmp_path):
     resp = MagicMock(finish_reason="refusal", content="INSIGHT: no")
     hook._loop.provider = MagicMock(chat_with_retry=AsyncMock(return_value=resp))
     assert asyncio.run(extract_contrastive_insight(hook, cur, "success", [])) is None
+
+
+def test_unusable_candidates_are_passed_over_for_a_usable_one(tmp_path):
+    """No chunk embedding, a zero vector: skipped, not chosen or crashing."""
+    near = [1.0] + [0.0] * 511
+    hook = _hook(tmp_path)
+    cur = _add_session(hook.db, "cur")
+    _add_chunk_emb(hook.db, cur, near)
+    bare = _add_session(hook.db, "bare")
+    _add_chunk(hook.db, bare)                     # no embedding
+    zero = _add_session(hook.db, "zero")
+    _add_chunk_emb(hook.db, zero, [0.0] * 512)    # zero norm
+    good = _add_session(hook.db, "good")
+    _add_chunk_emb(hook.db, good, near)
+    for sid in (good, zero, bare):
+        _add_trajectory(hook.db, sid, "fail")
+    assert find_contrasting_session(hook.db, cur, "success", threshold=0.5) == (good, "fail")
+
+
+def test_a_zero_current_vector_finds_nothing(tmp_path):
+    hook = _hook(tmp_path)
+    cur = _add_session(hook.db, "cur")
+    _add_chunk_emb(hook.db, cur, [0.0] * 512)
+    other = _add_session(hook.db, "o")
+    _add_chunk_emb(hook.db, other, [1.0] + [0.0] * 511)
+    _add_trajectory(hook.db, other, "fail")
+    assert find_contrasting_session(hook.db, cur, "success", threshold=0.0) is None
+
+
+def test_a_provider_exception_stores_nothing(tmp_path):
+    hook = _hook(tmp_path)
+    hook._loop.provider = AsyncMock()
+    hook._loop.provider.chat_with_retry = AsyncMock(side_effect=RuntimeError("down"))
+    with patch("nano_hermes.memory.expel.find_contrasting_session", return_value=(99, "fail")), \
+         patch("nano_hermes.memory.expel._chunk_text", return_value="some task text"):
+        assert asyncio.run(
+            extract_contrastive_insight(hook, session_id=1, outcome="success", messages=[])
+        ) is None
+    assert hook.db.execute(
+        "SELECT COUNT(*) FROM semantic_facts WHERE fact_type = 'expel'"
+    ).fetchone()[0] == 0

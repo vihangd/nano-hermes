@@ -304,3 +304,49 @@ class TestRewriteWithGates:
         prompt = msgs[0]["content"]
         assert "LOCALIZED DEFECT" in prompt
         assert "leaks state" in prompt
+
+
+class TestReplayGateNonAnswers:
+    async def test_an_error_reply_is_not_a_worse_verdict(self, tmp_path):
+        """A provider error whose text happens to read WORSE must not veto."""
+        hook = _make_hook(tmp_path)
+        _seed_failing_trajectory(hook, "fixme")
+        _seed_failing_trajectory(hook, "fixme")
+        err = MagicMock(content="WORSE", finish_reason="error", error_status_code=500,
+                        error_type=None, error_code=None, error_kind=None)
+        ok = MagicMock(content="IMPROVED", finish_reason="stop")
+        hook._loop.provider.chat_with_retry = AsyncMock(side_effect=[err, ok])
+        assert await replay_passes_gate(
+            hook, skill_name="fixme", original_body="a", new_body="b", max_trajectories=2,
+        ) is True
+
+    async def test_a_raising_call_is_skipped_not_counted(self, tmp_path):
+        hook = _make_hook(tmp_path)
+        _seed_failing_trajectory(hook, "fixme")
+        _seed_failing_trajectory(hook, "fixme")
+        hook._loop.provider.chat_with_retry = AsyncMock(
+            side_effect=[RuntimeError("down"), _mock_response("WORSE")]
+        )
+        assert await replay_passes_gate(
+            hook, skill_name="fixme", original_body="a", new_body="b", max_trajectories=2,
+        ) is False  # the one real verdict still vetoes
+
+    async def test_no_background_model_fails_open(self, tmp_path, monkeypatch):
+        hook = _make_hook(tmp_path)
+        _seed_failing_trajectory(hook, "fixme")
+        monkeypatch.setattr(type(hook), "background_model", property(lambda self: None))
+        hook._loop.provider.chat_with_retry = AsyncMock(return_value=_mock_response("WORSE"))
+        assert await replay_passes_gate(
+            hook, skill_name="fixme", original_body="a", new_body="b",
+        ) is True
+        hook._loop.provider.chat_with_retry.assert_not_called()
+
+    async def test_a_broken_trajectory_store_fails_open(self, tmp_path, monkeypatch):
+        hook = _make_hook(tmp_path)
+        monkeypatch.setattr(
+            "nano_hermes.skills.replay_gate.gather_failure_trajectories",
+            MagicMock(side_effect=RuntimeError("db locked")),
+        )
+        assert await replay_passes_gate(
+            hook, skill_name="fixme", original_body="a", new_body="b",
+        ) is True
