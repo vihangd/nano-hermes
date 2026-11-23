@@ -96,13 +96,17 @@ _STRUCTURAL = [
     ("connection_string", re.compile(r"(;\s*(?:Password|Pwd)\s*=\s*)([^;\s\"']+)", re.I)),
     # netrc (hermes 03593a3538): only on a machine/default line, so prose
     # ("enter login and password then click") stays.
+    # netrc is key/value pairs: "default" counts only with a login before the
+    # password ("default password is changeme" is prose).
     ("netrc", re.compile(
-        r"(^[ \t]*(?:machine[ \t]+\S+|default)\b[^\n]*?\bpassword[ \t]+)(\S+)", re.M
+        r"(^[ \t]*(?:machine[ \t]+\S+(?:[ \t]+(?:login|account|port)[ \t]+\S+)*"
+        r"|default(?:[ \t]+(?:login|account)[ \t]+\S+)+)[ \t]+password[ \t]+)(\S+)", re.M
     )),
     # AWS credentials INI (hermes fd0655ab84). Named keys only: a generic
     # lowercase "token = ..." is Python in a skill body.
     ("aws_credentials", re.compile(
-        r"(\baws_(?:secret_access_key|session_token)[ \t]*=[ \t]*)([^\s\"']+)", re.I
+        r"(\baws_(?:secret_access_key|session_token)[ \t]*=[ \t]*)"
+        r"(?![$%{<])(?!(?-i:[A-Z][A-Z_]*)(?:\s|$))([^\s\"']+)", re.I
     )),
     # Credential-named query params (hermes 4c7af743b1): ?token=, &sig=, …
     ("url_query", re.compile(
@@ -128,12 +132,15 @@ _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN[A-Z ]*PRIVATE KEY-----(?:(?!-----BEGIN)[\s\S])*?-----END[A-Z ]*PRIVATE KEY-----"
 )
 # A partial print (``head``/``tail`` of a key file) has one armor line.
-# Body lines are 16+ base64 chars, not pure hex (hermes 4ab322fc4f, 3cefb336df);
-# a key's short last line ends in "=".
+# Body lines are 16+ base64 chars with a digit or + / (a long word is not
+# key body), not pure hex (hermes 4ab322fc4f, 3cefb336df); a key's short
+# last line ends in "=". DER keys start "MII", OpenSSH ones "b3BlbnNzaC1rZXk".
 _PEM_ARMOR_RE = re.compile(r"-----(BEGIN|END)[A-Z ]*PRIVATE KEY-----")
 _PEM_BODY_RE = re.compile(
-    r"[ \t]*(?:(?![0-9A-Fa-f]+[ \t]*$)[A-Za-z0-9+/=]{16,}|[A-Za-z0-9+/]{1,15}=+)[ \t]*$"
+    r"[ \t]*(?:(?![0-9A-Fa-f]+[ \t\r]*$)(?=[A-Za-z=]*[0-9+/])[A-Za-z0-9+/=]{16,}"
+    r"|[A-Za-z0-9+/]{1,15}=+)[ \t\r]*$"
 )
+_PEM_FIRST_RE = re.compile(r"[ \t]*(?:MII|b3BlbnNzaC1rZXk)[A-Za-z0-9+/=]*[ \t\r]*$")
 
 
 def _partial_keys(text: str) -> tuple[str, int]:
@@ -152,19 +159,21 @@ def _partial_keys(text: str) -> tuple[str, int]:
             i += 1
             continue
         found += 1
-        prefix = lines[i][: m.start()]
+        prefix, suffix = lines[i][: m.start()], lines[i][m.end():]
         if m.group(1) == "BEGIN":
             i += 1
-            # The first line after BEGIN is body even when short.
-            if i < len(lines) and re.fullmatch(r"[ \t]*[A-Za-z0-9+/=]+[ \t]*", lines[i]):
+            # The first body line may be short ("MIIEabc" from head -c).
+            if i < len(lines) and (_PEM_FIRST_RE.match(lines[i]) or _PEM_BODY_RE.match(lines[i])):
                 i += 1
                 while i < len(lines) and _PEM_BODY_RE.match(lines[i]):
                     i += 1
+                # The key's own line ending stays.
+                suffix = "\r" if lines[i - 1].endswith("\r") and not suffix else suffix
         else:
             while out and _PEM_BODY_RE.match(out[-1]):
                 out.pop()
             i += 1
-        out.append(prefix + "[REDACTED PRIVATE KEY]")
+        out.append(prefix + "[REDACTED PRIVATE KEY]" + suffix)
     return "\n".join(out), found
 
 # Telegram bot token: optional 'bot' prefix + numeric id + ':' + 30+ char token.

@@ -343,3 +343,29 @@ def test_many_lone_begins_are_linear():
     start = time.perf_counter()
     redact("-----BEGIN RSA PRIVATE KEY-----\n" * 3000)
     assert time.perf_counter() - start < 0.5
+
+
+@pytest.mark.parametrize("text", [
+    'if "-----BEGIN PRIVATE KEY-----" in text:',
+    "the -----END PRIVATE KEY----- marker",
+    "-----BEGIN PRIVATE KEY-----\nExample",
+    "ImplementationDetails\n-----END PRIVATE KEY-----",
+])
+def test_lone_armor_keeps_the_text_around_it(text):
+    r = redact(text)
+    kept = [w for w in ("if", "in text:", "marker", "Example", "ImplementationDetails") if w in text]
+    assert all(w in r.text for w in kept) and "[REDACTED PRIVATE KEY]" in r.text
+
+
+def test_crlf_partial_key_body_is_masked():
+    r = redact("-----BEGIN PRIVATE KEY-----\r\nMIIEvQIBADANBgkqhkiG9w0B\r\nQWxwaGFCZXRhR2FtbWEx\r\nok\r\n")
+    assert "MIIEvQ" not in r.text and "QWxwaGFC" not in r.text and r.text.endswith("\r\nok\r\n")
+
+
+@pytest.mark.parametrize("text", [
+    "default password is changeme",
+    "aws_secret_access_key = <your-key>",
+    "aws_secret_access_key = YOUR_SECRET_KEY",
+])
+def test_credential_file_lookalikes_are_untouched(text):
+    assert redact(text).text == text

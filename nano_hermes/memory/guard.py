@@ -18,8 +18,8 @@ log = logging.getLogger(__name__)
 
 _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("ignore instructions", re.compile(
-        r"ignore\s+(?:(?:all|any|your|the)\s+){0,2}(previous|prior|all|above|earlier)\s+"
-        r"(?:\w+\s+){0,2}instructions",
+        r"ignore\s+(?:(?:all|any|the)\s+){0,2}(?:your|previous|prior|all|above|earlier)\s+"
+        r"(?:\w+\s+){0,2}instructions|ignore\s+(?:all\s+)?the\s+instructions\s+above",
         re.IGNORECASE
     )),
     # hermes e25161a074: "forget your instructions". A negated forget ("don't
@@ -27,7 +27,7 @@ _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # reminder, not an attack.
     ("forget instructions", re.compile(
         r"(?<!n't\s)(?<!n’t\s)(?<!not\s)(?<!never\s)(?<!n't\*\*\s)(?<!n’t\*\*\s)"
-        r"\bforget\s+(?:about\s+)?(?:your|all|any|previous|prior|above|earlier)\s+"
+        r"\bforget\s+(?:about\s+)?(?:the\s+)?(?:your|all|any|previous|prior|above|earlier)\s+"
         r"(?:\w+\s+){0,3}(?:instructions|rules|guidelines)",
         re.IGNORECASE
     )),
@@ -42,7 +42,8 @@ _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # instructions/guidelines widen to any/all/previous; rules need "your".
     ("disregard rules", re.compile(
         r"disregard\s+(?:your\s+(?:\w+\s+){0,2}(?:instructions|rules|guidelines)|"
-        r"(?:all|any|previous|prior|above|earlier)\s+(?:\w+\s+){0,2}(?:instructions|guidelines))",
+        r"(?:the\s+)?(?:all|any|previous|prior|above|earlier)\s+(?:\w+\s+){0,2}"
+        r"(?:instructions|guidelines))",
         re.IGNORECASE
     )),
     ("no restrictions", re.compile(
