@@ -106,11 +106,13 @@ class TestTrajectoryWrite:
         await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs_b))
 
         row = hook.db.execute(
-            "SELECT skills_used FROM trajectories"
+            "SELECT skills_used, skills_loaded FROM trajectories"
         ).fetchone()
         assert row is not None
         skills = _json.loads(row[0])
         assert "duckduckgo-search" in skills
+        # A search candidate is not a loaded skill (paired utility's treatment).
+        assert _json.loads(row[1]) == []
 
     async def test_no_trajectory_for_system_only_session(
         self,

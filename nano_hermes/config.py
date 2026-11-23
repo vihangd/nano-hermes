@@ -186,6 +186,13 @@ class SkillStatsConfig(BaseModel):
     differentiation_enabled: bool = False
     differentiation_min_sim: float = 0.75
     differentiation_max_per_cycle: int = 3
+    # Paired skill utility (SkillApt arXiv 2609.26863): rank by success when a
+    # skill was loaded minus success on similar sessions that didn't load it,
+    # instead of success_count/use_count. Computed in the evolution cycle (needs
+    # rewrite_session_interval > 0); off by default (changes ranking).
+    paired_utility_enabled: bool = False
+    paired_min_sim: float = 0.6
+    paired_min_pairs: int = 5
     rewrite_context_chunks: int = 5         # how many failed-session chunks to send the LLM
     # Auto-evolution trigger: run GEPA (if enabled) then rewriter every N completed sessions.
     # 0 = disabled (off by default). Recommended starting value: 5–10.

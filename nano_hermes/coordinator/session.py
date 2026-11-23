@@ -211,6 +211,7 @@ class SessionCoordinator:
         skills_used: set[str],
         outcome: str,
         signals: dict | None = None,
+        skills_loaded: set[str] | None = None,
     ) -> None:
         """Write a trajectory row for a completed session (*outcome* from
         ``session.outcome.label``; *signals* stored for label evaluation).
@@ -240,6 +241,7 @@ class SessionCoordinator:
                 reflections=reflections,
                 outcome=outcome,
                 signals=signals,
+                skills_loaded=None if skills_loaded is None else list(skills_loaded),
             )
         except Exception:
             log.exception("trajectory finalization failed for session %d", session_id)

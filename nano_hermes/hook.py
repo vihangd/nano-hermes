@@ -807,6 +807,14 @@ class NanoHermesHook(AgentHook):
             log.exception("evolution cycle: differentiation failed")
 
         try:
+            from .skills.paired_utility import update_paired_utility  # noqa: PLC0415
+            n = update_paired_utility(self)
+            if n:
+                log.info("evolution cycle: paired utility for %d skill(s)", n)
+        except Exception:
+            log.exception("evolution cycle: paired utility failed")
+
+        try:
             from .skills.skill_retirement import run_ratchet  # noqa: PLC0415
             result = run_ratchet(self)
             if result["retired"]:
@@ -1011,7 +1019,9 @@ class NanoHermesHook(AgentHook):
             outcome = label(signals)
             self._reflection_coord.back_propagate_utility(outcome, key)
             self._reflection_coord.attribute_principles(outcome, key)
-            self._session_coord.finalize(completed_id, skills_used, outcome, signals.as_dict())
+            self._session_coord.finalize(
+                completed_id, skills_used, outcome, signals.as_dict(), skills_loaded=skills_loaded
+            )
             self._reflection_coord.on_new_session(completed_id, key)
             self.archiver.prune_session_by_id(completed_id)
             self._completed_session_count += 1

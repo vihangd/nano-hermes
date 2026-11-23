@@ -458,6 +458,10 @@ _MIGRATIONS = [
     "WHERE outcome = 'ok' AND outcome_source IS NULL",
     # Skill++ differentiation: the content hash a skill was last checked at.
     "ALTER TABLE skill_stats ADD COLUMN differentiated_hash TEXT",
+    # Paired skill utility (SkillApt): the skills a session actually loaded
+    # (skills_used also holds search candidates), and the paired estimate.
+    "ALTER TABLE trajectories ADD COLUMN skills_loaded TEXT",
+    "ALTER TABLE skill_stats ADD COLUMN paired_utility REAL",
 ]
 
 

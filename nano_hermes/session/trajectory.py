@@ -49,6 +49,7 @@ class TrajectoryWriter:
         reflections: list[str],
         outcome: str,
         signals: dict | None = None,
+        skills_loaded: list[str] | None = None,
     ) -> int | None:
         """Write one trajectory row. Returns the new row id, or None if
         no task could be extracted (e.g. empty or system-only session).
@@ -71,8 +72,8 @@ class TrajectoryWriter:
                 lambda: self._db.execute(
                     "INSERT INTO trajectories "
                     "(session_id, task, skills_used, outcome, reflection, created_at, "
-                    "outcome_source, outcome_signals) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 'rules', ?)",
+                    "outcome_source, outcome_signals, skills_loaded) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'rules', ?, ?)",
                     (
                         session_id,
                         task,
@@ -81,6 +82,7 @@ class TrajectoryWriter:
                         reflection_text,
                         time.time(),
                         json.dumps(signals) if signals is not None else None,
+                        None if skills_loaded is None else json.dumps(sorted(skills_loaded)),
                     ),
                 ),
             )
