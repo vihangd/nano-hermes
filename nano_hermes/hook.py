@@ -808,7 +808,7 @@ class NanoHermesHook(AgentHook):
 
         try:
             from .skills.paired_utility import update_paired_utility  # noqa: PLC0415
-            n = update_paired_utility(self)
+            n = await update_paired_utility(self)
             if n:
                 log.info("evolution cycle: paired utility for %d skill(s)", n)
         except Exception:

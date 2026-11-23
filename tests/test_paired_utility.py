@@ -53,7 +53,7 @@ def _paired(hook, name):
     ).fetchone()[0]
 
 
-def test_a_skill_loaded_on_easy_tasks_earns_nothing(tmp_path):
+async def test_a_skill_loaded_on_easy_tasks_earns_nothing(tmp_path):
     """Raw rate 1.0, but similar sessions without it succeed just as often."""
     hook = _hook(tmp_path)
     _skill(hook, "easy", 6, 6)
@@ -61,11 +61,11 @@ def test_a_skill_loaded_on_easy_tasks_earns_nothing(tmp_path):
         _traj(hook, loaded=["easy"], outcome="ok", jitter=i * 0.01)
         _traj(hook, loaded=[], outcome="ok", jitter=i * 0.01)
     hook.db.commit()
-    assert update_paired_utility(hook) == 1
+    assert await update_paired_utility(hook) == 1
     assert abs(_paired(hook, "easy")) < 0.15
 
 
-def test_a_skill_that_lifts_matched_sessions_is_positive(tmp_path):
+async def test_a_skill_that_lifts_matched_sessions_is_positive(tmp_path):
     hook = _hook(tmp_path)
     _skill(hook, "helps")
     for i in range(6):
@@ -78,18 +78,18 @@ def test_a_skill_that_lifts_matched_sessions_is_positive(tmp_path):
     for _ in range(6):
         _traj(hook, loaded=[], outcome="ok", vec=related.tobytes())
     hook.db.commit()
-    update_paired_utility(hook)
+    await update_paired_utility(hook)
     assert _paired(hook, "helps") > 0.5
 
 
-def test_too_few_pairs_is_null(tmp_path):
+async def test_too_few_pairs_is_null(tmp_path):
     hook = _hook(tmp_path, paired_min_pairs=5)
     _skill(hook, "rare")
     for i in range(4):
         _traj(hook, loaded=["rare"], outcome="ok", jitter=i * 0.01)
         _traj(hook, loaded=[], outcome="fail", jitter=i * 0.01)
     hook.db.commit()
-    assert update_paired_utility(hook) == 0
+    assert await update_paired_utility(hook) == 0
     assert _paired(hook, "rare") is None
 
 
@@ -98,20 +98,20 @@ def test_too_few_pairs_is_null(tmp_path):
     (["s"], "unknown"),      # no evidence either way
     (["s"], "partial"),
 ])
-def test_uninformative_rows_are_ignored(tmp_path, loaded, outcome):
+async def test_uninformative_rows_are_ignored(tmp_path, loaded, outcome):
     hook = _hook(tmp_path, paired_min_pairs=1)
     _skill(hook, "s")
     _traj(hook, loaded=loaded, outcome=outcome)
     _traj(hook, loaded=[], outcome="fail")
     hook.db.commit()
-    update_paired_utility(hook)
+    await update_paired_utility(hook)
     assert _paired(hook, "s") is None
 
 
-def test_disabled_writes_nothing(tmp_path):
+async def test_disabled_writes_nothing(tmp_path):
     hook = _hook(tmp_path, paired_utility_enabled=False)
     _skill(hook, "s")
-    assert update_paired_utility(hook) == 0
+    assert await update_paired_utility(hook) == 0
 
 
 def _rank(hook, enabled: bool) -> list[str]:
@@ -130,7 +130,8 @@ def test_ranking_uses_paired_utility_only_when_enabled(tmp_path, enabled, first)
     hook = _hook(tmp_path)
     q = np.zeros(hook.config.embedding.target_dims, dtype=np.float32)
     q[0] = 1.0
-    for name, uses, wins, paired in (("a", 20, 20, -0.4), ("b", 20, 10, 0.6)):
+    # a: raw 20/20 but never paired — neutral under the flag, not 1.0.
+    for name, uses, wins, paired in (("a", 20, 20, None), ("b", 20, 10, 0.6)):
         sid = _skill(hook, name, uses, wins)
         hook.db.execute("UPDATE skill_stats SET paired_utility = ? WHERE id = ?", (paired, sid))
         hook.db.execute(

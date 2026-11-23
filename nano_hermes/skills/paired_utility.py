@@ -11,6 +11,7 @@ Background only (evolution cycle), no LLM calls: numpy over at most
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -26,7 +27,7 @@ _MAX_ROWS = 2000
 _CONTROLS = 5  # nearest non-loading sessions per loading session
 
 
-def update_paired_utility(hook: "NanoHermesHook") -> int:
+async def update_paired_utility(hook: "NanoHermesHook") -> int:
     """Recompute ``skill_stats.paired_utility``; returns how many are set."""
     cfg = hook.config.skill_stats
     if not cfg.paired_utility_enabled:
@@ -42,20 +43,31 @@ def update_paired_utility(hook: "NanoHermesHook") -> int:
         (_MAX_ROWS,),
     ).fetchall()
     skills = [r[0] for r in db.execute("SELECT name FROM skill_stats WHERE status != 'deprecated'")]
-    values: dict[str, float | None] = dict.fromkeys(skills)
-    if rows:
-        loaded = [set(json.loads(r[0])) for r in rows]
-        ok = np.array([r[1] == "ok" for r in rows], dtype=np.float32)
-        vecs = np.stack([np.frombuffer(r[2], dtype=np.float32) for r in rows])
-        vecs = vecs / np.maximum(np.linalg.norm(vecs, axis=1, keepdims=True), 1e-9)
-        for name in skills:
-            values[name] = _paired(name, loaded, ok, vecs, cfg.paired_min_sim, cfg.paired_min_pairs)
+    # The matmuls are seconds on a Pi 3B+: off the event loop. DB stays here.
+    values = await asyncio.to_thread(
+        _compute, rows, skills, cfg.paired_min_sim, cfg.paired_min_pairs
+    )
     db.executemany(
         "UPDATE skill_stats SET paired_utility = ? WHERE name = ?",
         [(v, n) for n, v in values.items()],
     )
     db.commit()
     return sum(v is not None for v in values.values())
+
+
+def _compute(
+    rows: list[tuple], skills: list[str], min_sim: float, min_pairs: int,
+) -> dict[str, float | None]:
+    values: dict[str, float | None] = dict.fromkeys(skills)
+    if not rows:
+        return values
+    loaded = [set(json.loads(r[0])) for r in rows]
+    ok = np.array([r[1] == "ok" for r in rows], dtype=np.float32)
+    vecs = np.stack([np.frombuffer(r[2], dtype=np.float32) for r in rows])
+    vecs = vecs / np.maximum(np.linalg.norm(vecs, axis=1, keepdims=True), 1e-9)
+    for name in skills:
+        values[name] = _paired(name, loaded, ok, vecs, min_sim, min_pairs)
+    return values
 
 
 def _paired(

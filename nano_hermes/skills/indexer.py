@@ -437,10 +437,8 @@ class SkillIndexer:
         id_to_name = {r[0]: r[1] for r in stat_rows}
         id_to_stats = {r[0]: (r[2], r[3]) for r in stat_rows}  # id → (use_count, success_count)
         id_to_skip = {r[0]: np.frombuffer(r[4], dtype=np.float32) for r in stat_rows if r[4]}
-        paired = (
-            {r[0]: r[5] for r in stat_rows if r[5] is not None}
-            if cfg is not None and cfg.paired_utility_enabled else {}
-        )
+        paired_on = cfg is not None and cfg.paired_utility_enabled
+        paired = {r[0]: r[5] for r in stat_rows if r[5] is not None} if paired_on else {}
         query_f32 = query_vec.astype(np.float32)
         query_norm = float(np.linalg.norm(query_f32)) or 1.0
 
@@ -472,8 +470,11 @@ class SkillIndexer:
 
             if ranking_mode == "ucb1":
                 success_rate = success_count / use_count if use_count > 0 else 0.0
-                if skill_id in paired:  # matched with/without, in [-1, 1]
-                    success_rate = 0.5 + paired[skill_id] / 2
+                if paired_on:
+                    # One scale for all: lift over matched sessions in [-1, 1]
+                    # → [0, 1]; a skill with no pairs yet is neutral (0.5),
+                    # not its raw rate, which the pairing exists to distrust.
+                    success_rate = 0.5 + paired.get(skill_id, 0.0) / 2
                 # Exploration bonus: large for cold-start skills, decays as
                 # skill_uses grows relative to total_uses.
                 exploration = math.sqrt(
