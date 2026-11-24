@@ -438,6 +438,12 @@ class SessionArchiver:
         # Pending background embedding tasks — retained so asyncio
         # doesn't GC them mid-flight.
         self._embed_tasks: set[asyncio.Task] = set()
+        # One background embed in flight per loop. Unbounded, a burst of turns
+        # queued hundreds of requests in httpx's 4-connection pool: its
+        # per-request scan of the queue went quadratic (60 s turns on a Pi
+        # 3B+), and pool waits counted against the timeout, so a foreground
+        # embed timed out and benched a healthy provider for 10 min.
+        self._embed_gate: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -796,8 +802,11 @@ class SessionArchiver:
         self, chunk_ids: list[int], texts: list[str], task_ctx: str | None = None
     ) -> None:
         embed_texts = [add_context_preamble(t, task_ctx) for t in texts]
+        loop = asyncio.get_running_loop()
+        if self._embed_gate is None or self._embed_gate[0] is not loop:
+            self._embed_gate = (loop, asyncio.Semaphore(1))
         try:
-            async with self._embedder_factory() as chain:
+            async with self._embed_gate[1], self._embedder_factory() as chain:
                 vecs = await chain.embed(embed_texts)
         except AllProvidersFailed as e:
             log.warning("embed batch (%d chunks) skipped: %s", len(chunk_ids), e)

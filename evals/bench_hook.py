@@ -12,9 +12,9 @@ and RSS on top of an already-imported nanobot.
 Run **one shape per process** and repeat it: running several shapes in one
 process measured nothing reproducible in earlier audits. Numbers from a Pi
 3B+ replace the x26 desktop extrapolation the audits have had to use.
-Embedding providers are not called (no keys needed), so with the default
-config — where embeddings run in background tasks — the hook time is what the
-turn pays. Settings that embed on iteration 0 (``skill_stats.cheatsheet_enabled``,
+Embedding providers are called only when their API keys are set; then the
+background embeds share the event loop and their parsing shows in the hook
+time, as it would in the gateway. Unset the keys to time the hook alone. Settings that embed on iteration 0 (``skill_stats.cheatsheet_enabled``,
 ``trajectory.inject_context``, ``reflection_scope="global"``) add one embedding
 round trip per turn on top of these numbers.
 """

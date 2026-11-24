@@ -253,3 +253,33 @@ class TestSessionEndedAt:
         assert hook.db.execute(
             "SELECT COUNT(*) FROM chunks WHERE session_id = ?", (old_id,)
         ).fetchone()[0] == 0
+
+
+async def test_background_embeds_run_one_at_a_time(loop: AgentLoop) -> None:
+    """A burst of turns must not flood the 4-connection HTTP pool: its queue
+    scan went quadratic and pool waits timed out foreground embeds."""
+    import asyncio
+
+    hook = nano_hermes.install(loop)
+    live = peak = 0
+
+    class _Chain:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def embed(self, texts):
+            nonlocal live, peak
+            live += 1
+            peak = max(peak, live)
+            await asyncio.sleep(0.01)
+            live -= 1
+            return [np.zeros(hook.config.embedding.native_dims, dtype=np.float32) for _ in texts]
+
+    hook.archiver._embedder_factory = _Chain
+    for i in range(5):
+        hook.archiver._schedule_embed([], [f"t{i}"])
+    await hook.archiver.drain()
+    assert peak == 1
