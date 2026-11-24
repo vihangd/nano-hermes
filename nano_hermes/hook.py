@@ -75,12 +75,17 @@ def _call_events(context: AgentHookContext) -> list[tuple[Any, dict]]:
     if len(calls) == len(events):
         return [(tc, ev) for tc, ev in zip(calls, events)
                 if ev.get("name", getattr(tc, "name", None)) == getattr(tc, "name", None)]
-    # Interrupted batch: an event pairs with the one call of its name, if unique.
-    by_name: dict[str, list] = {}
+    # Interrupted batch: finished calls report in order, so an event pairs
+    # with the next unpaired call of its name.
+    by_name: dict[Any, list] = {}
     for tc in calls:
         by_name.setdefault(getattr(tc, "name", None), []).append(tc)
-    return [(by_name[ev["name"]][0], ev) for ev in events
-            if len(by_name.get(ev.get("name"), ())) == 1]
+    out = []
+    for ev in events:
+        queue = by_name.get(ev.get("name")) if ev.get("name") else None
+        if queue:
+            out.append((queue.pop(0), ev))
+    return out
 
 
 class NanoHermesHook(AgentHook):

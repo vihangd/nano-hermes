@@ -89,6 +89,20 @@ def _raw_description(md: str) -> str:
     return d.group(1).strip() if d else ""
 
 
+def _folded(raw: str) -> str:
+    """A raw value wrapped onto indented lines, as YAML reads it (one line);
+    *raw* itself when it isn't a valid scalar ("Not for: b.")."""
+    if "\n" not in raw:
+        return raw
+    try:
+        import yaml  # noqa: PLC0415 — nanobot's own dependency
+
+        value = yaml.safe_load(f"d: {raw}")["d"]
+        return value if isinstance(value, str) else raw
+    except Exception:  # noqa: BLE001
+        return raw
+
+
 def _yaml_scalar(description: str) -> str:
     """*description* as a YAML value that reads back as written: plain when
     it already does, else double-quoted (an unquoted ": " or " #" would change
@@ -131,7 +145,7 @@ def render_skill(
         raw = _raw_description(body + "\n")
         # The model's own line is checked like a caller's ("Not for: b." is
         # invalid YAML); a block scalar indicator stays as written.
-        description = description or (raw if raw[:1] in (">", "|") else _yaml_scalar(raw))
+        description = description or (raw if raw[:1] in (">", "|") else _yaml_scalar(_folded(raw)))
         body = body[m.end():].strip()
     if existing:
         description = description or _raw_description(existing)

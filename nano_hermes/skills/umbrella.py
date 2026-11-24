@@ -101,7 +101,9 @@ def _write_umbrella(hook: "NanoHermesHook", name: str, description: str, body: s
     path = hook.workspace / "skills" / name / "SKILL.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     from ..governance.write_approval import render_skill  # noqa: PLC0415
-    atomic_write_text(path, render_skill(name, description, body))
+    # A sibling's name reused: its other frontmatter keys stay, as on approve.
+    existing = path.read_text(encoding="utf-8") if path.exists() else None
+    atomic_write_text(path, render_skill(name, description, body, existing))
 
 
 def _parse_merge(text: str) -> dict | None:

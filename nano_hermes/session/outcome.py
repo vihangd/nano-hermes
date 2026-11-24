@@ -42,7 +42,9 @@ _STOP_PHRASE = (
     r"let'?s|we\s+can|you\s+can|can\s+you|could\s+you)\b[,.!]?\s*)*"
     r"(?:stop|cancel|abort|halt|never\s*mind|nvm|forget\s+(?:it|about\s+it)|"
     r"that'?s\s+enough)"
-    r"(?:\s+(?:it|that|this|here|there|now|please|the\s+goal|working(?:\s+on)?|for\s+now))*"
+    # Courtesy may follow, after a comma too: "ok stop thanks", "stop, thanks".
+    r"(?:[,.!]?\s+(?:it|that|this|here|there|now|please|pls|thanks?|thank\s+you|thx|"
+    r"(?:the|this)\s+goal|working(?:\s+on)?|for\s+now))*"
 )
 # Only stop phrases may follow a comma: "stop, never mind" stops, but
 # "stop, use the other API instead" redirects.

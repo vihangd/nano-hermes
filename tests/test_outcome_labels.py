@@ -438,6 +438,11 @@ async def _block_after(hook, user_text, key):
     ("let's stop", "cancel"),
     ("thanks, that's enough", "cancel"),
     ("let's stop using X", "block"),
+    ("ok stop thanks", "cancel"),
+    ("stop, thanks", "cancel"),
+    ("stop now, thanks!", "cancel"),
+    ("that's enough, thank you", "cancel"),
+    ("please stop working on this goal", "cancel"),
 ])
 async def test_user_stop_blocks_the_goal_without_failing_it(tmp_path, text, goal):
     """Past nanobot 0.4.1 only the user can cancel; the agent blocks when asked
@@ -479,3 +484,15 @@ async def test_hidden_runner_continuation_is_not_a_user_turn(tmp_path):
     await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs, session_key="k"))
     assert hook._reflection_coord._conv("k").turns_since_save == 2
     assert list(st.reactions) == ["positive"]
+
+
+def test_interrupted_batch_pairs_repeated_names_in_order():
+    """Two read_file calls, the second interrupted: the first still pairs."""
+    from nano_hermes.hook import _call_events
+
+    a = SimpleNamespace(name="read_file", arguments={"path": "skills/a/SKILL.md"})
+    b = SimpleNamespace(name="read_file", arguments={"path": "skills/b/SKILL.md"})
+    c = SimpleNamespace(name=None, arguments={})
+    ev = {"name": "read_file", "status": "ok"}
+    ctx = AgentHookContext(iteration=0, messages=[], tool_calls=[a, b, c], tool_events=[ev, {}])
+    assert _call_events(ctx) == [(a, ev)]

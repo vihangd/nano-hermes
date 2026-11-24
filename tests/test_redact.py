@@ -232,6 +232,7 @@ class TestRedactionResult:
     ("redis://:my#pass@host", "my#pass", "url_userinfo"),
     ("postgres://admin:Pa?ss@db:5432/x", "Pa?ss", "url_userinfo"),
     ("Authorization: Bearer abc123", "abc123", "auth_header"),
+    ("curl -H 'Authorization: Bearer abcdefgh'", "abcdefgh", "auth_header"),
     ("authorization: bearer 9f8e7d6c5b4a3210", "9f8e7d6c5b4a3210", "auth_header"),
     ("Authorization: token abc123def456", "abc123def456", "auth_header"),
     # hermes 4c7af743b1, fb6f8bc91c

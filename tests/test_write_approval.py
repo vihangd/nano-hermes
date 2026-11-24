@@ -379,6 +379,11 @@ def test_render_skill_quotes_the_models_own_description():
     assert yaml.safe_load(md.split("---\n")[1])["description"] == "Does a. Not for: b."
 
 
+def test_render_skill_folds_a_wrapped_model_description():
+    md = wa.render_skill("s", "", "---\nname: s\ndescription: Does X\n  and Y. Not for Z.\n---\nbody", None)
+    assert "description: Does X and Y. Not for Z.\n" in md
+
+
 def test_render_skill_ignores_keys_the_model_adds():
     md = wa.render_skill("s", "", "---\nname: s\ndescription: d\nalways: true\n---\nbody", None)
     assert "always" not in md

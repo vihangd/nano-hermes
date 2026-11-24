@@ -77,6 +77,18 @@ class TestClustering:
         assert clusters == []  # only one eligible candidate left
 
 
+async def test_reused_sibling_name_keeps_frontmatter_keys(tmp_path):
+    hook = _make_hook(_make_loop(tmp_path))
+    _seed(hook, "web-fetch", _unit(0))
+    _seed(hook, "web-get", _unit(0))
+    p = hook.workspace / "skills" / "web-fetch" / "SKILL.md"
+    p.write_text("---\nname: web-fetch\ndescription: d\nalways: true\n---\n\nb\n")
+    _mock_merge(hook, '{"name": "web-fetch", "description": "web access",'
+                      ' "body": "## fetch", "absorbed": ["web-fetch", "web-get"]}')
+    assert await run_umbrella_merge(hook) == ["web-fetch"]
+    assert "always: true" in p.read_text()
+
+
 class TestMerge:
     async def test_disabled_returns_empty(self, tmp_path):
         loop = _make_loop(tmp_path)

@@ -75,9 +75,12 @@ _JSON_FIELD_RE = re.compile(
 # or 16+ chars, so prose ("token required for this", "Basic auth") stays.
 # A placeholder ($API_TOKEN, {token}, <key>) is not a secret.
 _AUTH_HEADER_RE = re.compile(
-    r"((?:Proxy-)?Authorization:[ \t]*"
-    r"(?:(?:Bearer|Basic|Digest|Token|Bot|Negotiate|NTLM|ApiKey)[ \t]+)?)"
-    r"(?![$%{<])(?=[^\s\"']*[\d=_\-./+]|[^\s\"']{16})([^\s\"']{6,})",
+    # After Bearer/Basic any 6+ char credential; otherwise the value must look
+    # like a token ("Authorization: token required for this endpoint" is prose).
+    r"((?:Proxy-)?Authorization:[ \t]*(?:(?:Bearer|Basic)[ \t]+(?![$%{<])|"
+    r"(?:(?:Digest|Token|Bot|Negotiate|NTLM|ApiKey)[ \t]+)?"
+    r"(?![$%{<])(?=[^\s\"']*[\d=_\-./+]|[^\s\"']{16})))"
+    r"([^\s\"']{6,})",
     re.IGNORECASE,
 )
 

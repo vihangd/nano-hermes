@@ -108,6 +108,17 @@ async def test_a_differentiated_skill_is_not_redone(tmp_path, refresh):
     assert chat.call_count == 1
 
 
+async def test_ungated_rewrite_saves_a_version(tmp_path):
+    hook, _ = _setup(tmp_path, _PAIR)
+    await _index(hook, _PAIR)
+    _reply(hook, _NEW)
+    await run_differentiation(hook)
+    row = hook.db.execute(
+        "SELECT body, reason FROM skill_versions WHERE skill_name = 'zorb-report'"
+    ).fetchone()
+    assert "Build zorblax reports" in row[0] and "differentiate" in row[1]
+
+
 async def test_far_neighbour_needs_no_call(tmp_path):
     skills = {"zorb": ("Build zorblax reports", "agent"), "quux": ("Run quuxify jobs", "user")}
     hook, _ = _setup(tmp_path, skills)

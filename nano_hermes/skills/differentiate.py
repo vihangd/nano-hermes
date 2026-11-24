@@ -184,6 +184,11 @@ async def run_differentiation(hook: "NanoHermesHook") -> list[str]:
             descriptions[name] = new
             done.append(name)
             continue
+        from .rewriter import save_skill_version  # noqa: PLC0415
+        path = hook.workspace / "skills" / name / "SKILL.md"
+        save_skill_version(
+            hook.db, name, path.read_text(encoding="utf-8"), f"differentiate from {neighbour}"
+        )
         result = await tool._edit(
             skill_name=name, description=new, body=body, files=[], delete_files=[],
             redaction_note=" [differentiated]",
