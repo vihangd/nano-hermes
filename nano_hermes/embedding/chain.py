@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import base64
 import os
 import ssl
 import time
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-def _embeddings_in_index_order(data: dict) -> list[list[float]]:
+def _embeddings_in_index_order(data: dict, n: int | None = None) -> list:
     """Extract embeddings from an OpenAI-compatible response in input order.
 
     The response carries a per-row ``index`` because array order is not
@@ -38,7 +39,22 @@ def _embeddings_in_index_order(data: dict) -> list[list[float]]:
     misbind every vector to the wrong text. Sort by ``index`` to prevent that.
     """
     rows = sorted(data["data"], key=lambda row: row.get("index", 0))
-    return [row["embedding"] for row in rows]
+    # A short batch would misbind vectors (callers zip): fail over instead.
+    if n is not None and len(rows) != n:
+        raise ValueError(f"expected {n} embeddings, got {len(rows)}")
+    # base64 rows are little-endian float32; a provider ignoring the flag
+    # still sends floats.
+    import numpy as np  # noqa: PLC0415
+
+    return [
+        # astype: a writable, native-endian copy
+        np.frombuffer(base64.b64decode(e), dtype="<f4").astype(np.float32)
+        if isinstance(e, str) else e
+        for e in (row["embedding"] for row in rows)
+    ]
+
+
+_BASE64_BY_DEFAULT = frozenset({"deepinfra"})
 
 
 # OpenAI-compatible embedding endpoints.
@@ -178,7 +194,8 @@ class EmbeddingChain:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        payload = {"model": self.config.model, "input": texts}
+        fmt = p.encoding_format or ("base64" if p.provider in _BASE64_BY_DEFAULT else "float")
+        payload = {"model": self.config.model, "input": texts, "encoding_format": fmt}
         # A bare httpx timeout bounds each phase (connect, each read, pool
         # wait) separately, so a slow-dripping provider could hold a call for
         # several times timeout_seconds; aiohttp's was a total. wait_for
@@ -191,7 +208,7 @@ class EmbeddingChain:
             timeout=self.config.timeout_seconds,
         )
         r.raise_for_status()
-        return _embeddings_in_index_order(r.json())
+        return _embeddings_in_index_order(r.json(), len(texts))
 
     def _postprocess(self, raw: list[float]) -> np.ndarray:
         import numpy as np  # noqa: PLC0415

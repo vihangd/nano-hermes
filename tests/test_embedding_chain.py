@@ -46,6 +46,70 @@ class TestEmbeddingsInIndexOrder:
         assert _embeddings_in_index_order(data) == [[9.0], [8.0]]
 
 
+class TestBase64:
+    def test_base64_row_decodes_to_the_float_vector(self):
+        import base64
+
+        v = np.array([0.25, -1.5, 3.0], dtype="<f4")
+        data = {"data": [{"index": 0, "embedding": base64.b64encode(v.tobytes()).decode()},
+                         {"index": 1, "embedding": [0.25, -1.5, 3.0]}]}
+        a, b = _embeddings_in_index_order(data, 2)
+        assert np.array_equal(a, b) and a.flags.writeable
+
+    @pytest.mark.parametrize("rows", [[], [{"index": 0, "embedding": [1.0]}]])
+    def test_short_batch_raises(self, rows):
+        with pytest.raises(ValueError, match="expected 2 embeddings"):
+            _embeddings_in_index_order({"data": rows}, 2)
+
+    @pytest.mark.parametrize("provider, override, sent", [
+        ("deepinfra", None, "base64"),
+        ("openrouter", None, "float"),
+        ("together", None, "float"),
+        ("deepinfra", "float", "float"),
+    ])
+    @pytest.mark.asyncio
+    async def test_payload_encoding_format(self, monkeypatch, provider, override, sent):
+        import base64
+
+        import httpx
+
+        monkeypatch.setenv("K", "x")
+        seen = {}
+
+        def handler(request):
+            import json
+
+            seen.update(json.loads(request.content))
+            e = [1.0] * 8
+            if seen["encoding_format"] == "base64":
+                e = base64.b64encode(np.ones(8, dtype="<f4").tobytes()).decode()
+            return httpx.Response(200, json={"data": [{"index": 0, "embedding": e}]})
+
+        cfg = _config(provider)
+        cfg.chain = [EmbeddingProvider(provider=provider, api_key_env="K", encoding_format=override)]
+        chain = EmbeddingChain(config=cfg)
+        chain._session = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        vecs = await chain.embed(["a"])
+        assert seen["encoding_format"] == sent and vecs[0].shape == (4,)
+
+    @pytest.mark.asyncio
+    async def test_empty_data_fails_over(self, monkeypatch):
+        import httpx
+
+        monkeypatch.setenv("K", "x")
+
+        def handler(request):
+            if "openrouter" in str(request.url):
+                return httpx.Response(200, json={"data": []})
+            return httpx.Response(200, json={"data": [{"index": 0, "embedding": [1.0] * 8}]})
+
+        cfg = _config("openrouter", "together")
+        cfg.chain = [EmbeddingProvider(provider=p, api_key_env="K") for p in ("openrouter", "together")]
+        chain = EmbeddingChain(config=cfg)
+        chain._session = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        assert len(await chain.embed(["a"])) == 1
+
+
 def _config(*provider_names: str, target_dims: int = 4) -> EmbeddingConfig:
     """Build a tiny EmbeddingConfig with N fake providers."""
     chain = [
@@ -230,7 +294,7 @@ class TestTheHttpPath:
         assert [url.split("/")[2] for url, _, _ in seen] == [
             "api.deepinfra.com", "api.together.xyz"
         ]
-        assert seen[1][1] == {"model": "fake-model", "input": ["a", "b"]}
+        assert seen[1][1] == {"model": "fake-model", "input": ["a", "b"], "encoding_format": "float"}
         assert seen[1][2] == "Bearer k2"
         assert ("deepinfra", "fake-model") in chain_mod._unhealthy_until
         await client.aclose()

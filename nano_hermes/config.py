@@ -14,6 +14,10 @@ class EmbeddingProvider(BaseModel):
     provider: Literal["deepinfra", "together", "openrouter"]
     api_key_env: str
     base_url: str | None = None  # override the default OpenAI-compat endpoint
+    # None: base64 for deepinfra (verified; ~16x cheaper to parse than a JSON
+    # float list, which matters on a Pi), float elsewhere — OpenRouter returns
+    # empty data for base64 on some routes, Together is unverified.
+    encoding_format: Literal["float", "base64"] | None = None
 
 
 class EmbeddingConfig(BaseModel):
