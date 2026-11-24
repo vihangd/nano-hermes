@@ -420,6 +420,11 @@ class SessionArchiver:
         # (role, fingerprint) per message archived from a form the window
         # will not repeat — see _align.
         self._pending: dict[str | int, list[tuple[str, str]]] = {}
+        # Per key, the window a mid-turn pass last saw: (list, length, last
+        # message, its content), held by reference so no id is recycled.
+        # before_iteration at iteration > 0 sees what after_iteration just
+        # archived — 44% of passes, all no-ops.
+        self._last_window: dict[str | int, tuple] = {}
         # sessions.id → next turn_index. Per session and monotonic, because
         # ``chunks.turn_index`` is read back as transcript order
         # (``session/browse.py``) and as a turn count (``status/tool.py``); the
@@ -468,9 +473,19 @@ class SessionArchiver:
         not usable for the next pass. ``after_iteration`` is the only such
         caller; see the module docstring.
         """
+        key = session_key or id(messages)
+        seen = (messages, len(messages), messages[-1] if messages else None,
+                messages[-1].get("content") if messages else None)
+        last = self._last_window.get(key)
+        # A mid-turn pass confirms no fingerprints, so one over an unchanged
+        # window does nothing. Iteration 0's pass (a fresh window) always runs.
+        if (mid_turn and last is not None and seen[1] == last[1]
+                and seen[0] is last[0] and seen[2] is last[2] and seen[3] is last[3]):
+            return [], None
         chunk_ids, texts, session_id = self._archive(
             messages, session_key, mid_turn=mid_turn
         )
+        self._last_window[key] = seen
         if not chunk_ids:
             return [], None
         task_ctx = self._session_tasks.get(session_id) if session_id is not None else None
@@ -727,6 +742,7 @@ class SessionArchiver:
         """
         for idle in touch(self._fingerprints, key):
             self._pending.pop(idle, None)
+            self._last_window.pop(idle, None)
             idle_sid = self._session_ids.pop(idle, None)
             if idle_sid is not None:
                 self._session_tasks.pop(idle_sid, None)

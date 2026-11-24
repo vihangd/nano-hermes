@@ -1,6 +1,8 @@
 """Tests for session schema, search fallback, archiver, and session ended_at."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 import numpy as np
 
@@ -283,3 +285,49 @@ async def test_background_embeds_run_one_at_a_time(loop: AgentLoop) -> None:
         hook.archiver._schedule_embed([], [f"t{i}"])
     await hook.archiver.drain()
     assert peak == 1
+
+
+async def test_unchanged_mid_turn_window_skips_the_pass(loop: AgentLoop, monkeypatch) -> None:
+    """before_iteration at iteration > 0 sees what after_iteration archived."""
+    from nano_hermes.session import archiver as A
+
+    _unset_embedding_keys(monkeypatch)
+    hook = nano_hermes.install(loop)
+    calls = []
+    real = A._archivable
+    monkeypatch.setattr(A, "_archivable", lambda m, c=None: calls.append(1) or real(m, c))
+    msgs = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
+    hook.archiver.archive_and_embed(msgs, "k")
+    hook.archiver.archive_and_embed(msgs, "k")  # iteration 0 pass: always runs
+    assert len(calls) == 2
+    hook.archiver.archive_and_embed(msgs, "k", mid_turn=True)
+    assert len(calls) == 2  # unchanged
+    msgs.append({"role": "tool", "tool_call_id": "c", "content": "result text"})
+    ids, _ = hook.archiver.archive_and_embed(msgs, "k", mid_turn=True)
+    assert len(calls) == 3 and ids
+    msgs[-1]["content"] = "replaced"  # same message, new content: re-run
+    hook.archiver.archive_and_embed(msgs, "k", mid_turn=True)
+    assert len(calls) == 4
+    await hook.archiver.drain()
+
+
+async def test_retention_purge_runs_at_most_every_six_hours(loop: AgentLoop, monkeypatch) -> None:
+    import nano_hermes.hook as H
+
+    hook = nano_hermes.install(loop)
+    runs = []
+
+    async def fake_purge():
+        runs.append(1)
+
+    monkeypatch.setattr(hook, "_background_purge", fake_purge)
+    now = [1000.0]
+    monkeypatch.setattr(H.time, "monotonic", lambda: now[0])
+    msgs = [{"role": "user", "content": "hi"}]
+    for _ in range(2):
+        await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs, session_key="k"))
+        await asyncio.sleep(0)
+    now[0] += H._PURGE_INTERVAL_S
+    await hook.before_iteration(AgentHookContext(iteration=0, messages=msgs, session_key="k"))
+    await asyncio.sleep(0)
+    assert len(runs) == 2

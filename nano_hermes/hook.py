@@ -14,6 +14,7 @@ import asyncio
 import logging
 from contextvars import ContextVar
 import sqlite3
+import time
 from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext
@@ -55,6 +56,8 @@ log = logging.getLogger(__name__)
 
 # Meta-KV key tracking the last full VACUUM, for the purge cooldown gate.
 _META_LAST_VACUUM = "vacuum.last_run_at"
+# ponytail: constant; make it config if someone needs another cadence.
+_PURGE_INTERVAL_S = 6 * 3600
 # This run's live message list and what _inject added to it. A context
 # variable: nanobot awaits every hook of a run inline in the run's task, so it
 # is per-run with no session-key bookkeeping and dies with the task.
@@ -160,6 +163,7 @@ class NanoHermesHook(AgentHook):
 
         # Background purge task handle (retained so tests can await it).
         self._purge_task: asyncio.Task | None = None
+        self._last_purge: float | None = None
 
         # Evolution task handle — GEPA + rewriter, scheduled at session boundaries.
         self._evolution_task: asyncio.Task | None = None
@@ -437,7 +441,12 @@ class NanoHermesHook(AgentHook):
 
         # Schedule retention purge as a non-blocking background task on first iteration.
         if context.iteration == 0:
-            self._purge_task = asyncio.create_task(self._background_purge())
+            # Retention is in days: per message it cost a thread, a connection,
+            # a sqlite-vec load and the writer lock (~200 ms on a Pi 3B+).
+            now = time.monotonic()
+            if self._last_purge is None or now - self._last_purge >= _PURGE_INTERVAL_S:
+                self._last_purge = now
+                self._purge_task = asyncio.create_task(self._background_purge())
             self._curator_task = asyncio.create_task(self._background_curator())
 
         # Archive here, not only in after_iteration: on iteration 0 this window
